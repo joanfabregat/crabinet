@@ -3,6 +3,7 @@
 /web/coverage/
 /web/playwright-report/
 /web/test-results/
+/web/.index-e2e/
 /web/dist/*
 !/web/dist/.gitkeep
 /web/*.tsbuildinfo

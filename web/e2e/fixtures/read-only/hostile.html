@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+  <head>
+    <meta
+      http-equiv="refresh"
+      content="0;url=https://attacker.invalid/refresh"
+    />
+  </head>
+  <body onload="window.__indexHostileHtml = true">
+    <script>
+      document.cookie = "hostile=1";
+      localStorage.setItem("hostile", "1");
+      window.open("https://attacker.invalid/popup");
+      top.location = "https://attacker.invalid/navigation";
+      fetch("https://attacker.invalid/beacon");
+    </script>
+    <img
+      src="https://attacker.invalid/image"
+      onerror="alert(document.cookie)"
+    />
+    <form action="/api/v1/auth/logout" method="post">
+      <button>Sign out</button>
+    </form>
+    <svg onload="window.__indexSvgRan = true">
+      <script>
+        alert(1);
+      </script>
+    </svg>
+  </body>
+</html>

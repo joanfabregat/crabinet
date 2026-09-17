@@ -11,13 +11,17 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:e2e": "playwright test",
+    "screenshot:readme": "INDEX_UPDATE_README_SCREENSHOT=1 playwright test e2e/readme-screenshot.spec.ts --project=desktop-chromium",
     "typecheck": "tsc -b"
   },
   "dependencies": {
     "preact": "10.29.8"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
     "@preact/preset-vite": "2.10.6",
     "@types/babel__core": "7.20.5",
     "@testing-library/jest-dom": "6.9.1",

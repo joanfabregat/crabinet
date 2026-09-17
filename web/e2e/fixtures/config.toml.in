@@ -1,0 +1,45 @@
+version = 1
+
+[server]
+listen = "127.0.0.1:__PORT__"
+database_path = "__STATE_DIR__/sessions.sqlite3"
+session_secret_file = "__STATE_DIR__/session.key"
+max_upload_size = "1 MiB"
+max_preview_size = "256 KiB"
+auth_max_concurrent = 1
+session_idle_timeout_seconds = 60
+session_absolute_timeout_seconds = 300
+login_attempts_per_minute = 100
+max_sessions_per_user = 8
+max_sessions_total = 32
+
+[[users]]
+username = "reader"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=1$JS5QJkiyX+RuGn/gARkXpw$RW4nZLJO5e7NxpP2r7QvKpOyZsZQ/5VUbqspd7HCTvA"
+
+[[users]]
+username = "writer"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=1$JS5QJkiyX+RuGn/gARkXpw$RW4nZLJO5e7NxpP2r7QvKpOyZsZQ/5VUbqspd7HCTvA"
+
+[[shares]]
+id = "read-only"
+name = "Reference library"
+path = "__STATE_DIR__/read-only"
+read_only = true
+
+[[shares.grants]]
+user = "reader"
+permission = "read"
+
+[[shares.grants]]
+user = "writer"
+permission = "write"
+
+[[shares]]
+id = "writable"
+name = "Working files"
+path = "__STATE_DIR__/writable"
+
+[[shares.grants]]
+user = "writer"
+permission = "write"
