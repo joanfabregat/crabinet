@@ -1,0 +1,12 @@
+/target/
+/web/node_modules/
+/web/coverage/
+/web/playwright-report/
+/web/test-results/
+/web/dist/*
+!/web/dist/.gitkeep
+/web/*.tsbuildinfo
+*.db
+*.db-shm
+*.db-wal
+.env
