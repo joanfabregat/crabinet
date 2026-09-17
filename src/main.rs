@@ -117,7 +117,7 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
                 );
             }
             ConfiguredShare::new(share.name(), filesystem)
-                .context("invalid configured share display name")
+                .context("cannot construct configured share")
         })
         .collect::<Result<Vec<_>>>()?;
     let limits = BrowseLimits {

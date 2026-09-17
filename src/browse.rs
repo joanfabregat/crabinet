@@ -114,8 +114,6 @@ pub enum BrowseStateError {
     InvalidLimits,
     #[error("configured share display name is invalid")]
     InvalidDisplayName,
-    #[error("configured share temporary-file recovery failed")]
-    Recovery,
 }
 
 pub struct ConfiguredShare {
@@ -129,9 +127,6 @@ impl ConfiguredShare {
         if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
             return Err(BrowseStateError::InvalidDisplayName);
         }
-        filesystem
-            .recover_temporary_files(100_000)
-            .map_err(|_| BrowseStateError::Recovery)?;
         Ok(Self { name, filesystem })
     }
 
@@ -999,6 +994,24 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&bytes).expect("JSON response")
+    }
+
+    #[test]
+    fn configured_share_construction_does_not_repeat_startup_recovery() {
+        let root = TempDir::new().expect("temporary share");
+        let interrupted = root
+            .path()
+            .join(".index-tmp-00000000000000000000000000000000");
+        fs::write(&interrupted, b"incomplete").expect("interrupted write fixture");
+        let filesystem = ShareFs::open(
+            ShareId::new("documents").expect("share id"),
+            root.path(),
+        )
+        .expect("open share");
+
+        ConfiguredShare::new("Documents", filesystem).expect("configured share");
+
+        assert!(interrupted.exists());
     }
 
     #[tokio::test]
