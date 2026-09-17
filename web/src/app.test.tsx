@@ -67,6 +67,14 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
     directory: overrides.directory ?? vi.fn(async () => emptyPage),
+    preview:
+      overrides.preview ??
+      vi.fn(async () => ({
+        kind: "text" as const,
+        source: "",
+        size: 0,
+        truncated: false,
+      })),
   };
 }
 

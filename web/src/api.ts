@@ -40,6 +40,16 @@ export interface DirectoryPage {
   nextCursor?: string;
 }
 
+export type PreviewKind = "text" | "code" | "markdown_source" | "html_source";
+
+export interface PreviewDocument {
+  kind: PreviewKind;
+  source: string;
+  language?: string;
+  size: number;
+  truncated: boolean;
+}
+
 export type ApiErrorKind =
   | "unauthorized"
   | "forbidden"
@@ -92,6 +102,11 @@ export interface ApiClient {
     cursor?: string,
     signal?: AbortSignal,
   ): Promise<DirectoryPage>;
+  preview(
+    shareId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<PreviewDocument>;
 }
 
 interface ApiProblem {
@@ -205,7 +220,133 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         path,
       );
     },
+    preview: async (shareId, path, signal) => {
+      const url = previewApiUrl(shareId, path);
+      return parsePreviewDocument(
+        await request<unknown>(url, { signal }, true),
+      );
+    },
   };
+}
+
+const previewLanguages = new Set([
+  "c",
+  "cpp",
+  "css",
+  "go",
+  "html",
+  "java",
+  "javascript",
+  "json",
+  "jsx",
+  "kotlin",
+  "lua",
+  "markdown",
+  "php",
+  "python",
+  "ruby",
+  "rust",
+  "shell",
+  "sql",
+  "swift",
+  "toml",
+  "tsx",
+  "typescript",
+  "xml",
+  "yaml",
+]);
+
+const previewKinds = new Set<PreviewKind>([
+  "text",
+  "code",
+  "markdown_source",
+  "html_source",
+]);
+
+const maxPreviewBytes = 16 * 1024 * 1024;
+
+function parsePreviewDocument(value: unknown): PreviewDocument {
+  if (!isRecord(value)) throw invalidResponse();
+  const language = value.language === null ? undefined : value.language;
+  if (
+    typeof value.kind !== "string" ||
+    !previewKinds.has(value.kind as PreviewKind) ||
+    typeof value.source !== "string" ||
+    hasInvalidText(value.source) ||
+    typeof value.size !== "number" ||
+    !Number.isSafeInteger(value.size) ||
+    value.size < 0 ||
+    value.size > maxPreviewBytes ||
+    new TextEncoder().encode(value.source).byteLength !== value.size ||
+    typeof value.truncated !== "boolean" ||
+    (language !== undefined &&
+      (typeof language !== "string" || !previewLanguages.has(language))) ||
+    !previewLanguageMatchesKind(
+      value.kind as PreviewKind,
+      language as string | undefined,
+    )
+  ) {
+    throw invalidResponse();
+  }
+  return {
+    kind: value.kind as PreviewKind,
+    source: value.source as string,
+    size: value.size as number,
+    truncated: value.truncated as boolean,
+    ...(typeof language === "string" ? { language } : {}),
+  };
+}
+
+function previewLanguageMatchesKind(
+  kind: PreviewKind,
+  language: string | undefined,
+): boolean {
+  if (kind === "html_source") return language === "html";
+  if (kind === "markdown_source") return language === "markdown";
+  if (kind === "text") return language === undefined;
+  return language !== "html" && language !== "markdown";
+}
+
+function hasInvalidText(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (
+      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0xfffe ||
+      code === 0xffff
+    ) {
+      return true;
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function previewApiUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "preview");
+}
+
+export function htmlPreviewUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "preview/html");
+}
+
+export function downloadUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "download");
+}
+
+function fileApiUrl(shareId: string, path: string, action: string): string {
+  if (!isValidVirtualPath(path)) {
+    throw new ApiError("invalid-request", "The virtual path is invalid");
+  }
+  const query = new URLSearchParams({ path });
+  return `/api/v1/shares/${encodeURIComponent(shareId)}/${action}?${query.toString()}`;
 }
 
 function parseSession(value: unknown): Session {

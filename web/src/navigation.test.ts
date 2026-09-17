@@ -4,6 +4,7 @@ import {
   browserNavigation,
   directoryUrl,
   parentPath,
+  previewRouteUrl,
   routeFromUrl,
 } from "./navigation";
 
@@ -55,6 +56,27 @@ describe("browser navigation", () => {
     expect(parentPath("one/two/three")).toBe("one/two");
     expect(parentPath("one")).toBe("");
     expect(parentPath("")).toBe("");
+  });
+
+  it("round-trips preview deep links without putting file content in history", () => {
+    const href = previewRouteUrl("docs", "projects", "projects/README.md");
+    expect(href).toBe(
+      "/browse/docs?path=projects&preview=projects%2FREADME.md",
+    );
+    expect(routeFromUrl(new URL(href, "https://index.test"))).toEqual({
+      shareId: "docs",
+      path: "projects",
+      previewPath: "projects/README.md",
+    });
+  });
+
+  it("ignores an ambiguous preview path while keeping the directory route", () => {
+    const url = new URL("https://index.test/browse/docs?path=projects");
+    url.searchParams.set("preview", "../secret");
+    expect(routeFromUrl(url)).toEqual({ shareId: "docs", path: "projects" });
+    expect(previewRouteUrl("docs", "projects", "../secret")).toBe(
+      "/browse/docs?path=projects",
+    );
   });
 
   it("notifies subscribers when browser history restores a directory", () => {

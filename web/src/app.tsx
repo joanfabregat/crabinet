@@ -1,12 +1,15 @@
 import { type JSX } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import {
   ApiError,
   createApiClient,
+  downloadUrl,
+  htmlPreviewUrl,
   type ApiClient,
   type DirectoryEntry,
   type DirectoryPage,
+  type PreviewDocument,
   type Session,
   type Share,
 } from "./api";
@@ -14,9 +17,11 @@ import {
   browserNavigation,
   directoryUrl,
   parentPath,
+  previewRouteUrl,
   type BrowserNavigation,
   type BrowserRoute,
 } from "./navigation";
+import { SafeMarkdown } from "./safe-markdown";
 
 const defaultApi = createApiClient();
 
@@ -38,6 +43,11 @@ export function App({
   const [auth, setAuth] = useState<AuthState>({ status: "loading" });
   const [route, setRoute] = useState<BrowserRoute>(() => navigation.current());
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
+  const handleSessionExpired = useCallback(
+    () => setAuth({ status: "guest", reason: "expired" }),
+    [],
+  );
+  const handleSignedOut = useCallback(() => setAuth({ status: "guest" }), []);
 
   useEffect(() => navigation.subscribe(setRoute), [navigation]);
 
@@ -102,8 +112,8 @@ export function App({
       navigation={navigation}
       route={route}
       session={auth.session}
-      onSessionExpired={() => setAuth({ status: "guest", reason: "expired" })}
-      onSignedOut={() => setAuth({ status: "guest" })}
+      onSessionExpired={handleSessionExpired}
+      onSignedOut={handleSignedOut}
     />
   );
 }
@@ -350,6 +360,7 @@ function DirectoryBrowser({
   const [refreshKey, setRefreshKey] = useState(0);
   const loadMoreController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const previewTriggerRef = useRef<HTMLAnchorElement>();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -415,102 +426,131 @@ function DirectoryBrowser({
 
   const crumbs = breadcrumbItems(route.path);
 
+  const openPreview = (path: string, trigger: HTMLAnchorElement) => {
+    previewTriggerRef.current = trigger;
+    navigation.go({ shareId: share.id, path: route.path, previewPath: path });
+  };
+
+  const closePreview = () => {
+    navigation.go({ shareId: share.id, path: route.path });
+    requestAnimationFrame(() => previewTriggerRef.current?.focus());
+  };
+
   return (
-    <section class="directory-panel" aria-labelledby="directory-title">
-      <nav class="breadcrumbs" aria-label="Breadcrumb">
-        <ol>
-          <li>
-            <a
-              href={directoryUrl(share.id, "")}
-              aria-current={route.path === "" ? "page" : undefined}
-              onClick={(event) => {
-                event.preventDefault();
-                navigation.go({ shareId: share.id, path: "" });
-              }}
-            >
-              {share.name}
-            </a>
-          </li>
-          {crumbs.map((crumb, index) => (
-            <li key={crumb.path}>
-              <span aria-hidden="true">/</span>
+    <div class={`browser-workspace${route.previewPath ? " has-preview" : ""}`}>
+      <section class="directory-panel" aria-labelledby="directory-title">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <ol>
+            <li>
               <a
-                href={directoryUrl(share.id, crumb.path)}
-                aria-current={index === crumbs.length - 1 ? "page" : undefined}
+                href={directoryUrl(share.id, "")}
+                aria-current={route.path === "" ? "page" : undefined}
                 onClick={(event) => {
                   event.preventDefault();
-                  navigation.go({ shareId: share.id, path: crumb.path });
+                  navigation.go({ shareId: share.id, path: "" });
                 }}
               >
-                {crumb.name}
+                {share.name}
               </a>
             </li>
-          ))}
-        </ol>
-      </nav>
+            {crumbs.map((crumb, index) => (
+              <li key={crumb.path}>
+                <span aria-hidden="true">/</span>
+                <a
+                  href={directoryUrl(share.id, crumb.path)}
+                  aria-current={
+                    index === crumbs.length - 1 ? "page" : undefined
+                  }
+                  onClick={(event) => {
+                    event.preventDefault();
+                    navigation.go({ shareId: share.id, path: crumb.path });
+                  }}
+                >
+                  {crumb.name}
+                </a>
+              </li>
+            ))}
+          </ol>
+        </nav>
 
-      <div class="directory-heading">
-        <div>
-          <p class="eyebrow">Current folder</p>
-          <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
-            {crumbs.at(-1)?.name ?? share.name}
-          </h1>
+        <div class="directory-heading">
+          <div>
+            <p class="eyebrow">Current folder</p>
+            <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
+              {crumbs.at(-1)?.name ?? share.name}
+            </h1>
+          </div>
+          <Button
+            variant="secondary"
+            onClick={() => setRefreshKey((value) => value + 1)}
+          >
+            Refresh
+          </Button>
         </div>
-        <Button
-          variant="secondary"
-          onClick={() => setRefreshKey((value) => value + 1)}
-        >
-          Refresh
-        </Button>
-      </div>
 
-      <div class="sr-only" role="status" aria-live="polite">
-        {loading
-          ? "Loading folder"
-          : page
-            ? `${page.entries.length} items loaded`
-            : "Folder unavailable"}
-      </div>
+        <div class="sr-only" role="status" aria-live="polite">
+          {loading
+            ? "Loading folder"
+            : page
+              ? `${page.entries.length} items loaded`
+              : "Folder unavailable"}
+        </div>
 
-      {loading ? (
-        <DirectorySkeleton />
-      ) : error && !page ? (
-        <DirectoryError
-          error={error}
-          shareId={share.id}
-          path={route.path}
-          navigation={navigation}
-          retry={() => setRefreshKey((value) => value + 1)}
-        />
-      ) : page && page.entries.length === 0 ? (
-        <EmptyState
-          title="This folder is empty"
-          detail="There are no files or folders here."
-        />
-      ) : page ? (
-        <>
-          <EntryList
-            entries={page.entries}
+        {loading ? (
+          <DirectorySkeleton />
+        ) : error && !page ? (
+          <DirectoryError
+            error={error}
             shareId={share.id}
             path={route.path}
             navigation={navigation}
+            retry={() => setRefreshKey((value) => value + 1)}
           />
-          {error && (
-            <Notice tone="danger">
-              More items could not be loaded. The folder may have changed;
-              refresh and try again.
-            </Notice>
-          )}
-          {page.nextCursor && (
-            <div class="load-more">
-              <Button variant="secondary" busy={loadingMore} onClick={loadMore}>
-                {loadingMore ? "Loading…" : "Load more"}
-              </Button>
-            </div>
-          )}
-        </>
-      ) : null}
-    </section>
+        ) : page && page.entries.length === 0 ? (
+          <EmptyState
+            title="This folder is empty"
+            detail="There are no files or folders here."
+          />
+        ) : page ? (
+          <>
+            <EntryList
+              entries={page.entries}
+              shareId={share.id}
+              path={route.path}
+              navigation={navigation}
+              onOpenPreview={openPreview}
+            />
+            {error && (
+              <Notice tone="danger">
+                More items could not be loaded. The folder may have changed;
+                refresh and try again.
+              </Notice>
+            )}
+            {page.nextCursor && (
+              <div class="load-more">
+                <Button
+                  variant="secondary"
+                  busy={loadingMore}
+                  onClick={loadMore}
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </Button>
+              </div>
+            )}
+          </>
+        ) : null}
+      </section>
+      {route.previewPath && (
+        <PreviewPanel
+          key={`${share.id}:${route.previewPath}`}
+          api={api}
+          path={route.previewPath}
+          shareId={share.id}
+          onClose={closePreview}
+          onSessionExpired={onSessionExpired}
+        />
+      )}
+    </div>
   );
 }
 
@@ -519,11 +559,13 @@ function EntryList({
   shareId,
   path,
   navigation,
+  onOpenPreview,
 }: {
   entries: DirectoryEntry[];
   shareId: string;
   path: string;
   navigation: BrowserNavigation;
+  onOpenPreview: (path: string, trigger: HTMLAnchorElement) => void;
 }) {
   return (
     <div class="entry-list" role="list" aria-label="Folder contents">
@@ -553,7 +595,23 @@ function EntryList({
                   {entry.name}
                 </a>
               ) : (
-                <span class="entry-name">{entry.name}</span>
+                <a
+                  class="entry-name"
+                  href={previewRouteUrl(
+                    shareId,
+                    path,
+                    joinPath(path, entry.name),
+                  )}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    onOpenPreview(
+                      joinPath(path, entry.name),
+                      event.currentTarget,
+                    );
+                  }}
+                >
+                  {entry.name}
+                </a>
               )}
               <span class="entry-kind">
                 {entry.kind === "directory" ? "Folder" : "File"}
@@ -565,6 +623,349 @@ function EntryList({
       })}
     </div>
   );
+}
+
+interface PreviewPanelProps {
+  api: ApiClient;
+  path: string;
+  shareId: string;
+  onClose: () => void;
+  onSessionExpired: () => void;
+}
+
+type PreviewState =
+  | { status: "loading" }
+  | { status: "ready"; document: PreviewDocument }
+  | { status: "error"; error: ApiError };
+
+function PreviewPanel({
+  api,
+  path,
+  shareId,
+  onClose,
+  onSessionExpired,
+}: PreviewPanelProps) {
+  const [state, setState] = useState<PreviewState>({ status: "loading" });
+  const [refreshKey, setRefreshKey] = useState(0);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const filename = path.split("/").at(-1) ?? path;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ status: "loading" });
+    api.preview(shareId, path, controller.signal).then(
+      (document) => {
+        if (!controller.signal.aborted) setState({ status: "ready", document });
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted || isAborted(cause)) return;
+        if (isUnauthorized(cause)) {
+          onSessionExpired();
+          return;
+        }
+        setState({ status: "error", error: asApiError(cause) });
+      },
+    );
+    return () => controller.abort();
+  }, [api, onSessionExpired, path, refreshKey, shareId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => titleRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [path]);
+
+  return (
+    <aside class="preview-panel" aria-labelledby="preview-title">
+      <header class="preview-header">
+        <div class="preview-heading">
+          <p class="eyebrow">File preview</p>
+          <h2 id="preview-title" ref={titleRef} tabIndex={-1}>
+            {filename}
+          </h2>
+          <p class="preview-path" title={path}>
+            {path}
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={onClose}
+          aria-label={`Close preview of ${filename}`}
+        >
+          Close
+        </Button>
+      </header>
+
+      <div class="preview-actions" aria-label="File actions">
+        <a class="button button-secondary" href={downloadUrl(shareId, path)}>
+          Download file
+        </a>
+        {state.status === "ready" && state.document.kind === "html_source" && (
+          <a
+            class="button button-secondary"
+            href={htmlPreviewUrl(shareId, path)}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open HTML source in new tab
+          </a>
+        )}
+      </div>
+
+      <div class="preview-body">
+        {state.status === "loading" ? (
+          <p class="status-message" role="status" aria-live="polite">
+            Loading preview…
+          </p>
+        ) : state.status === "error" ? (
+          <PreviewErrorState
+            error={state.error}
+            retry={() => setRefreshKey((value) => value + 1)}
+          />
+        ) : (
+          <PreviewContent
+            document={state.document}
+            htmlSourceUrl={htmlPreviewUrl(shareId, path)}
+            filename={filename}
+          />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function PreviewContent({
+  document,
+  htmlSourceUrl,
+  filename,
+}: {
+  document: PreviewDocument;
+  htmlSourceUrl: string;
+  filename: string;
+}) {
+  if (document.kind === "html_source") {
+    return (
+      <div class="html-preview">
+        <Notice tone="warning">
+          HTML is shown as inert source. Scripts, forms, navigation, storage,
+          popups, and external requests are disabled.
+        </Notice>
+        <iframe
+          class="html-source-frame"
+          src={htmlSourceUrl}
+          sandbox=""
+          title={`Inert HTML source for ${filename}`}
+        />
+      </div>
+    );
+  }
+
+  if (document.kind === "markdown_source") {
+    return <MarkdownPreview document={document} />;
+  }
+
+  return <SourcePreview document={document} />;
+}
+
+function SourcePreview({ document }: { document: PreviewDocument }) {
+  const [wrap, setWrap] = useState(true);
+  return (
+    <div class="source-preview">
+      <div class="preview-options">
+        <span class="file-type-label">
+          {document.language ? `${document.language} source` : "Plain text"}
+        </span>
+        <Button
+          variant="secondary"
+          aria-pressed={wrap}
+          onClick={() => setWrap((value) => !value)}
+        >
+          {wrap ? "Disable line wrapping" : "Enable line wrapping"}
+        </Button>
+      </div>
+      {document.truncated && (
+        <Notice tone="warning">
+          This preview is truncated. Download the file to see all content.
+        </Notice>
+      )}
+      {document.source === "" ? (
+        <p class="preview-empty">This file is empty.</p>
+      ) : (
+        <pre
+          class={`source-code${wrap ? " source-code-wrap" : ""}`}
+          tabIndex={0}
+          aria-label="File source"
+        >
+          <code>{document.source}</code>
+        </pre>
+      )}
+      <p class="preview-size">{formatSize(document.size)}</p>
+    </div>
+  );
+}
+
+function MarkdownPreview({ document }: { document: PreviewDocument }) {
+  const [mode, setMode] = useState<"readable" | "source">("readable");
+  const readableTab = useRef<HTMLButtonElement>(null);
+  const sourceTab = useRef<HTMLButtonElement>(null);
+
+  const chooseMode = (next: "readable" | "source") => {
+    setMode(next);
+    requestAnimationFrame(() =>
+      (next === "readable" ? readableTab : sourceTab).current?.focus(),
+    );
+  };
+
+  const handleKeys = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "Home") {
+      event.preventDefault();
+      chooseMode("readable");
+    } else if (event.key === "ArrowRight" || event.key === "End") {
+      event.preventDefault();
+      chooseMode("source");
+    }
+  };
+
+  return (
+    <div class="markdown-preview">
+      <p class="preview-security-note">
+        Raw HTML, links, images, and embeds are displayed as text and are never
+        activated.
+      </p>
+      <div class="preview-tabs" role="tablist" aria-label="Markdown view">
+        <button
+          ref={readableTab}
+          type="button"
+          role="tab"
+          id="markdown-readable-tab"
+          aria-controls="markdown-readable-panel"
+          aria-selected={mode === "readable"}
+          tabIndex={mode === "readable" ? 0 : -1}
+          onClick={() => chooseMode("readable")}
+          onKeyDown={handleKeys}
+        >
+          Readable
+        </button>
+        <button
+          ref={sourceTab}
+          type="button"
+          role="tab"
+          id="markdown-source-tab"
+          aria-controls="markdown-source-panel"
+          aria-selected={mode === "source"}
+          tabIndex={mode === "source" ? 0 : -1}
+          onClick={() => chooseMode("source")}
+          onKeyDown={handleKeys}
+        >
+          Source
+        </button>
+      </div>
+      {mode === "readable" ? (
+        <div
+          id="markdown-readable-panel"
+          role="tabpanel"
+          aria-labelledby="markdown-readable-tab"
+          tabIndex={0}
+        >
+          {document.source === "" ? (
+            <p class="preview-empty">This file is empty.</p>
+          ) : (
+            <SafeMarkdown source={document.source} />
+          )}
+        </div>
+      ) : (
+        <div
+          id="markdown-source-panel"
+          role="tabpanel"
+          aria-labelledby="markdown-source-tab"
+          tabIndex={0}
+        >
+          <pre
+            class="source-code source-code-wrap"
+            aria-label="Markdown source"
+          >
+            <code>{document.source}</code>
+          </pre>
+        </div>
+      )}
+      {document.truncated && (
+        <Notice tone="warning">
+          This preview is truncated. Download the file to see all content.
+        </Notice>
+      )}
+    </div>
+  );
+}
+
+function PreviewErrorState({
+  error,
+  retry,
+}: {
+  error: ApiError;
+  retry: () => void;
+}) {
+  const detail = previewErrorDetail(error);
+  return (
+    <div class="preview-error" role="alert">
+      <h3>{detail.title}</h3>
+      <p>{detail.message}</p>
+      {detail.retry && <Button onClick={retry}>Try preview again</Button>}
+    </div>
+  );
+}
+
+function previewErrorDetail(error: ApiError): {
+  title: string;
+  message: string;
+  retry: boolean;
+} {
+  if (error.kind === "not-found") {
+    return {
+      title: "Preview no longer available",
+      message: "The file may have been deleted, moved, or changed.",
+      retry: true,
+    };
+  }
+  if (error.code === "preview_too_large" || error.status === 413) {
+    return {
+      title: "File is too large to preview",
+      message: "Download the file to view it with a local application.",
+      retry: false,
+    };
+  }
+  if (error.code === "binary_file") {
+    return {
+      title: "Binary preview is not supported",
+      message: "Download the file to open it safely.",
+      retry: false,
+    };
+  }
+  if (error.code === "invalid_utf8") {
+    return {
+      title: "Text encoding is not supported",
+      message: "This preview supports valid UTF-8 text only.",
+      retry: false,
+    };
+  }
+  if (error.code === "unsupported_entry") {
+    return {
+      title: "This item cannot be previewed",
+      message: "Only regular text files can be previewed.",
+      retry: false,
+    };
+  }
+  if (error.kind === "invalid-response") {
+    return {
+      title: "Preview response was invalid",
+      message:
+        "The file was not displayed because the server response was unsafe.",
+      retry: true,
+    };
+  }
+  return {
+    title: "We could not load this preview",
+    message: "The file may have changed. Check your connection and try again.",
+    retry: true,
+  };
 }
 
 function DirectoryError({

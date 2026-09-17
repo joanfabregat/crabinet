@@ -14,6 +14,8 @@ The JSON endpoint returns `{ kind, source, language, size, truncated }`. Source 
 
 The frontend may render Markdown only after using a reviewed parser configuration that disables raw HTML and a sanitizer that rejects dangerous URL schemes. Rendering must stay in a component that does not use unsanitized `innerHTML`. The backend source-only contract is the security boundary until that frontend work lands.
 
+The v1 frontend uses a smaller safe-readable projection instead of a general Markdown-to-HTML parser: it recognizes a fixed set of block structures and supplies all file content to Preact as text children. It does not create links, images, embeds, or attributes from source, so URL schemes and raw HTML are never activated. A source tab always exposes the exact returned text.
+
 ## HTML
 
 The dedicated HTML-source endpoint intentionally uses `Content-Type: text/plain; charset=utf-8`. It returns the exact validated UTF-8 source and does not parse or escape it into an HTML wrapper. Consequently scripts, event handlers, SVG payloads, forms, popups, meta refreshes, navigation, and network beacons are displayed as source and cannot run. This behavior is the same in an iframe and in a new tab.

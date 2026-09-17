@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ApiError, createApiClient } from "./api";
+import { ApiError, createApiClient, downloadUrl, htmlPreviewUrl } from "./api";
 
 describe("API client", () => {
   it("uses the versioned same-origin contract and encodes share and path values", async () => {
@@ -234,5 +234,94 @@ describe("API client", () => {
       createApiClient({ fetch }).directory("docs", "../escape"),
     ).rejects.toMatchObject({ kind: "invalid-request" });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("loads a runtime-validated preview through the same-origin API", async () => {
+    const source = "const payload = '<img onerror=alert(1)>';\n";
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "code",
+        source,
+        language: "javascript",
+        size: new TextEncoder().encode(source).byteLength,
+        truncated: false,
+      }),
+    );
+
+    await expect(
+      createApiClient({ fetch }).preview("team/a", "src/東京.js"),
+    ).resolves.toMatchObject({ kind: "code", source });
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/shares/team%2Fa/preview?path=src%2F%E6%9D%B1%E4%BA%AC.js",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("normalizes the backend's null language for plain text", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "text",
+        source: "plain",
+        language: null,
+        size: 5,
+        truncated: false,
+      }),
+    );
+
+    await expect(
+      createApiClient({ fetch }).preview("docs", "notes.txt"),
+    ).resolves.toEqual({
+      kind: "text",
+      source: "plain",
+      size: 5,
+      truncated: false,
+    });
+  });
+
+  it.each([
+    { kind: "active_html", source: "x", size: 1, truncated: false },
+    { kind: "code", source: "x", size: 2, truncated: false },
+    {
+      kind: "code",
+      source: "x",
+      size: 1,
+      truncated: false,
+      language: "made-up-language",
+    },
+    {
+      kind: "text",
+      source: "x",
+      size: 1,
+      truncated: false,
+      language: "rust",
+    },
+    {
+      kind: "html_source",
+      source: "x",
+      size: 1,
+      truncated: false,
+    },
+    { kind: "text", source: "bad\u0000text", size: 8, truncated: false },
+    { kind: "text", source: "bad\u0085text", size: 9, truncated: false },
+    null,
+    [],
+  ])("rejects a malformed preview document %#", async (body) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(Response.json(body));
+
+    await expect(
+      createApiClient({ fetch }).preview("docs", "file.txt"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it("builds only authenticated API URLs for HTML source and downloads", () => {
+    expect(htmlPreviewUrl("team/a", "pages/demo.html")).toBe(
+      "/api/v1/shares/team%2Fa/preview/html?path=pages%2Fdemo.html",
+    );
+    expect(downloadUrl("team/a", "pages/demo.html")).toBe(
+      "/api/v1/shares/team%2Fa/download?path=pages%2Fdemo.html",
+    );
+    expect(() => downloadUrl("docs", "../secret")).toThrow(ApiError);
   });
 });
