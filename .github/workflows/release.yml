@@ -319,6 +319,8 @@ jobs:
           IFS=. read -r major minor _patch <<<"${version%%[-+]*}"
           for arch in amd64 arm64; do
             skopeo copy \
+              --override-os linux \
+              --override-arch "${arch}" \
               --dest-creds "${GITHUB_ACTOR}:${GH_TOKEN}" \
               "oci-archive:images/index-${arch}.tar" \
               "docker://${IMAGE}:${RELEASE_TAG}-${arch}"
