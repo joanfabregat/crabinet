@@ -6,6 +6,7 @@ use index::{
     app::{AppState, router},
     config::Config,
     password::hash_confirmed,
+    preview::PreviewPolicy,
 };
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -67,9 +68,11 @@ async fn main() -> Result<()> {
     // Loading and validating every configured path is deliberately completed before the
     // listening socket is created. Invalid policy must never result in a partially started app.
     let config = Config::load(&cli.config).context("startup configuration is invalid")?;
+    let preview_policy = PreviewPolicy::new(config.server().max_preview_size())
+        .context("configured preview limit is unsafe")?;
     let listen = config.server().listen();
     let listener = TcpListener::bind(listen).await?;
-    let app = router(AppState::new(true));
+    let app = router(AppState::new(true).with_preview_policy(preview_policy));
 
     tracing::info!(%listen, config = %config.source().display(), "server listening");
     axum::serve(listener, app).await?;

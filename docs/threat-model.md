@@ -51,7 +51,7 @@ Configuration and mounted share roots are operator-trusted at startup. Filenames
 13. Logs, errors, test artifacts, and CI output exclude passwords, hashes, cookies, session IDs, secret contents, and file contents.
 14. Release images package the same tested binaries attached to the release; dependency and provenance evidence accompanies releases.
 
-The concrete path grammar, capability lifecycle, alias policy, platform assumptions, and authorization contract are specified in [Filesystem security boundary](filesystem-security.md).
+The concrete path grammar, capability lifecycle, alias policy, platform assumptions, and authorization contract are specified in [Filesystem security boundary](filesystem-security.md). Preview formats, size limits, response headers, and the source-only HTML decision are specified in [Preview security contract](previews.md).
 
 ## Threats and controls
 

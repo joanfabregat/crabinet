@@ -15,7 +15,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{assets, browse, error};
+use crate::{assets, browse, error, preview};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -24,6 +24,7 @@ const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 pub struct AppState {
     ready: Arc<AtomicBool>,
     browse: Arc<browse::BrowseState>,
+    preview_policy: preview::PreviewPolicy,
 }
 
 impl AppState {
@@ -31,6 +32,7 @@ impl AppState {
         Self {
             ready: Arc::new(AtomicBool::new(ready)),
             browse: Arc::new(browse::BrowseState::disabled()),
+            preview_policy: preview::PreviewPolicy::default(),
         }
     }
 
@@ -43,6 +45,17 @@ impl AppState {
     #[must_use]
     pub fn browse(&self) -> &browse::BrowseState {
         &self.browse
+    }
+
+    #[must_use]
+    pub fn with_preview_policy(mut self, policy: preview::PreviewPolicy) -> Self {
+        self.preview_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub const fn preview_policy(&self) -> preview::PreviewPolicy {
+        self.preview_policy
     }
 
     pub fn set_ready(&self, ready: bool) {
@@ -84,7 +97,9 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Health>, error::App
 }
 
 pub fn router(state: AppState) -> Router {
-    let api = browse::router().fallback(error::api_not_found);
+    let api = browse::router()
+        .merge(preview::router())
+        .fallback(error::api_not_found);
 
     Router::new()
         .route("/health/live", get(live))

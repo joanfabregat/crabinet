@@ -54,3 +54,23 @@ An anonymous or expired session returns `401`. `csrfToken` is held in memory and
 ## Browser routes
 
 Directory links use `/browse/{encodedShareId}?path={encodedRelativePath}`. The backend should serve the embedded application shell for `/` and `/browse/*`, while reserving `/api/v1/*` for JSON responses. Browser history and direct navigation therefore work without client-side routing dependencies.
+
+## Previews
+
+`GET /api/v1/shares/{shareId}/preview?path={path}` returns inert UTF-8 source data:
+
+```json
+{
+  "kind": "code",
+  "source": "fn main() {}\n",
+  "language": "rust",
+  "size": 13,
+  "truncated": false
+}
+```
+
+`kind` is `text`, `code`, `markdown_source`, or `html_source`. `language` is an optional fixed allowlisted hint. The server rejects oversized, invalid-UTF-8, binary, linked, and special files; it does not return truncated text. Markdown and HTML remain source data and must never be inserted into the application DOM as unsanitized HTML.
+
+`GET /api/v1/shares/{shareId}/preview/html?path={path}` is the dedicated HTML-source page. It returns the source as `text/plain; charset=utf-8` under an HTTP CSP `sandbox` and restrictive defense-in-depth headers. The frontend must embed it only in an iframe with an empty `sandbox` attribute. Opening this URL in a new tab remains inert because the response is plain text. Active uploaded HTML or JavaScript rendering is out of scope until a separate cookieless origin exists.
+
+Both endpoints authenticate and authorize every request. Missing grants and missing content are intentionally indistinguishable. See [Preview security contract](previews.md) for the complete response and isolation requirements.

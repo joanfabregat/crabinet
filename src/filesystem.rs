@@ -185,6 +185,12 @@ impl VirtualPath {
         self.0.iter()
     }
 
+    /// Returns the final validated component, or `None` for the explicit share root.
+    #[must_use]
+    pub fn file_name(&self) -> Option<&EntryName> {
+        self.0.last()
+    }
+
     fn split_file(&self) -> FsResult<(&[EntryName], &EntryName)> {
         self.0
             .split_last()
