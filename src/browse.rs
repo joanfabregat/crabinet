@@ -905,6 +905,7 @@ fn non_disclosing_fs_error(error: FsError) -> AppError {
         FsErrorCode::InvalidPath => AppError::InvalidRequest,
         FsErrorCode::AccessDenied
         | FsErrorCode::Conflict
+        | FsErrorCode::CrossDevice
         | FsErrorCode::NotFound
         | FsErrorCode::UnsupportedEntry => AppError::NotFound,
     }
