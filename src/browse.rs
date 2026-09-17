@@ -62,9 +62,7 @@ impl AuthenticatedIdentity {
 
     #[must_use]
     pub fn grant_for(&self, share_id: &ShareId) -> Option<&ShareGrant> {
-        self.grants
-            .iter()
-            .find(|grant| &grant.share_id == share_id)
+        self.grants.iter().find(|grant| &grant.share_id == share_id)
     }
 }
 
@@ -124,10 +122,7 @@ pub struct ConfiguredShare {
 }
 
 impl ConfiguredShare {
-    pub fn new(
-        name: impl Into<Arc<str>>,
-        filesystem: ShareFs,
-    ) -> Result<Self, BrowseStateError> {
+    pub fn new(name: impl Into<Arc<str>>, filesystem: ShareFs) -> Result<Self, BrowseStateError> {
         let name = name.into();
         if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
             return Err(BrowseStateError::InvalidDisplayName);
@@ -527,10 +522,8 @@ async fn download(
             .await
             .map_err(|_| AppError::Internal)?;
     }
-    let stream = ReaderStream::with_capacity(
-        file.take(response_len),
-        browse.limits.stream_chunk_bytes,
-    );
+    let stream =
+        ReaderStream::with_capacity(file.take(response_len), browse.limits.stream_chunk_bytes);
     let mut response = Response::builder()
         .status(status)
         .body(Body::from_stream(stream))
@@ -606,15 +599,7 @@ fn encode_cursor(
     bytes.push(CURSOR_VERSION);
     bytes.extend_from_slice(&offset.to_be_bytes());
     bytes.extend_from_slice(fingerprint);
-    let tag = cursor_tag(
-        key,
-        identity,
-        share_id,
-        path,
-        access,
-        offset,
-        fingerprint,
-    );
+    let tag = cursor_tag(key, identity, share_id, path, access, offset, fingerprint);
     bytes.extend_from_slice(&tag);
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -637,14 +622,8 @@ fn decode_cursor(
     if bytes.len() != CURSOR_BYTES || bytes[0] != CURSOR_VERSION {
         return Err(AppError::Conflict);
     }
-    let offset = u64::from_be_bytes(
-        bytes[1..9]
-            .try_into()
-            .map_err(|_| AppError::Conflict)?,
-    );
-    let fingerprint: [u8; 32] = bytes[9..41]
-        .try_into()
-        .map_err(|_| AppError::Conflict)?;
+    let offset = u64::from_be_bytes(bytes[1..9].try_into().map_err(|_| AppError::Conflict)?);
+    let fingerprint: [u8; 32] = bytes[9..41].try_into().map_err(|_| AppError::Conflict)?;
     if &fingerprint != current_fingerprint {
         return Err(AppError::Conflict);
     }
@@ -858,7 +837,10 @@ fn content_disposition(filename: &str) -> Result<HeaderValue, AppError> {
 }
 
 fn add_inert_headers(headers: &mut HeaderMap) {
-    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-cache"),
@@ -964,8 +946,8 @@ mod tests {
             share_id: id,
             access: AccessLevel::ReadWrite,
         };
-        let browse = BrowseState::new(vec![share], limits, policy, [0x5a; 32])
-            .expect("browse state");
+        let browse =
+            BrowseState::new(vec![share], limits, policy, [0x5a; 32]).expect("browse state");
         let app = app::router(AppState::new(true).with_browse(browse));
         let identity = AuthenticatedIdentity::new("user-1", vec![grant.clone()]);
         Fixture {
@@ -1004,9 +986,7 @@ mod tests {
         let response = send(
             &fixture.app,
             None,
-            Request::get("/api/v1/shares")
-                .body(Body::empty())
-                .unwrap(),
+            Request::get("/api/v1/shares").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1028,9 +1008,7 @@ mod tests {
         let response = send(
             &fixture.app,
             Some(&fixture.identity),
-            Request::get("/api/v1/shares")
-                .body(Body::empty())
-                .unwrap(),
+            Request::get("/api/v1/shares").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1040,16 +1018,12 @@ mod tests {
         assert_eq!(value["shares"][0]["name"], "Documents");
         assert_eq!(value["shares"][0]["access"], "read-write");
 
-        let read_only = fixture_with_policy(
-            BrowseLimits::default(),
-            GlobalPolicy { read_only: true },
-        );
+        let read_only =
+            fixture_with_policy(BrowseLimits::default(), GlobalPolicy { read_only: true });
         let response = send(
             &read_only.app,
             Some(&read_only.identity),
-            Request::get("/api/v1/shares")
-                .body(Body::empty())
-                .unwrap(),
+            Request::get("/api/v1/shares").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(json(response).await["shares"][0]["access"], "read");
@@ -1060,14 +1034,8 @@ mod tests {
         let fixture = fixture(BrowseLimits::default());
         let no_grants = AuthenticatedIdentity::new("user-2", vec![]);
         for (identity, uri) in [
-            (
-                &fixture.identity,
-                "/api/v1/shares/missing/directory?path=",
-            ),
-            (
-                &no_grants,
-                "/api/v1/shares/documents/directory?path=",
-            ),
+            (&fixture.identity, "/api/v1/shares/missing/directory?path="),
+            (&no_grants, "/api/v1/shares/documents/directory?path="),
         ] {
             let response = send(
                 &fixture.app,
@@ -1166,9 +1134,11 @@ mod tests {
             .iter()
             .position(|entry| entry["kind"] == "file")
             .expect("file entry");
-        assert!(root["entries"].as_array().unwrap()[..first_file]
-            .iter()
-            .all(|entry| entry["kind"] == "directory"));
+        assert!(
+            root["entries"].as_array().unwrap()[..first_file]
+                .iter()
+                .all(|entry| entry["kind"] == "directory")
+        );
 
         let first = send(
             &fixture.app,
@@ -1294,8 +1264,7 @@ mod tests {
 
         let replacement = fixture._root.path().join("replacement.txt");
         fs::write(&replacement, b"replacement").expect("replacement file");
-        fs::rename(&replacement, fixture._root.path().join("a.txt"))
-            .expect("atomic replacement");
+        fs::rename(&replacement, fixture._root.path().join("a.txt")).expect("atomic replacement");
         let changed = send(
             &fixture.app,
             Some(&fixture.identity),
@@ -1461,8 +1430,7 @@ mod tests {
         assert_eq!(empty_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(empty_range.headers()[header::CONTENT_RANGE], "bytes */0");
 
-        fs::write(fixture._root.path().join("changing.txt"), b"original")
-            .expect("original file");
+        fs::write(fixture._root.path().join("changing.txt"), b"original").expect("original file");
         let response = send(
             &fixture.app,
             Some(&fixture.identity),
@@ -1564,8 +1532,8 @@ mod tests {
                 fixture._root.path().join("link.txt"),
             )
             .unwrap();
-            let _socket = UnixListener::bind(fixture._root.path().join("socket"))
-                .expect("socket fixture");
+            let _socket =
+                UnixListener::bind(fixture._root.path().join("socket")).expect("socket fixture");
             for uri in [
                 "/api/v1/shares/documents/download?path=link.txt",
                 "/api/v1/shares/documents/text?path=link.txt",
@@ -1622,12 +1590,33 @@ mod tests {
 
     #[test]
     fn byte_range_parser_accepts_single_standard_forms_only() {
-        assert_eq!(parse_range(&HeaderValue::from_static("bytes=2-4"), 6), Some((2, 4)));
-        assert_eq!(parse_range(&HeaderValue::from_static("bytes=2-"), 6), Some((2, 5)));
-        assert_eq!(parse_range(&HeaderValue::from_static("bytes=-2"), 6), Some((4, 5)));
-        assert_eq!(parse_range(&HeaderValue::from_static("bytes=2-99"), 6), Some((2, 5)));
-        for invalid in ["bytes=6-", "bytes=4-2", "bytes=0-1,3-4", "items=0-1", "bytes=-0"] {
-            assert_eq!(parse_range(&HeaderValue::from_str(invalid).unwrap(), 6), None);
+        assert_eq!(
+            parse_range(&HeaderValue::from_static("bytes=2-4"), 6),
+            Some((2, 4))
+        );
+        assert_eq!(
+            parse_range(&HeaderValue::from_static("bytes=2-"), 6),
+            Some((2, 5))
+        );
+        assert_eq!(
+            parse_range(&HeaderValue::from_static("bytes=-2"), 6),
+            Some((4, 5))
+        );
+        assert_eq!(
+            parse_range(&HeaderValue::from_static("bytes=2-99"), 6),
+            Some((2, 5))
+        );
+        for invalid in [
+            "bytes=6-",
+            "bytes=4-2",
+            "bytes=0-1,3-4",
+            "items=0-1",
+            "bytes=-0",
+        ] {
+            assert_eq!(
+                parse_range(&HeaderValue::from_str(invalid).unwrap(), 6),
+                None
+            );
         }
     }
 
