@@ -31,6 +31,7 @@ use crate::{
     config::{Config, Permission},
     error::AppError,
     filesystem::{AccessLevel, ShareGrant, ShareId},
+    mutations::CsrfVerified,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -777,6 +778,7 @@ pub async fn require_state_change(
     let identity = auth.browse_identity(session.principal.username());
     request.extensions_mut().insert(session.principal);
     request.extensions_mut().insert(identity);
+    request.extensions_mut().insert(CsrfVerified(()));
     Ok(next.run(request).await)
 }
 

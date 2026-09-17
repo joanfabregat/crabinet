@@ -114,6 +114,8 @@ pub enum BrowseStateError {
     InvalidLimits,
     #[error("configured share display name is invalid")]
     InvalidDisplayName,
+    #[error("configured share temporary-file recovery failed")]
+    Recovery,
 }
 
 pub struct ConfiguredShare {
@@ -127,6 +129,9 @@ impl ConfiguredShare {
         if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
             return Err(BrowseStateError::InvalidDisplayName);
         }
+        filesystem
+            .recover_temporary_files(100_000)
+            .map_err(|_| BrowseStateError::Recovery)?;
         Ok(Self { name, filesystem })
     }
 
@@ -203,6 +208,18 @@ impl BrowseState {
             .filesystem
             .authorize(identity.grant_for(share_id), self.policy)
             .map_err(non_disclosing_fs_error)
+    }
+
+    /// Builds the same opaque validator returned by the metadata/read APIs.
+    /// Mutation handlers use it for `If-Match` without learning host paths.
+    #[must_use]
+    pub(crate) fn version_tag(
+        &self,
+        share_id: &ShareId,
+        path: &VirtualPath,
+        metadata: EntryMetadata,
+    ) -> String {
+        entry_etag(&self.cursor_key, share_id, path, metadata)
     }
 
     fn authorized<'state>(

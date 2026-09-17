@@ -7,6 +7,7 @@ pub mod browse;
 pub mod config;
 pub mod error;
 pub mod filesystem;
+pub mod mutations;
 pub mod password;
 pub mod preview;
 

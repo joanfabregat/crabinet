@@ -25,6 +25,8 @@ pub enum AppError {
     Conflict,
     #[error("request exceeds a configured limit")]
     TooLarge,
+    #[error("service is busy")]
+    Busy,
     #[error("resource is not valid UTF-8 text")]
     UnsupportedMedia,
     #[error("internal service error")]
@@ -81,6 +83,11 @@ impl AppError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "too_large",
                 "Request exceeds a configured limit",
+            ),
+            Self::Busy => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "Too many concurrent operations",
             ),
             Self::UnsupportedMedia => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,

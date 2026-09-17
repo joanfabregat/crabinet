@@ -16,7 +16,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{assets, auth, browse, error, preview};
+use crate::{assets, auth, browse, error, mutations, preview};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -27,6 +27,7 @@ pub struct AppState {
     browse: Arc<browse::BrowseState>,
     preview_policy: preview::PreviewPolicy,
     auth: Option<auth::AuthService>,
+    mutations: Arc<mutations::MutationState>,
 }
 
 impl AppState {
@@ -36,6 +37,7 @@ impl AppState {
             browse: Arc::new(browse::BrowseState::disabled()),
             preview_policy: preview::PreviewPolicy::default(),
             auth: None,
+            mutations: Arc::new(mutations::MutationState::default()),
         }
     }
 
@@ -57,6 +59,12 @@ impl AppState {
     }
 
     #[must_use]
+    pub fn with_mutations(mut self, mutations: mutations::MutationState) -> Self {
+        self.mutations = Arc::new(mutations);
+        self
+    }
+
+    #[must_use]
     pub const fn preview_policy(&self) -> preview::PreviewPolicy {
         self.preview_policy
     }
@@ -73,6 +81,11 @@ impl AppState {
 
     pub fn auth(&self) -> Option<&auth::AuthService> {
         self.auth.as_ref()
+    }
+
+    #[must_use]
+    pub fn mutations(&self) -> &mutations::MutationState {
+        &self.mutations
     }
 
     pub fn set_ready(&self, ready: bool) {
@@ -114,20 +127,28 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Health>, error::App
 }
 
 pub fn router(state: AppState) -> Router {
-    let protected = browse::router().merge(preview::router());
-    let protected = if state.auth().is_some() {
-        protected.route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_authentication,
-        ))
+    let reads = browse::router().merge(preview::router());
+    let writes = mutations::router(state.mutations().http_body_limit());
+    let (reads, writes) = if state.auth().is_some() {
+        (
+            reads.route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_authentication,
+            )),
+            writes.route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_state_change,
+            )),
+        )
     } else {
-        // Isolated handler tests inject a verified identity directly. Without one,
-        // the protected-route extractors still fail closed.
-        protected
+        // Isolated handler tests inject verified request extensions directly.
+        // Without them, every protected extractor still fails closed.
+        (reads, writes)
     };
     let api = Router::new()
         .merge(auth::router())
-        .merge(protected)
+        .merge(reads)
+        .merge(writes)
         .fallback(error::api_not_found);
 
     Router::new()

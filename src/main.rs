@@ -8,6 +8,7 @@ use index::{
     browse::{BrowseLimits, BrowseState, ConfiguredShare},
     config::Config,
     filesystem::{GlobalPolicy, ShareFs, ShareId},
+    mutations::MutationState,
     password::hash_confirmed,
     preview::PreviewPolicy,
 };
@@ -74,6 +75,8 @@ async fn main() -> Result<()> {
     let config = Config::load(&cli.config).context("startup configuration is invalid")?;
     let preview_policy = PreviewPolicy::new(config.server().max_preview_size())
         .context("configured preview limit is unsafe")?;
+    let mutation_state = MutationState::from_max_upload_bytes(config.server().max_upload_size())
+        .context("configured upload limit is unsafe")?;
     let browse = browse_state(&config).context("cannot initialize configured shares")?;
     let listen = config.server().listen();
     let auth = AuthService::from_config(&config).context("cannot initialize authentication")?;
@@ -82,6 +85,7 @@ async fn main() -> Result<()> {
         AppState::new(true)
             .with_browse(browse)
             .with_preview_policy(preview_policy)
+            .with_mutations(mutation_state)
             .with_auth_service(auth),
     );
 
@@ -102,6 +106,16 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
             let id = ShareId::new(share.id().to_owned()).context("invalid share identifier")?;
             let filesystem =
                 ShareFs::open(id, share.root()).context("cannot open configured share")?;
+            let recovered = filesystem
+                .recover_temporary_files(1_000_000)
+                .context("cannot recover interrupted share writes")?;
+            if recovered > 0 {
+                tracing::warn!(
+                    share_id = share.id(),
+                    recovered,
+                    "removed interrupted temporary files"
+                );
+            }
             ConfiguredShare::new(share.name(), filesystem)
                 .context("invalid configured share display name")
         })

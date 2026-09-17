@@ -26,6 +26,7 @@ use unicode_normalization::UnicodeNormalization;
 const MAX_COMPONENT_BYTES: usize = 255;
 const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
 const MAX_SHARE_ID_BYTES: usize = 64;
+const INTERNAL_TEMP_PREFIX: &str = ".index-tmp-";
 
 pub type FsResult<T> = Result<T, FsError>;
 
@@ -135,6 +136,7 @@ impl EntryName {
             || contains_percent_escape(&value)
             || !value.nfc().eq(value.chars())
             || is_windows_device_name(&value)
+            || value.starts_with(INTERNAL_TEMP_PREFIX)
         {
             return Err(FsError::new(FsErrorCode::InvalidPath));
         }
@@ -197,6 +199,18 @@ impl VirtualPath {
             .map(|(name, parents)| (parents, name))
             .ok_or_else(|| FsError::new(FsErrorCode::InvalidPath))
     }
+
+    #[must_use]
+    pub fn join(&self, name: EntryName) -> Self {
+        let mut components = self.0.clone();
+        components.push(name);
+        Self(components)
+    }
+
+    #[must_use]
+    pub fn starts_with(&self, other: &Self) -> bool {
+        self.0.starts_with(&other.0)
+    }
 }
 
 impl fmt::Display for VirtualPath {
@@ -250,6 +264,100 @@ pub struct EntryMetadata {
     pub size: u64,
     pub modified: Option<SystemTime>,
     pub(crate) file_id: u64,
+}
+
+/// A newly-created sibling temporary file. Dropping it before publication
+/// removes the temporary name, including when an async request is cancelled.
+pub struct PendingWrite {
+    parent: Dir,
+    temporary_name: String,
+    destination_name: EntryName,
+    file: File,
+    published: bool,
+}
+
+impl PendingWrite {
+    /// Returns a cloned standard handle suitable for `tokio::fs::File`.
+    pub fn writer(&self) -> FsResult<std::fs::File> {
+        self.file.try_clone().map(File::into_std).map_err(map_io)
+    }
+
+    pub fn publish_new(mut self) -> FsResult<()> {
+        validate_regular_handle(&self.file)?;
+        let expected = raw_file_metadata(&self.file)?;
+        self.file.sync_all().map_err(map_io)?;
+        rustix::fs::renameat_with(
+            &self.parent,
+            &self.temporary_name,
+            &self.parent,
+            self.destination_name.as_str(),
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| map_io(std::io::Error::from(error)))?;
+        if metadata_in_parent_raw(&self.parent, self.destination_name.as_str()) != Ok(expected) {
+            let _ = self.parent.remove_file(self.destination_name.as_str());
+            return Err(FsError::new(FsErrorCode::Conflict));
+        }
+        self.published = true;
+        sync_directory(&self.parent)
+    }
+
+    pub fn publish_replacement(mut self, expected: EntryMetadata) -> FsResult<()> {
+        validate_regular_handle(&self.file)?;
+        let replacement = raw_file_metadata(&self.file)?;
+        self.file.sync_all().map_err(map_io)?;
+        let current = metadata_in_parent(&self.parent, &self.destination_name)?;
+        if current != expected || current.kind != EntryKind::File {
+            return Err(FsError::new(FsErrorCode::Conflict));
+        }
+        rustix::fs::renameat_with(
+            &self.parent,
+            &self.temporary_name,
+            &self.parent,
+            self.destination_name.as_str(),
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(|error| map_io(std::io::Error::from(error)))?;
+        let valid_exchange = metadata_in_parent_raw(&self.parent, self.destination_name.as_str())
+            == Ok(replacement)
+            && metadata_in_parent_raw(&self.parent, &self.temporary_name) == Ok(expected);
+        if !valid_exchange {
+            rustix::fs::renameat_with(
+                &self.parent,
+                &self.temporary_name,
+                &self.parent,
+                self.destination_name.as_str(),
+                rustix::fs::RenameFlags::EXCHANGE,
+            )
+            .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
+            return Err(FsError::new(FsErrorCode::Conflict));
+        }
+        if let Err(error) = self.parent.remove_file(&self.temporary_name) {
+            let rollback = rustix::fs::renameat_with(
+                &self.parent,
+                &self.temporary_name,
+                &self.parent,
+                self.destination_name.as_str(),
+                rustix::fs::RenameFlags::EXCHANGE,
+            );
+            return if rollback.is_err() {
+                self.published = true;
+                Err(FsError::new(FsErrorCode::Unavailable))
+            } else {
+                Err(map_io(error))
+            };
+        }
+        self.published = true;
+        sync_directory(&self.parent)
+    }
+}
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = self.parent.remove_file(&self.temporary_name);
+        }
+    }
 }
 
 /// A validated regular-file handle whose authority is limited to one share.
@@ -358,6 +466,13 @@ impl ShareFs {
         let (parents, name) = path.split_file()?;
         Ok((self.open_directory(parents)?, name))
     }
+
+    /// Removes reserved temporary files left by a terminated process. The walk
+    /// never follows links and is bounded by `max_entries`.
+    pub fn recover_temporary_files(&self, max_entries: usize) -> FsResult<usize> {
+        let mut visited = 0_usize;
+        recover_directory(&self.root, &mut visited, max_entries, 0)
+    }
 }
 
 /// An authorization-bound view of one share. Cross-share moves are impossible
@@ -396,6 +511,9 @@ impl AuthorizedShare<'_> {
                 .file_name()
                 .into_string()
                 .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+            if is_internal_temp_name(&name) {
+                continue;
+            }
             let name =
                 EntryName::new(name).map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
             let metadata = entry.metadata().map_err(map_io)?;
@@ -465,14 +583,9 @@ impl AuthorizedShare<'_> {
     }
 
     pub fn create_file(&self, path: &VirtualPath, contents: &[u8]) -> FsResult<()> {
-        self.require_write()?;
-        let (parent, name) = self.share.open_parent(path)?;
-        let mut options = secure_file_options();
-        options.write(true).create_new(true);
-        let mut file = parent.open_with(name.as_str(), &options).map_err(map_io)?;
-        validate_regular_handle(&file)?;
-        file.write_all(contents).map_err(map_io)?;
-        file.sync_all().map_err(map_io)
+        let pending = self.begin_write(path)?;
+        pending.writer()?.write_all(contents).map_err(map_io)?;
+        pending.publish_new()
     }
 
     pub fn create_directory(&self, path: &VirtualPath) -> FsResult<()> {
@@ -480,10 +593,148 @@ impl AuthorizedShare<'_> {
         let (parent, name) = self.share.open_parent(path)?;
         parent.create_dir(name.as_str()).map_err(map_io)?;
         // Re-open without following so a concurrently substituted link is never accepted.
-        parent
-            .open_dir_nofollow(name.as_str())
-            .map(|_| ())
-            .map_err(map_io)
+        parent.open_dir_nofollow(name.as_str()).map_err(map_io)?;
+        sync_directory(&parent)
+    }
+
+    pub fn begin_write(&self, path: &VirtualPath) -> FsResult<PendingWrite> {
+        self.require_write()?;
+        let (parent, destination_name) = self.share.open_parent(path)?;
+        for _ in 0..16 {
+            let temporary_name = random_temporary_name()?;
+            let mut options = secure_file_options();
+            options.read(true).write(true).create_new(true);
+            match parent.open_with(&temporary_name, &options) {
+                Ok(file) => {
+                    validate_regular_handle(&file)?;
+                    return Ok(PendingWrite {
+                        parent,
+                        temporary_name,
+                        destination_name: destination_name.clone(),
+                        file,
+                        published: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(map_io(error)),
+            }
+        }
+        Err(FsError::new(FsErrorCode::Unavailable))
+    }
+
+    pub fn move_entry(
+        &self,
+        source: &VirtualPath,
+        destination: &VirtualPath,
+        expected: EntryMetadata,
+    ) -> FsResult<()> {
+        self.require_write()?;
+        if source == destination {
+            return Err(FsError::new(FsErrorCode::Conflict));
+        }
+        let current = self.metadata(source)?;
+        if current != expected {
+            return Err(FsError::new(FsErrorCode::Conflict));
+        }
+        if current.kind == EntryKind::Directory && destination.starts_with(source) {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+        let (source_parent, source_name) = self.share.open_parent(source)?;
+        let (destination_parent, destination_name) = self.share.open_parent(destination)?;
+        rustix::fs::renameat_with(
+            &source_parent,
+            source_name.as_str(),
+            &destination_parent,
+            destination_name.as_str(),
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| map_io(std::io::Error::from(error)))?;
+
+        match metadata_in_parent(&destination_parent, destination_name) {
+            Ok(moved) if moved == expected => {
+                sync_directory(&source_parent)?;
+                sync_directory(&destination_parent)
+            }
+            validation => {
+                let rollback = rustix::fs::renameat_with(
+                    &destination_parent,
+                    destination_name.as_str(),
+                    &source_parent,
+                    source_name.as_str(),
+                    rustix::fs::RenameFlags::NOREPLACE,
+                );
+                if rollback.is_err() {
+                    return Err(FsError::new(FsErrorCode::Unavailable));
+                }
+                validation.and_then(|_| Err(FsError::new(FsErrorCode::Conflict)))
+            }
+        }
+    }
+
+    pub fn delete_entry(&self, path: &VirtualPath, expected: EntryMetadata) -> FsResult<()> {
+        self.require_write()?;
+        let current = self.metadata(path)?;
+        if current != expected {
+            return Err(FsError::new(FsErrorCode::Conflict));
+        }
+        let (parent, name) = self.share.open_parent(path)?;
+        let staged_name = random_temporary_name()?;
+        rustix::fs::renameat_with(
+            &parent,
+            name.as_str(),
+            &parent,
+            &staged_name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| map_io(std::io::Error::from(error)))?;
+        let staged = metadata_in_parent_raw(&parent, &staged_name);
+        if staged.as_ref().is_err() || staged.as_ref().is_ok_and(|value| *value != expected) {
+            let rollback = rustix::fs::renameat_with(
+                &parent,
+                &staged_name,
+                &parent,
+                name.as_str(),
+                rustix::fs::RenameFlags::NOREPLACE,
+            );
+            return if rollback.is_err() {
+                Err(FsError::new(FsErrorCode::Unavailable))
+            } else {
+                Err(FsError::new(FsErrorCode::Conflict))
+            };
+        }
+        let removal = match expected.kind {
+            EntryKind::File => parent.remove_file(&staged_name),
+            EntryKind::Directory => parent.remove_dir(&staged_name),
+        };
+        if let Err(error) = removal {
+            let rollback = rustix::fs::renameat_with(
+                &parent,
+                &staged_name,
+                &parent,
+                name.as_str(),
+                rustix::fs::RenameFlags::NOREPLACE,
+            );
+            return if rollback.is_err() {
+                Err(FsError::new(FsErrorCode::Unavailable))
+            } else {
+                Err(map_io(error))
+            };
+        }
+        sync_directory(&parent)
+    }
+
+    pub fn usage_bounded(&self, max_entries: usize, max_bytes: u64) -> FsResult<u64> {
+        let mut entries = 0_usize;
+        let mut bytes = 0_u64;
+        measure_directory(
+            &self.share.root,
+            &mut entries,
+            max_entries,
+            &mut bytes,
+            max_bytes,
+            0,
+        )?;
+        Ok(bytes)
     }
 
     fn open_regular_file(&self, path: &VirtualPath, write: bool) -> FsResult<File> {
@@ -499,6 +750,176 @@ impl AuthorizedShare<'_> {
         (self.access == AccessLevel::ReadWrite)
             .then_some(())
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))
+    }
+}
+
+fn metadata_in_parent(parent: &Dir, name: &EntryName) -> FsResult<EntryMetadata> {
+    metadata_in_parent_raw(parent, name.as_str())
+}
+
+fn metadata_in_parent_raw(parent: &Dir, name: &str) -> FsResult<EntryMetadata> {
+    let mut options = secure_file_options();
+    options.read(true);
+    match parent.open_with(name, &options) {
+        Ok(file) => {
+            validate_regular_handle(&file)?;
+            raw_file_metadata(&file)
+        }
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(6) | Some(19) | Some(21) | Some(40)
+            ) =>
+        {
+            let directory = parent.open_dir_nofollow(name).map_err(map_io)?;
+            let metadata = directory.dir_metadata().map_err(map_io)?;
+            let kind = classify_metadata(&metadata)?;
+            (kind == EntryKind::Directory)
+                .then(|| entry_metadata(&metadata, kind))
+                .ok_or_else(|| FsError::new(FsErrorCode::UnsupportedEntry))
+        }
+        Err(error) => Err(map_io(error)),
+    }
+}
+
+fn raw_file_metadata(file: &File) -> FsResult<EntryMetadata> {
+    let metadata = file.metadata().map_err(map_io)?;
+    let kind = classify_metadata(&metadata)?;
+    (kind == EntryKind::File)
+        .then(|| entry_metadata(&metadata, kind))
+        .ok_or_else(|| FsError::new(FsErrorCode::UnsupportedEntry))
+}
+
+fn recover_directory(
+    directory: &Dir,
+    visited: &mut usize,
+    max_entries: usize,
+    depth: usize,
+) -> FsResult<usize> {
+    if depth > 256 {
+        return Err(FsError::new(FsErrorCode::TooLarge));
+    }
+    let mut removed = 0_usize;
+    let mut removed_here = false;
+    for entry in directory.entries().map_err(map_io)? {
+        *visited = visited
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+        if *visited > max_entries {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
+        let entry = entry.map_err(map_io)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+        let metadata = entry.metadata().map_err(map_io)?;
+        if is_internal_temp_name(&name) {
+            if !metadata.is_file() {
+                return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+            }
+            directory.remove_file(&name).map_err(map_io)?;
+            removed = removed
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+            removed_here = true;
+        } else if metadata.is_dir() {
+            let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
+            removed = removed
+                .checked_add(recover_directory(&child, visited, max_entries, depth + 1)?)
+                .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+        } else if !metadata.is_file() {
+            return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+        }
+    }
+    if removed_here {
+        sync_directory(directory)?;
+    }
+    Ok(removed)
+}
+
+fn measure_directory(
+    directory: &Dir,
+    entries: &mut usize,
+    max_entries: usize,
+    bytes: &mut u64,
+    max_bytes: u64,
+    depth: usize,
+) -> FsResult<()> {
+    if depth > 256 {
+        return Err(FsError::new(FsErrorCode::TooLarge));
+    }
+    for entry in directory.entries().map_err(map_io)? {
+        *entries = entries
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+        if *entries > max_entries {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
+        let entry = entry.map_err(map_io)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+        if is_internal_temp_name(&name) {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(map_io)?;
+        let kind = classify_metadata(&metadata)?;
+        assert_no_external_alias(&metadata, kind)?;
+        match kind {
+            EntryKind::Directory => {
+                let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
+                measure_directory(&child, entries, max_entries, bytes, max_bytes, depth + 1)?;
+            }
+            EntryKind::File => {
+                *bytes = bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+                if *bytes > max_bytes {
+                    return Err(FsError::new(FsErrorCode::TooLarge));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn random_temporary_name() -> FsResult<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
+    let mut name = String::with_capacity(INTERNAL_TEMP_PREFIX.len() + bytes.len() * 2);
+    name.push_str(INTERNAL_TEMP_PREFIX);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut name, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(name)
+}
+
+fn is_internal_temp_name(name: &str) -> bool {
+    name.strip_prefix(INTERNAL_TEMP_PREFIX)
+        .is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+fn sync_directory(directory: &Dir) -> FsResult<()> {
+    let descriptor = rustix::fs::openat(
+        directory,
+        ".",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| map_io(std::io::Error::from(error)))?;
+    match rustix::fs::fsync(descriptor) {
+        Ok(()) => Ok(()),
+        // Some container/overlay filesystems do not implement directory
+        // fsync. File contents are still synced before publication.
+        Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::InvalidInput => {
+            Ok(())
+        }
+        Err(error) => Err(map_io(std::io::Error::from(error))),
     }
 }
 
@@ -939,6 +1360,266 @@ mod tests {
                 .expect_err("invalid UTF-8 rejected")
                 .code(),
             FsErrorCode::UnsupportedEntry
+        );
+    }
+
+    #[test]
+    fn pending_writes_publish_atomically_and_clean_up_on_drop() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let created = VirtualPath::parse("created.txt").expect("path");
+        let pending = authorized.begin_write(&created).expect("temporary file");
+        let mut writer = pending.writer().expect("cloned writer");
+        writer.write_all(b"complete").expect("write temporary");
+        writer.sync_all().expect("sync temporary");
+        drop(writer);
+        assert!(!temporary.path().join("created.txt").exists());
+        pending.publish_new().expect("atomic publish");
+        assert_eq!(
+            fs::read(temporary.path().join("created.txt")).unwrap(),
+            b"complete"
+        );
+
+        let abandoned = authorized
+            .begin_write(&VirtualPath::parse("abandoned.txt").expect("path"))
+            .expect("temporary file");
+        let mut writer = abandoned.writer().expect("cloned writer");
+        writer.write_all(b"partial").expect("partial write");
+        drop(writer);
+        drop(abandoned);
+        assert!(!temporary.path().join("abandoned.txt").exists());
+        assert!(
+            fs::read_dir(temporary.path())
+                .unwrap()
+                .all(|entry| !is_internal_temp_name(&entry.unwrap().file_name().to_string_lossy()))
+        );
+    }
+
+    #[test]
+    fn replacement_requires_unchanged_metadata_and_conflicts_preserve_target() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let path = VirtualPath::parse("hello.txt").expect("path");
+        let expected = authorized.metadata(&path).expect("metadata");
+        let pending = authorized.begin_write(&path).expect("temporary file");
+        pending
+            .writer()
+            .expect("writer")
+            .write_all(b"replacement")
+            .expect("write replacement");
+        fs::write(temporary.path().join("hello.txt"), b"changed concurrently")
+            .expect("concurrent change");
+        assert_eq!(
+            pending
+                .publish_replacement(expected)
+                .expect_err("stale precondition")
+                .code(),
+            FsErrorCode::Conflict
+        );
+        assert_eq!(
+            fs::read(temporary.path().join("hello.txt")).unwrap(),
+            b"changed concurrently"
+        );
+    }
+
+    #[test]
+    fn moves_are_no_replace_and_deletes_are_non_recursive() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let source = VirtualPath::parse("hello.txt").expect("path");
+        let occupied = VirtualPath::parse("nested/inside.txt").expect("path");
+        let expected = authorized.metadata(&source).expect("metadata");
+        assert_eq!(
+            authorized
+                .move_entry(&source, &occupied, expected)
+                .expect_err("no overwrite")
+                .code(),
+            FsErrorCode::Conflict
+        );
+        assert_eq!(
+            fs::read(temporary.path().join("hello.txt")).unwrap(),
+            b"hello"
+        );
+
+        let destination = VirtualPath::parse("moved.txt").expect("path");
+        authorized
+            .move_entry(&source, &destination, expected)
+            .expect("move");
+        assert!(!temporary.path().join("hello.txt").exists());
+        assert_eq!(
+            fs::read(temporary.path().join("moved.txt")).unwrap(),
+            b"hello"
+        );
+
+        let directory = VirtualPath::parse("nested").expect("path");
+        let directory_metadata = authorized.metadata(&directory).expect("metadata");
+        assert_eq!(
+            authorized
+                .delete_entry(&directory, directory_metadata)
+                .expect_err("non-empty delete")
+                .code(),
+            FsErrorCode::Conflict
+        );
+        assert!(temporary.path().join("nested/inside.txt").exists());
+    }
+
+    #[test]
+    fn directory_cannot_move_into_itself_and_usage_is_bounded() {
+        let (_temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let source = VirtualPath::parse("nested").expect("path");
+        let destination = VirtualPath::parse("nested/child").expect("path");
+        let expected = authorized.metadata(&source).expect("metadata");
+        assert_eq!(
+            authorized
+                .move_entry(&source, &destination, expected)
+                .expect_err("self move")
+                .code(),
+            FsErrorCode::InvalidPath
+        );
+        assert_eq!(authorized.usage_bounded(10, 1024).expect("usage"), 11);
+        assert_eq!(
+            authorized
+                .usage_bounded(1, 1024)
+                .expect_err("entry limit")
+                .code(),
+            FsErrorCode::TooLarge
+        );
+    }
+
+    #[test]
+    fn startup_recovery_removes_only_reserved_regular_temporary_files() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let stale = format!("{INTERNAL_TEMP_PREFIX}{}", "a".repeat(32));
+        fs::write(temporary.path().join(&stale), b"partial").expect("stale temp");
+        fs::write(temporary.path().join("keep.txt"), b"keep").expect("regular file");
+        let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("open share");
+        assert_eq!(share.recover_temporary_files(10).expect("recover"), 1);
+        assert!(!temporary.path().join(stale).exists());
+        assert!(temporary.path().join("keep.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_source_substitution_cannot_publish_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let (temporary, share, _read, write) = fixture();
+        let outside = TempDir::new().expect("outside directory");
+        fs::write(outside.path().join("secret"), b"secret").expect("outside file");
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let destination = VirtualPath::parse("published.txt").expect("path");
+        let pending = authorized
+            .begin_write(&destination)
+            .expect("temporary file");
+        let temporary_name = pending.temporary_name.clone();
+        fs::remove_file(temporary.path().join(&temporary_name)).expect("unlink temp name");
+        symlink(
+            outside.path().join("secret"),
+            temporary.path().join(&temporary_name),
+        )
+        .expect("replace temp with symlink");
+        assert!(matches!(
+            pending
+                .publish_new()
+                .expect_err("substitution rejected")
+                .code(),
+            FsErrorCode::Conflict | FsErrorCode::UnsupportedEntry
+        ));
+        assert!(!temporary.path().join("published.txt").exists());
+        assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_and_destination_symlink_races_never_follow_outside_share() {
+        use std::os::unix::fs::symlink;
+
+        let (temporary, share, _read, write) = fixture();
+        let outside = TempDir::new().expect("outside directory");
+        fs::write(outside.path().join("secret"), b"secret").expect("outside file");
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let source = VirtualPath::parse("hello.txt").expect("source");
+        let destination = VirtualPath::parse("destination.txt").expect("destination");
+        let expected = authorized.metadata(&source).expect("metadata");
+        fs::remove_file(temporary.path().join("hello.txt")).expect("remove source");
+        symlink(
+            outside.path().join("secret"),
+            temporary.path().join("hello.txt"),
+        )
+        .expect("source symlink");
+        assert!(
+            authorized
+                .move_entry(&source, &destination, expected)
+                .is_err()
+        );
+        assert!(!temporary.path().join("destination.txt").exists());
+        assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
+
+        let delete_path = VirtualPath::parse("delete.txt").expect("delete path");
+        fs::write(temporary.path().join("delete.txt"), b"delete").expect("delete fixture");
+        let delete_expected = authorized.metadata(&delete_path).expect("metadata");
+        fs::remove_file(temporary.path().join("delete.txt")).expect("remove delete source");
+        symlink(
+            outside.path().join("secret"),
+            temporary.path().join("delete.txt"),
+        )
+        .expect("delete symlink");
+        assert!(
+            authorized
+                .delete_entry(&delete_path, delete_expected)
+                .is_err()
+        );
+        assert!(
+            temporary
+                .path()
+                .join("delete.txt")
+                .symlink_metadata()
+                .is_ok()
+        );
+        assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn concurrent_new_publications_have_one_deterministic_winner() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let path = VirtualPath::parse("winner.txt").expect("path");
+        let first = authorized.begin_write(&path).expect("first temp");
+        first
+            .writer()
+            .expect("first writer")
+            .write_all(b"first")
+            .expect("first write");
+        let second = authorized.begin_write(&path).expect("second temp");
+        second
+            .writer()
+            .expect("second writer")
+            .write_all(b"second")
+            .expect("second write");
+        first.publish_new().expect("first wins");
+        assert_eq!(
+            second.publish_new().expect_err("second conflicts").code(),
+            FsErrorCode::Conflict
+        );
+        assert_eq!(
+            fs::read(temporary.path().join("winner.txt")).unwrap(),
+            b"first"
         );
     }
 
