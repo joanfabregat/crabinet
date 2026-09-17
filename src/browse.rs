@@ -828,7 +828,7 @@ fn mime_for_path(path: &VirtualPath) -> String {
         .to_string()
 }
 
-fn content_disposition(filename: &str) -> Result<HeaderValue, AppError> {
+pub(crate) fn content_disposition(filename: &str) -> Result<HeaderValue, AppError> {
     let fallback: String = filename
         .chars()
         .map(|character| {
@@ -928,12 +928,16 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use proptest::prelude::*;
     use serde_json::Value;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{app, filesystem::ShareId};
+    use crate::{
+        app,
+        filesystem::{EntryName, ShareId},
+    };
 
     struct Fixture {
         _root: TempDir,
@@ -1634,6 +1638,21 @@ mod tests {
                 parse_range(&HeaderValue::from_str(invalid).unwrap(), 6),
                 None
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn download_filenames_always_produce_header_safe_content_disposition(
+            candidate in any::<String>()
+        ) {
+            if let Ok(name) = EntryName::new(candidate) {
+                let value = content_disposition(name.as_str()).expect("valid header");
+                let rendered = value.to_str().expect("ASCII header value");
+                prop_assert!(rendered.starts_with("attachment; filename=\""));
+                prop_assert!(rendered.contains("; filename*=UTF-8''"));
+                prop_assert!(!rendered.contains(['\r', '\n']));
+            }
         }
     }
 

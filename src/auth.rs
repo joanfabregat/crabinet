@@ -973,15 +973,23 @@ fn decode_nibble(value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::{
+        fs,
+        sync::atomic::{AtomicI64, Ordering},
+    };
 
     use argon2::{Algorithm, Params, Version, password_hash::PasswordHasher};
-    use axum::{body::to_bytes, http::Request};
+    use axum::{Router, body::to_bytes, http::Request};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::app::{AppState, router as app_router};
+    use crate::{
+        app::{AppState, router as app_router},
+        browse::{BrowseLimits, BrowseState, ConfiguredShare},
+        filesystem::{GlobalPolicy, ShareFs},
+        mutations::{MutationLimits, MutationState},
+    };
 
     struct TestClock(AtomicI64);
 
@@ -1036,15 +1044,23 @@ mod tests {
                 },
             ),
         ]);
-        let shares = vec![ShareRecord {
-            id: "documents".to_owned(),
-            name: "Documents".to_owned(),
-            grants: HashMap::from([
-                ("Alice".to_owned(), Permission::Write),
-                ("disabled".to_owned(), Permission::Read),
-            ]),
-            read_only: false,
-        }];
+        let shares = vec![
+            ShareRecord {
+                id: "documents".to_owned(),
+                name: "Documents".to_owned(),
+                grants: HashMap::from([
+                    ("Alice".to_owned(), Permission::Write),
+                    ("disabled".to_owned(), Permission::Read),
+                ]),
+                read_only: false,
+            },
+            ShareRecord {
+                id: "private".to_owned(),
+                name: "Private".to_owned(),
+                grants: HashMap::from([("Bob".to_owned(), Permission::Write)]),
+                read_only: false,
+            },
+        ];
         let clock = Arc::new(TestClock::new(1_000_000));
         let service = AuthService::new(
             users,
@@ -1105,6 +1121,170 @@ mod tests {
             ))
             .await
             .unwrap()
+    }
+
+    fn protected_app(
+        service: AuthService,
+        documents: &std::path::Path,
+        private: &std::path::Path,
+    ) -> Router {
+        let shares = [
+            ("documents", "Documents", documents),
+            ("private", "Private", private),
+        ]
+        .into_iter()
+        .map(|(id, name, root)| {
+            let id = ShareId::new(id).expect("share id");
+            let filesystem = ShareFs::open(id, root).expect("share filesystem");
+            ConfiguredShare::new(name, filesystem).expect("configured share")
+        })
+        .collect();
+        let browse = BrowseState::new(
+            shares,
+            BrowseLimits::default(),
+            GlobalPolicy::default(),
+            [0x5a; 32],
+        )
+        .expect("browse state");
+        let mutations = MutationState::new(MutationLimits::default()).expect("mutation state");
+        app_router(
+            AppState::with_auth(true, service)
+                .with_browse(browse)
+                .with_mutations(mutations),
+        )
+    }
+
+    async fn login_as(app: &Router, username: &str, password: &str) -> (String, String) {
+        let payload = serde_json::json!({"username": username, "password": password});
+        let response = app
+            .clone()
+            .oneshot(post("/api/v1/auth/login", payload.to_string()))
+            .await
+            .expect("login response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = cookie_pair(&response);
+        let body = to_bytes(response.into_body(), 16_384)
+            .await
+            .expect("login body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("login JSON");
+        let csrf = json["csrfToken"].as_str().expect("CSRF token").to_owned();
+        (cookie, csrf)
+    }
+
+    fn mutation_request(path: &str, cookie: &str, csrf: Option<&str>) -> Request<Body> {
+        let mut request = Request::post("/api/v1/shares/documents/files")
+            .header(header::HOST, "files.example.test")
+            .header(header::ORIGIN, "https://files.example.test")
+            .header("sec-fetch-site", "same-origin")
+            .header(header::COOKIE, cookie)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(csrf) = csrf {
+            request = request.header("x-csrf-token", csrf);
+        }
+        request
+            .body(Body::from(serde_json::json!({"path": path}).to_string()))
+            .expect("mutation request")
+    }
+
+    #[tokio::test]
+    async fn real_auth_middleware_enforces_user_and_share_isolation() {
+        let auth = test_auth(1, 20);
+        let documents = TempDir::new().expect("documents root");
+        let private = TempDir::new().expect("private root");
+        fs::write(documents.path().join("alice.txt"), b"alice").expect("Alice fixture");
+        fs::write(private.path().join("bob.txt"), b"bob").expect("Bob fixture");
+        let app = protected_app(auth.service, documents.path(), private.path());
+
+        let anonymous = app
+            .clone()
+            .oneshot(Request::get("/api/v1/shares").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let (alice_cookie, _) = login_as(&app, "Alice", "a very long unicode password 🙂").await;
+        let (bob_cookie, _) = login_as(&app, "Bob", "bob password").await;
+        for (cookie, allowed, denied, marker) in [
+            (&alice_cookie, "documents", "private", "alice.txt"),
+            (&bob_cookie, "private", "documents", "bob.txt"),
+        ] {
+            let allowed = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/api/v1/shares/{allowed}/directory"))
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(allowed.status(), StatusCode::OK);
+            let body = to_bytes(allowed.into_body(), 16_384).await.unwrap();
+            assert!(String::from_utf8_lossy(&body).contains(marker));
+
+            let denied = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/api/v1/shares/{denied}/directory"))
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn real_state_change_middleware_wires_csrf_and_effective_access() {
+        let auth = test_auth(1, 20);
+        let documents = TempDir::new().expect("documents root");
+        let private = TempDir::new().expect("private root");
+        let app = protected_app(auth.service, documents.path(), private.path());
+        let (cookie, csrf) = login_as(&app, "Alice", "a very long unicode password 🙂").await;
+
+        for (path, presented_csrf) in [("missing.txt", None), ("wrong.txt", Some("00"))] {
+            let response = app
+                .clone()
+                .oneshot(mutation_request(path, &cookie, presented_csrf))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(!documents.path().join(path).exists());
+        }
+
+        let response = app
+            .clone()
+            .oneshot(mutation_request("created.txt", &cookie, Some(&csrf)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(documents.path().join("created.txt").is_file());
+
+        let mut read_only_auth = test_auth(1, 20);
+        Arc::get_mut(&mut read_only_auth.service.inner)
+            .expect("unshared auth service")
+            .shares
+            .iter_mut()
+            .find(|share| share.id == "documents")
+            .expect("documents share")
+            .read_only = true;
+        let read_only_documents = TempDir::new().expect("read-only documents root");
+        let read_only_private = TempDir::new().expect("read-only private root");
+        let read_only_app = protected_app(
+            read_only_auth.service,
+            read_only_documents.path(),
+            read_only_private.path(),
+        );
+        let (cookie, csrf) =
+            login_as(&read_only_app, "Alice", "a very long unicode password 🙂").await;
+        let response = read_only_app
+            .oneshot(mutation_request("blocked.txt", &cookie, Some(&csrf)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!read_only_documents.path().join("blocked.txt").exists());
     }
 
     #[tokio::test]

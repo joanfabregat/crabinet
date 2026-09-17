@@ -597,6 +597,18 @@ fn validate_password_hash(hash: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_config_text(text: &str) {
+    if let Ok(value) = toml::from_str::<toml::Value>(text) {
+        let _ = value.try_into::<RawConfig>();
+    }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_password_hash_policy(hash: &str) {
+    let _ = validate_password_hash(hash);
+}
+
 pub fn parse_size(value: &str) -> Result<u64, &'static str> {
     let trimmed = value.trim();
     let split_at = trimmed

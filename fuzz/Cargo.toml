@@ -1,0 +1,54 @@
+[package]
+name = "index-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+index = { path = "..", features = ["fuzzing"] }
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "phc_policy"
+path = "fuzz_targets/phc_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "virtual_path"
+path = "fuzz_targets/virtual_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart"
+path = "fuzz_targets/multipart.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown_classification"
+path = "fuzz_targets/markdown_classification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_disposition"
+path = "fuzz_targets/content_disposition.rs"
+test = false
+doc = false
+bench = false

@@ -26,8 +26,8 @@ use crate::{
     browse::AuthenticatedIdentity,
     error::AppError,
     filesystem::{
-        AuthorizedShare, EntryMetadata, EntryName, FsError, FsErrorCode, PendingWrite, ShareId,
-        VirtualPath,
+        AccessLevel, AuthorizedShare, EntryMetadata, EntryName, FsError, FsErrorCode, PendingWrite,
+        ShareId, VirtualPath,
     },
 };
 
@@ -332,6 +332,7 @@ async fn move_entry(
     let source = VirtualPath::parse(&body.source).map_err(map_mutation_fs_error)?;
     let destination = VirtualPath::parse(&body.destination).map_err(map_mutation_fs_error)?;
     let authorized = state.browse().authorize(&identity, &share_id)?;
+    require_write_access(&authorized)?;
     let current = authorized
         .metadata(&source)
         .map_err(map_mutation_fs_error)?;
@@ -385,15 +386,16 @@ async fn upload_files(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
+    let share_id = parse_share_id(&raw_share_id)?;
+    let authorized = state.browse().authorize(&identity, &share_id)?;
+    require_write_access(&authorized)?;
+    let directory = parse_optional_path(query.path.as_deref())?;
     let _permit = state
         .mutations()
         .upload_gate
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::Busy)?;
-    let share_id = parse_share_id(&raw_share_id)?;
-    let authorized = state.browse().authorize(&identity, &share_id)?;
-    let directory = parse_optional_path(query.path.as_deref())?;
     let mut total_bytes = 0_u64;
     let mut file_count = 0_usize;
     let mut staged = Vec::new();
@@ -546,7 +548,14 @@ fn authorize_write<'state>(
     let share_id = parse_share_id(raw_share_id)?;
     let path = VirtualPath::parse(raw_path).map_err(map_mutation_fs_error)?;
     let authorized = state.browse().authorize(identity, &share_id)?;
+    require_write_access(&authorized)?;
     Ok((share_id, path, authorized))
+}
+
+fn require_write_access(authorized: &AuthorizedShare<'_>) -> Result<(), AppError> {
+    (authorized.access() == AccessLevel::ReadWrite)
+        .then_some(())
+        .ok_or(AppError::Forbidden)
 }
 
 fn parse_share_id(raw: &str) -> Result<ShareId, AppError> {
@@ -711,9 +720,10 @@ mod tests {
 
     use axum::{
         Router,
-        body::Body,
+        body::{Body, Bytes},
         http::{Request, StatusCode, header},
     };
+    use futures_util::stream;
     use serde_json::json;
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -729,6 +739,7 @@ mod tests {
         root: TempDir,
         app: Router,
         identity: AuthenticatedIdentity,
+        upload_gate: Arc<Semaphore>,
     }
 
     fn fixture(access: AccessLevel, global_read_only: bool, limits: MutationLimits) -> Fixture {
@@ -753,6 +764,7 @@ mod tests {
         )
         .expect("browse state");
         let mutations = MutationState::new(limits).expect("mutation state");
+        let upload_gate = Arc::clone(&mutations.upload_gate);
         let app = app::router(
             AppState::new(true)
                 .with_browse(browse)
@@ -762,6 +774,7 @@ mod tests {
             root,
             app,
             identity: AuthenticatedIdentity::new("user-1", vec![grant]),
+            upload_gate,
         }
     }
 
@@ -874,6 +887,62 @@ mod tests {
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert!(!fixture.root.path().join("blocked").exists());
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_grant_blocks_every_mutation_route_without_side_effects() {
+        let fixture = fixture(AccessLevel::ReadOnly, false, MutationLimits::default());
+        let boundary = "read-only-boundary";
+        let requests = vec![
+            json_request(
+                "POST",
+                "/api/v1/shares/documents/directories",
+                json!({"path":"blocked-directory"}),
+            ),
+            json_request(
+                "POST",
+                "/api/v1/shares/documents/files",
+                json!({"path":"blocked-file.txt"}),
+            ),
+            Request::put("/api/v1/shares/documents/text?path=existing.txt")
+                .header(header::IF_MATCH, "W/\"attacker\"")
+                .body(Body::from("replacement"))
+                .unwrap(),
+            Request::post("/api/v1/shares/documents/move")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "W/\"attacker\"")
+                .body(Body::from(
+                    json!({"source":"existing.txt","destination":"moved.txt"}).to_string(),
+                ))
+                .unwrap(),
+            Request::delete("/api/v1/shares/documents/entry?path=existing.txt")
+                .header(header::IF_MATCH, "W/\"attacker\"")
+                .body(Body::empty())
+                .unwrap(),
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(
+                    boundary,
+                    &[("blocked-upload.txt", b"blocked")],
+                )))
+                .unwrap(),
+        ];
+
+        for request in requests {
+            let response = send(&fixture.app, Some(&fixture.identity), true, request).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert_eq!(
+            fs::read(fixture.root.path().join("existing.txt")).unwrap(),
+            b"original"
+        );
+        assert!(!fixture.root.path().join("blocked-directory").exists());
+        assert!(!fixture.root.path().join("blocked-file.txt").exists());
+        assert!(!fixture.root.path().join("blocked-upload.txt").exists());
+        assert!(!fixture.root.path().join("moved.txt").exists());
     }
 
     #[tokio::test]
@@ -1110,6 +1179,168 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".index-tmp-")
         }));
+
+        let too_many = multipart_body(
+            boundary,
+            &[
+                ("a.txt", b"a"),
+                ("b.txt", b"b"),
+                ("c.txt", b"c"),
+                ("d.txt", b"d"),
+            ],
+        );
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(too_many))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            assert!(!fixture.root.path().join(name).exists());
+        }
+        assert!(fs::read_dir(fixture.root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".index-tmp-")
+        }));
+    }
+
+    #[tokio::test]
+    async fn interrupted_upload_stream_removes_unpublished_temporary_file() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let boundary = "interrupted-boundary";
+        let prefix = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"cancelled.txt\"\r\nContent-Type: application/octet-stream\r\n\r\npartial"
+        );
+        let interrupted = stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from(prefix)),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "synthetic client disconnect",
+            )),
+        ]);
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from_stream(interrupted))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!fixture.root.path().join("cancelled.txt").exists());
+        assert!(fs::read_dir(fixture.root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".index-tmp-")
+        }));
+    }
+
+    #[tokio::test]
+    async fn upload_concurrency_is_bounded_and_busy_requests_leave_no_temps() {
+        let limits = MutationLimits {
+            max_concurrent_uploads: 1,
+            ..MutationLimits::default()
+        };
+        let fixture = fixture(AccessLevel::ReadWrite, false, limits);
+        let held = Arc::clone(&fixture.upload_gate)
+            .acquire_owned()
+            .await
+            .expect("upload permit");
+        let boundary = "concurrency-boundary";
+        let request = || {
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(
+                    boundary,
+                    &[("bounded.txt", b"complete")],
+                )))
+                .unwrap()
+        };
+        let busy = send(&fixture.app, Some(&fixture.identity), true, request()).await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "60");
+        assert!(!fixture.root.path().join("bounded.txt").exists());
+        assert!(fs::read_dir(fixture.root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".index-tmp-")
+        }));
+
+        drop(held);
+        let accepted = send(&fixture.app, Some(&fixture.identity), true, request()).await;
+        assert_eq!(accepted.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(
+            fs::read(fixture.root.path().join("bounded.txt")).unwrap(),
+            b"complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_authorization_precedes_the_global_busy_signal() {
+        let limits = MutationLimits {
+            max_concurrent_uploads: 1,
+            ..MutationLimits::default()
+        };
+        let fixture = fixture(AccessLevel::ReadOnly, false, limits);
+        let _held = Arc::clone(&fixture.upload_gate)
+            .acquire_owned()
+            .await
+            .expect("upload permit");
+        let boundary = "authorization-boundary";
+        let request = |share: &str| {
+            Request::post(format!("/api/v1/shares/{share}/uploads"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(
+                    boundary,
+                    &[("blocked.txt", b"blocked")],
+                )))
+                .unwrap()
+        };
+
+        let read_only = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            request("documents"),
+        )
+        .await;
+        assert_eq!(read_only.status(), StatusCode::FORBIDDEN);
+
+        let ungranted = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            request("ungranted"),
+        )
+        .await;
+        assert_eq!(ungranted.status(), StatusCode::NOT_FOUND);
+        assert!(!fixture.root.path().join("blocked.txt").exists());
     }
 
     #[cfg(unix)]

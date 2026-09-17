@@ -364,7 +364,7 @@ fn contains_binary_control(source: &str) -> bool {
     })
 }
 
-fn classify(path: &VirtualPath) -> (PreviewKind, Option<&'static str>) {
+pub(crate) fn classify(path: &VirtualPath) -> (PreviewKind, Option<&'static str>) {
     let extension = path
         .file_name()
         .and_then(|name| {

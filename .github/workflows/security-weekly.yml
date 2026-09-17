@@ -13,6 +13,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  extended-backend:
+    name: Extended backend verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NIGHTLY_VERSION: nightly-2026-09-01
+      CARGO_FUZZ_VERSION: 0.13.2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly Rust toolchain
+        run: rustup toolchain install "${NIGHTLY_VERSION}" --profile minimal
+      - name: Install pinned cargo-fuzz
+        run: cargo +"${NIGHTLY_VERSION}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+      - name: Run extended property and race tests
+        env:
+          PROPTEST_CASES: 4096
+        run: cargo +"${NIGHTLY_VERSION}" test --locked --release --all-targets --all-features
+      - name: Fuzz security boundaries
+        run: |
+          for target in config_toml phc_policy virtual_path multipart markdown_classification content_disposition; do
+            cargo +"${NIGHTLY_VERSION}" fuzz run "${target}" -- -max_total_time=60 -timeout=10
+          done
+
   source:
     name: Source and dependency scan
     runs-on: ubuntu-24.04
