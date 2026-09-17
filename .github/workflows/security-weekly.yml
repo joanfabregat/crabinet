@@ -1,0 +1,124 @@
+name: Weekly security scan
+
+on:
+  schedule:
+    - cron: "17 09 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-security
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Source and dependency scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan with Semgrep
+        id: semgrep
+        continue-on-error: true
+        env:
+          SEMGREP_SEND_METRICS: "off"
+        run: >-
+          docker run --rm
+          -e SEMGREP_SEND_METRICS
+          -v "${PWD}:/src"
+          -w /src
+          docker.io/semgrep/semgrep@sha256:d1825c2c72110b5bfbf0602ff68f7f117322597a7c33037a79dba9f897f5f1f0
+          semgrep scan --config p/r2c-security-audit --config p/secrets --error --sarif --output semgrep-weekly.sarif .
+      - name: Upload Semgrep SARIF
+        if: always() && hashFiles('semgrep-weekly.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: semgrep-weekly.sarif
+          category: semgrep-weekly
+      - name: Scan repository with fresh Trivy databases
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.74.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig,license
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          format: sarif
+          output: trivy-weekly.sarif
+          exit-code: "1"
+      - name: Upload Trivy SARIF
+        if: always() && hashFiles('trivy-weekly.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: trivy-weekly.sarif
+          category: trivy-weekly
+      - name: Check Rust advisories and licenses
+        id: rust
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+      - name: Audit frontend dependencies
+        id: npm
+        continue-on-error: true
+        working-directory: web
+        run: npm audit --audit-level=moderate
+      - name: Enforce weekly findings
+        if: steps.semgrep.outcome == 'failure' || steps.trivy.outcome == 'failure' || steps.rust.outcome == 'failure' || steps.npm.outcome == 'failure'
+        run: exit 1
+
+  released-image:
+    name: Latest released image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Check whether the latest image exists
+        id: image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:latest
+        run: |
+          if docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "No released image exists yet; source scans still ran."
+          fi
+      - name: Scan latest released image
+        if: steps.image.outputs.available == 'true'
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.74.0
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "1"
+      - name: Upload image SARIF
+        if: always() && hashFiles('trivy-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-released-image
+      - name: Enforce image findings
+        if: steps.trivy.outcome == 'failure'
+        run: exit 1
