@@ -14,6 +14,14 @@ import {
   type Share,
 } from "./api";
 import {
+  EntryActionButtons,
+  OperationDialog,
+  UploadQueue,
+  WriteToolbar,
+  type EntryOperation,
+  type UploadSelection,
+} from "./operations";
+import {
   browserNavigation,
   directoryUrl,
   parentPath,
@@ -325,6 +333,7 @@ function AuthenticatedShell({
         ) : selectedShare ? (
           <DirectoryBrowser
             api={api}
+            csrfToken={session.csrfToken}
             navigation={navigation}
             route={route}
             share={selectedShare}
@@ -340,6 +349,7 @@ function AuthenticatedShell({
 
 interface DirectoryBrowserProps {
   api: ApiClient;
+  csrfToken: string;
   navigation: BrowserNavigation;
   route: BrowserRoute;
   share: Share;
@@ -348,6 +358,7 @@ interface DirectoryBrowserProps {
 
 function DirectoryBrowser({
   api,
+  csrfToken,
   navigation,
   route,
   share,
@@ -358,9 +369,23 @@ function DirectoryBrowser({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiError>();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [operation, setOperation] = useState<EntryOperation>();
+  const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const loadMoreController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previewTriggerRef = useRef<HTMLAnchorElement>();
+  const operationLocation = useRef(`${share.id}\u0000${route.path}`);
+
+  useEffect(() => {
+    // A history/share change invalidates every relative operation target.
+    // Unmounting an upload queue also aborts its active transports.
+    const nextLocation = `${share.id}\u0000${route.path}`;
+    if (operationLocation.current !== nextLocation) {
+      operationLocation.current = nextLocation;
+      setOperation(undefined);
+      setUploadSelection(undefined);
+    }
+  }, [route.path, share.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -436,6 +461,11 @@ function DirectoryBrowser({
     requestAnimationFrame(() => previewTriggerRef.current?.focus());
   };
 
+  const changed = () => {
+    setOperation(undefined);
+    setRefreshKey((value) => value + 1);
+  };
+
   return (
     <div class={`browser-workspace${route.previewPath ? " has-preview" : ""}`}>
       <section class="directory-panel" aria-labelledby="directory-title">
@@ -488,6 +518,16 @@ function DirectoryBrowser({
           </Button>
         </div>
 
+        {share.access === "read-write" && (
+          <WriteToolbar
+            onCreateFile={() => setOperation({ kind: "create-file" })}
+            onCreateFolder={() => setOperation({ kind: "create-folder" })}
+            onUpload={(files) =>
+              setUploadSelection({ id: crypto.randomUUID(), files })
+            }
+          />
+        )}
+
         <div class="sr-only" role="status" aria-live="polite">
           {loading
             ? "Loading folder"
@@ -519,6 +559,8 @@ function DirectoryBrowser({
               path={route.path}
               navigation={navigation}
               onOpenPreview={openPreview}
+              writable={share.access === "read-write"}
+              onOperation={setOperation}
             />
             {error && (
               <Notice tone="danger">
@@ -550,6 +592,31 @@ function DirectoryBrowser({
           onSessionExpired={onSessionExpired}
         />
       )}
+      {operation && (
+        <OperationDialog
+          api={api}
+          csrfToken={csrfToken}
+          operation={operation}
+          directory={route.path}
+          shareId={share.id}
+          onClose={() => setOperation(undefined)}
+          onChanged={changed}
+          onSessionExpired={onSessionExpired}
+        />
+      )}
+      {uploadSelection && (
+        <UploadQueue
+          key={uploadSelection.id}
+          api={api}
+          csrfToken={csrfToken}
+          directory={route.path}
+          files={uploadSelection.files}
+          shareId={share.id}
+          onClose={() => setUploadSelection(undefined)}
+          onChanged={() => setRefreshKey((value) => value + 1)}
+          onSessionExpired={onSessionExpired}
+        />
+      )}
     </div>
   );
 }
@@ -560,12 +627,16 @@ function EntryList({
   path,
   navigation,
   onOpenPreview,
+  writable,
+  onOperation,
 }: {
   entries: DirectoryEntry[];
   shareId: string;
   path: string;
   navigation: BrowserNavigation;
   onOpenPreview: (path: string, trigger: HTMLAnchorElement) => void;
+  writable: boolean;
+  onOperation: (operation: EntryOperation) => void;
 }) {
   return (
     <div class="entry-list" role="list" aria-label="Folder contents">
@@ -618,6 +689,13 @@ function EntryList({
               </span>
             </div>
             <span class="entry-meta">{formatSize(entry.size)}</span>
+            {writable && (
+              <EntryActionButtons
+                entry={entry}
+                path={joinPath(path, entry.name)}
+                onOperation={onOperation}
+              />
+            )}
           </div>
         );
       })}

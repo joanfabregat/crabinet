@@ -75,6 +75,72 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         size: 0,
         truncated: false,
       })),
+    metadata:
+      overrides.metadata ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        name: path.split("/").at(-1) ?? path,
+        kind: "file" as const,
+        size: 0,
+        etag: 'W/"test"',
+      })),
+    text:
+      overrides.text ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        text: "",
+        size: 0,
+        mimeType: "text/plain",
+        etag: '"content"',
+      })),
+    createDirectory:
+      overrides.createDirectory ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+      })),
+    createFile:
+      overrides.createFile ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+      })),
+    saveText:
+      overrides.saveText ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+      })),
+    moveEntry:
+      overrides.moveEntry ??
+      vi.fn(async (shareId, _source, destination) => ({
+        shareId,
+        path: destination,
+        outcome: "success" as const,
+      })),
+    deleteEntry:
+      overrides.deleteEntry ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+      })),
+    uploadFile:
+      overrides.uploadFile ??
+      vi.fn(async (shareId, directory, file) => ({
+        shareId,
+        outcomes: [
+          {
+            path: directory ? `${directory}/${file.name}` : file.name,
+            outcome: "created" as const,
+          },
+        ],
+      })),
   };
 }
 
@@ -426,5 +492,280 @@ describe("directory browser", () => {
       await screen.findByRole("heading", { name: "This folder is empty" }),
     ).toBeVisible();
     expect(directory).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("writable file operations", () => {
+  const writablePage: DirectoryPage = {
+    shareId: "work",
+    path: "projects",
+    entries: [
+      { name: "notes.txt", kind: "file", size: 3 },
+      { name: "empty", kind: "directory" },
+    ],
+  };
+
+  const writableNavigation = () =>
+    new MemoryNavigation({ shareId: "work", path: "projects" });
+
+  it("creates files and folders with validation and the in-memory CSRF token", async () => {
+    const createFile = vi.fn<ApiClient["createFile"]>(
+      async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+      }),
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          createFile,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "New file" }));
+    const name = screen.getByLabelText("File name");
+    fireEvent.input(name, { target: { value: "../escape" } });
+    fireEvent.submit(name.closest("form")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "one valid name",
+    );
+
+    fireEvent.input(name, { target: { value: "todo.md" } });
+    fireEvent.submit(name.closest("form")!);
+    await waitFor(() =>
+      expect(createFile).toHaveBeenCalledWith(
+        "work",
+        "projects/todo.md",
+        "csrf-in-memory",
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("moves and deletes only after fetching a fresh validator", async () => {
+    const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      name: path.split("/").at(-1)!,
+      kind: "file",
+      size: 3,
+      etag: 'W/"fresh"',
+    }));
+    const moveEntry = vi.fn<ApiClient["moveEntry"]>(
+      async (shareId, _source, destination) => ({
+        shareId,
+        path: destination,
+        outcome: "success",
+      }),
+    );
+    const api = fakeApi({
+      directory: vi.fn(async () => writablePage),
+      metadata,
+      moveEntry,
+    });
+    render(<App api={api} navigation={writableNavigation()} />);
+
+    const noteActions = await screen.findByLabelText("Actions for notes.txt");
+    fireEvent.click(
+      within(noteActions).getByRole("button", { name: "Move / rename" }),
+    );
+    fireEvent.input(screen.getByLabelText("Destination path"), {
+      target: { value: "archive/notes.txt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() =>
+      expect(moveEntry).toHaveBeenCalledWith(
+        "work",
+        "projects/notes.txt",
+        "archive/notes.txt",
+        'W/"fresh"',
+        "csrf-in-memory",
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
+  it("requires an exact destructive confirmation and reports non-empty folders honestly", async () => {
+    const deleteEntry = vi
+      .fn<ApiClient["deleteEntry"]>()
+      .mockRejectedValue(
+        new ApiError("conflict", "not empty", { status: 409 }),
+      );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "empty",
+            kind: "directory" as const,
+            etag: 'W/"directory"',
+          })),
+          deleteEntry,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    const actions = await screen.findByLabelText("Actions for empty");
+    fireEvent.click(within(actions).getByRole("button", { name: "Delete" }));
+    const confirmation = screen.getByLabelText("Type empty to confirm");
+    fireEvent.input(confirmation, { target: { value: "wrong" } });
+    fireEvent.submit(confirmation.closest("form")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent("exactly");
+    expect(deleteEntry).not.toHaveBeenCalled();
+
+    fireEvent.input(confirmation, { target: { value: "empty" } });
+    fireEvent.submit(confirmation.closest("form")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "item changed or the destination already exists",
+    );
+    expect(
+      screen.getByText(/non-empty folders are never deleted/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps edits explicit and refuses to hide a concurrent-write conflict", async () => {
+    const saveText = vi
+      .fn<ApiClient["saveText"]>()
+      .mockRejectedValue(new ApiError("conflict", "stale", { status: 409 }));
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          text: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            text: "old",
+            size: 3,
+            mimeType: "text/plain",
+            etag: '"content"',
+          })),
+          saveText,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const editor = await screen.findByLabelText("UTF-8 text content");
+    fireEvent.input(editor, { target: { value: "new" } });
+    expect(screen.getByText("Unsaved changes")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "changed after you opened it",
+    );
+    expect(editor).toBeDisabled();
+    expect(saveText).toHaveBeenCalledWith(
+      "work",
+      "projects/notes.txt",
+      "new",
+      'W/"test"',
+      "csrf-in-memory",
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("uploads dropped files independently, exposes conflicts, and supports replacement", async () => {
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      async (shareId, directory, file, _csrf, options) => {
+        options?.onProgress?.(file.size, file.size);
+        return {
+          shareId,
+          outcomes: [
+            {
+              path: `${directory}/${file.name}`,
+              outcome:
+                file.name === "exists.txt" && !options?.replace
+                  ? "conflict"
+                  : options?.replace
+                    ? "replaced"
+                    : "created",
+            },
+          ],
+        };
+      },
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          uploadFile,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    const dropzone = await screen.findByText("Drop files here or");
+    fireEvent.drop(dropzone.closest(".upload-dropzone")!, {
+      dataTransfer: {
+        files: [
+          new File(["one"], "new.txt", { type: "text/plain" }),
+          new File(["two"], "exists.txt", { type: "text/plain" }),
+        ],
+      },
+    });
+
+    expect(await screen.findByText("Succeeded")).toBeVisible();
+    expect(screen.getByText("Needs attention")).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace existing file" }),
+    );
+    await waitFor(() =>
+      expect(uploadFile).toHaveBeenLastCalledWith(
+        "work",
+        "projects",
+        expect.objectContaining({ name: "exists.txt" }),
+        "csrf-in-memory",
+        expect.objectContaining({ replace: true, etag: 'W/"test"' }),
+      ),
+    );
+    expect(await screen.findByText("Replaced")).toBeVisible();
+  });
+
+  it("cancels an in-flight upload and returns to login when a mutation session expires", async () => {
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      async (_shareId, _directory, _file, _csrf, options) =>
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () =>
+            reject(new ApiError("aborted", "cancelled")),
+          );
+        }),
+    );
+    const api = fakeApi({
+      directory: vi.fn(async () => writablePage),
+      uploadFile,
+      createDirectory: vi
+        .fn<ApiClient["createDirectory"]>()
+        .mockRejectedValue(
+          new ApiError("unauthorized", "expired", { status: 401 }),
+        ),
+    });
+    render(<App api={api} navigation={writableNavigation()} />);
+
+    const picker = await screen.findByLabelText("Choose files to upload");
+    fireEvent.change(picker, {
+      target: { files: [new File(["data"], "slow.txt")] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect((await screen.findAllByText("Cancelled")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "New folder" }));
+    fireEvent.input(screen.getByLabelText("Folder name"), {
+      target: { value: "expired" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(
+      await screen.findByText(
+        "Your session expired. Sign in again to continue.",
+      ),
+    ).toBeVisible();
   });
 });

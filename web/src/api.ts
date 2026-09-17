@@ -40,6 +40,50 @@ export interface DirectoryPage {
   nextCursor?: string;
 }
 
+export interface EntryMetadata {
+  shareId: string;
+  path: string;
+  name: string;
+  kind: "directory" | "file";
+  size?: number;
+  etag: string;
+}
+
+export interface TextDocument {
+  shareId: string;
+  path: string;
+  text: string;
+  size: number;
+  mimeType: string;
+  etag: string;
+}
+
+export interface MutationResult {
+  shareId: string;
+  path: string;
+  outcome: "success";
+}
+
+export type UploadOutcomeKind =
+  "created" | "replaced" | "conflict" | "quota_exceeded" | "error";
+
+export interface UploadOutcome {
+  path: string;
+  outcome: UploadOutcomeKind;
+}
+
+export interface UploadResult {
+  shareId: string;
+  outcomes: UploadOutcome[];
+}
+
+export interface UploadOptions {
+  replace?: boolean;
+  etag?: string;
+  signal?: AbortSignal;
+  onProgress?: (loaded: number, total?: number) => void;
+}
+
 export type PreviewKind = "text" | "code" | "markdown_source" | "html_source";
 
 export interface PreviewDocument {
@@ -107,6 +151,58 @@ export interface ApiClient {
     path: string,
     signal?: AbortSignal,
   ): Promise<PreviewDocument>;
+  metadata(
+    shareId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<EntryMetadata>;
+  text(
+    shareId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<TextDocument>;
+  createDirectory(
+    shareId: string,
+    path: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
+  createFile(
+    shareId: string,
+    path: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
+  saveText(
+    shareId: string,
+    path: string,
+    text: string,
+    etag: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
+  moveEntry(
+    shareId: string,
+    source: string,
+    destination: string,
+    etag: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
+  deleteEntry(
+    shareId: string,
+    path: string,
+    etag: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
+  uploadFile(
+    shareId: string,
+    directory: string,
+    file: File,
+    csrfToken: string,
+    options?: UploadOptions,
+  ): Promise<UploadResult>;
 }
 
 interface ApiProblem {
@@ -117,6 +213,7 @@ interface ApiProblem {
 
 export interface ApiClientOptions {
   fetch?: typeof globalThis.fetch;
+  xhrFactory?: () => XMLHttpRequest;
   retryDelayMs?: number;
 }
 
@@ -124,6 +221,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const fetchImplementation =
     options.fetch ?? globalThis.fetch.bind(globalThis);
   const retryDelayMs = options.retryDelayMs ?? 200;
+  const xhrFactory = options.xhrFactory ?? (() => new XMLHttpRequest());
 
   const request = async <T>(
     path: string,
@@ -226,7 +324,189 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         await request<unknown>(url, { signal }, true),
       );
     },
+    metadata: async (shareId, path, signal) =>
+      parseMetadata(
+        await request<unknown>(
+          fileApiUrl(shareId, path, "metadata"),
+          {
+            signal,
+          },
+          true,
+        ),
+        shareId,
+        path,
+      ),
+    text: async (shareId, path, signal) =>
+      parseTextDocument(
+        await request<unknown>(
+          fileApiUrl(shareId, path, "text"),
+          { signal },
+          true,
+        ),
+        shareId,
+        path,
+      ),
+    createDirectory: async (shareId, path, csrfToken, signal) =>
+      parseMutationResult(
+        await request<unknown>(shareApiUrl(shareId, "directories"), {
+          method: "POST",
+          signal,
+          headers: mutationJsonHeaders(csrfToken),
+          body: JSON.stringify({ path }),
+        }),
+        shareId,
+        path,
+      ),
+    createFile: async (shareId, path, csrfToken, signal) =>
+      parseMutationResult(
+        await request<unknown>(shareApiUrl(shareId, "files"), {
+          method: "POST",
+          signal,
+          headers: mutationJsonHeaders(csrfToken),
+          body: JSON.stringify({ path }),
+        }),
+        shareId,
+        path,
+      ),
+    saveText: async (shareId, path, text, etag, csrfToken, signal) =>
+      parseMutationResult(
+        await request<unknown>(fileApiUrl(shareId, path, "text"), {
+          method: "PUT",
+          signal,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-CSRF-Token": csrfToken,
+            "If-Match": etag,
+          },
+          body: text,
+        }),
+        shareId,
+        path,
+      ),
+    moveEntry: async (shareId, source, destination, etag, csrfToken, signal) =>
+      parseMutationResult(
+        await request<unknown>(shareApiUrl(shareId, "move"), {
+          method: "POST",
+          signal,
+          headers: {
+            ...mutationJsonHeaders(csrfToken),
+            "If-Match": etag,
+          },
+          body: JSON.stringify({ source, destination }),
+        }),
+        shareId,
+        destination,
+      ),
+    deleteEntry: async (shareId, path, etag, csrfToken, signal) =>
+      parseMutationResult(
+        await request<unknown>(fileApiUrl(shareId, path, "entry"), {
+          method: "DELETE",
+          signal,
+          headers: {
+            "X-CSRF-Token": csrfToken,
+            "If-Match": etag,
+          },
+        }),
+        shareId,
+        path,
+      ),
+    uploadFile: (shareId, directory, file, csrfToken, uploadOptions = {}) =>
+      uploadWithXhr(
+        xhrFactory,
+        shareId,
+        directory,
+        file,
+        csrfToken,
+        uploadOptions,
+      ),
   };
+}
+
+function mutationJsonHeaders(csrfToken: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    "X-CSRF-Token": csrfToken,
+  };
+}
+
+function shareApiUrl(shareId: string, action: string): string {
+  return `/api/v1/shares/${encodeURIComponent(shareId)}/${action}`;
+}
+
+function uploadWithXhr(
+  factory: () => XMLHttpRequest,
+  shareId: string,
+  directory: string,
+  file: File,
+  csrfToken: string,
+  options: UploadOptions,
+): Promise<UploadResult> {
+  if (!isValidVirtualPath(directory) || !isValidPathComponent(file.name)) {
+    return Promise.reject(
+      new ApiError("invalid-request", "The upload destination is invalid"),
+    );
+  }
+  if (options.replace && !options.etag) {
+    return Promise.reject(
+      new ApiError(
+        "invalid-request",
+        "A validator is required to replace a file",
+      ),
+    );
+  }
+  if (options.signal?.aborted) {
+    return Promise.reject(new ApiError("aborted", "The request was cancelled"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const xhr = factory();
+    const query = new URLSearchParams({ path: directory });
+    if (options.replace) query.set("replace", "true");
+    xhr.open("POST", `${shareApiUrl(shareId, "uploads")}?${query}`, true);
+    xhr.responseType = "json";
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    if (options.etag) xhr.setRequestHeader("If-Match", options.etag);
+
+    const abort = () => xhr.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    const finish = () => options.signal?.removeEventListener("abort", abort);
+    xhr.upload.addEventListener("progress", (event) =>
+      options.onProgress?.(
+        event.loaded,
+        event.lengthComputable ? event.total : undefined,
+      ),
+    );
+    xhr.addEventListener("load", () => {
+      finish();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(parseUploadResult(xhr.response, shareId));
+        } catch (cause) {
+          reject(cause);
+        }
+      } else {
+        reject(xhrResponseError(xhr));
+      }
+    });
+    xhr.addEventListener("error", () => {
+      finish();
+      reject(
+        new ApiError("network", "The server could not be reached", {
+          retryable: true,
+        }),
+      );
+    });
+    xhr.addEventListener("abort", () => {
+      finish();
+      reject(new ApiError("aborted", "The request was cancelled"));
+    });
+
+    const form = new FormData();
+    form.append("file", file, file.name);
+    xhr.send(form);
+  });
 }
 
 const previewLanguages = new Set([
@@ -384,6 +664,92 @@ function parseDirectoryPage(
   return value as unknown as DirectoryPage;
 }
 
+function parseMetadata(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): EntryMetadata {
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    value.path !== expectedPath ||
+    !isValidVirtualPath(value.path) ||
+    !isValidPathComponent(value.name) ||
+    (value.kind !== "directory" && value.kind !== "file") ||
+    typeof value.etag !== "string" ||
+    value.etag.length === 0 ||
+    (value.size !== undefined &&
+      (typeof value.size !== "number" ||
+        !Number.isSafeInteger(value.size) ||
+        value.size < 0))
+  ) {
+    throw invalidResponse();
+  }
+  return value as unknown as EntryMetadata;
+}
+
+function parseTextDocument(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): TextDocument {
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    value.path !== expectedPath ||
+    typeof value.text !== "string" ||
+    typeof value.size !== "number" ||
+    !Number.isSafeInteger(value.size) ||
+    value.size < 0 ||
+    typeof value.mimeType !== "string" ||
+    typeof value.etag !== "string" ||
+    new TextEncoder().encode(value.text).byteLength !== value.size
+  ) {
+    throw invalidResponse();
+  }
+  return value as unknown as TextDocument;
+}
+
+function parseMutationResult(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): MutationResult {
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    value.path !== expectedPath ||
+    value.outcome !== "success"
+  ) {
+    throw invalidResponse();
+  }
+  return value as unknown as MutationResult;
+}
+
+function parseUploadResult(
+  value: unknown,
+  expectedShareId: string,
+): UploadResult {
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    !Array.isArray(value.outcomes) ||
+    !value.outcomes.every(
+      (outcome) =>
+        isRecord(outcome) &&
+        isValidVirtualPath(outcome.path) &&
+        (outcome.outcome === "created" ||
+          outcome.outcome === "replaced" ||
+          outcome.outcome === "conflict" ||
+          outcome.outcome === "quota_exceeded" ||
+          outcome.outcome === "error"),
+    )
+  ) {
+    throw invalidResponse();
+  }
+  return value as unknown as UploadResult;
+}
+
 function isShare(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -423,15 +789,7 @@ async function responseError(response: Response): Promise<ApiError> {
   if (contentType.includes("json")) {
     try {
       const value: unknown = await response.json();
-      if (isRecord(value)) {
-        problem = {
-          code: typeof value.code === "string" ? value.code : undefined,
-          message:
-            typeof value.message === "string" ? value.message : undefined,
-          requestId:
-            typeof value.requestId === "string" ? value.requestId : undefined,
-        };
-      }
+      problem = extractProblem(value);
     } catch {
       // The status code is sufficient; never expose an untrusted response body.
     }
@@ -464,6 +822,47 @@ async function responseError(response: Response): Promise<ApiError> {
       retryable,
     },
   );
+}
+
+function xhrResponseError(xhr: XMLHttpRequest): ApiError {
+  const status = xhr.status;
+  const kind: ApiErrorKind =
+    status === 401
+      ? "unauthorized"
+      : status === 403
+        ? "forbidden"
+        : status === 404
+          ? "not-found"
+          : status === 409
+            ? "conflict"
+            : status === 429
+              ? "rate-limited"
+              : "server";
+  const problem = extractProblem(xhr.response);
+  return new ApiError(
+    kind,
+    problem.message ?? `Request failed with status ${status}`,
+    {
+      status,
+      code: problem.code,
+      requestId:
+        problem.requestId ?? xhr.getResponseHeader("x-request-id") ?? undefined,
+      retryable:
+        status === 429 || status === 502 || status === 503 || status === 504,
+    },
+  );
+}
+
+function extractProblem(value: unknown): ApiProblem {
+  if (!isRecord(value)) return {};
+  const candidate = isRecord(value.error) ? value.error : value;
+  return {
+    code: typeof candidate.code === "string" ? candidate.code : undefined,
+    message:
+      typeof candidate.message === "string" ? candidate.message : undefined,
+    requestId:
+      typeof candidate.requestId === "string" ? candidate.requestId : undefined,
+  };
 }
 
 function isAbortFailure(error: unknown): boolean {

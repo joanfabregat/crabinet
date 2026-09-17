@@ -324,4 +324,170 @@ describe("API client", () => {
     );
     expect(() => downloadUrl("docs", "../secret")).toThrow(ApiError);
   });
+
+  it("adds CSRF and precondition headers to every file mutation", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = String(input);
+      const body =
+        new Headers(init?.headers).get("content-type") === "application/json" &&
+        init?.body
+          ? JSON.parse(String(init.body))
+          : undefined;
+      const path =
+        body?.destination ??
+        body?.path ??
+        new URL(url, "https://index.test").searchParams.get("path")!;
+      return Response.json({ shareId: "work", path, outcome: "success" });
+    });
+    const api = createApiClient({ fetch });
+
+    await api.createDirectory("work", "docs", "csrf");
+    await api.createFile("work", "docs/a.txt", "csrf");
+    await api.saveText("work", "docs/a.txt", "hello", 'W/"v1"', "csrf");
+    await api.moveEntry("work", "docs/a.txt", "docs/b.txt", 'W/"v2"', "csrf");
+    await api.deleteEntry("work", "docs/b.txt", 'W/"v3"', "csrf");
+
+    expect(fetch).toHaveBeenCalledTimes(5);
+    for (const call of fetch.mock.calls) {
+      expect(new Headers(call[1]?.headers).get("X-CSRF-Token")).toBe("csrf");
+      expect(call[1]?.credentials).toBe("same-origin");
+    }
+    expect(new Headers(fetch.mock.calls[2]?.[1]?.headers).get("If-Match")).toBe(
+      'W/"v1"',
+    );
+    expect(new Headers(fetch.mock.calls[3]?.[1]?.headers).get("If-Match")).toBe(
+      'W/"v2"',
+    );
+    expect(new Headers(fetch.mock.calls[4]?.[1]?.headers).get("If-Match")).toBe(
+      'W/"v3"',
+    );
+  });
+
+  it("rejects malformed mutation success and metadata responses", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(Response.json({ outcome: "success" }))
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "a.txt",
+          name: "../a.txt",
+          kind: "file",
+          size: 1,
+          etag: 'W/"v"',
+        }),
+      );
+    const api = createApiClient({ fetch });
+
+    await expect(api.createFile("docs", "a.txt", "csrf")).rejects.toMatchObject(
+      { kind: "invalid-response" },
+    );
+    await expect(api.metadata("docs", "a.txt")).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+  });
+
+  it("streams a browser File through FormData with progress, CSRF, and replace preconditions", async () => {
+    const xhr = new FakeXhr();
+    const progress = vi.fn();
+    const file = new File(["payload"], "report.txt", { type: "text/plain" });
+    const api = createApiClient({
+      fetch: vi.fn(),
+      xhrFactory: () => xhr as unknown as XMLHttpRequest,
+    });
+    const request = api.uploadFile("team/a", "reports", file, "csrf", {
+      replace: true,
+      etag: 'W/"old"',
+      onProgress: progress,
+    });
+
+    expect(xhr.method).toBe("POST");
+    expect(xhr.url).toBe(
+      "/api/v1/shares/team%2Fa/uploads?path=reports&replace=true",
+    );
+    expect(xhr.headers.get("X-CSRF-Token")).toBe("csrf");
+    expect(xhr.headers.get("If-Match")).toBe('W/"old"');
+    expect(xhr.body).toBeInstanceOf(FormData);
+    expect((xhr.body as FormData).get("file")).toMatchObject({
+      name: "report.txt",
+      size: 7,
+    });
+
+    xhr.upload.dispatchEvent(
+      new ProgressEvent("progress", {
+        loaded: 4,
+        total: 7,
+        lengthComputable: true,
+      }),
+    );
+    expect(progress).toHaveBeenCalledWith(4, 7);
+    xhr.respond(207, {
+      shareId: "team/a",
+      outcomes: [{ path: "reports/report.txt", outcome: "replaced" }],
+    });
+    await expect(request).resolves.toMatchObject({
+      outcomes: [{ outcome: "replaced" }],
+    });
+  });
+
+  it("aborts upload transport without retrying or converting cancellation to failure", async () => {
+    const xhr = new FakeXhr();
+    const controller = new AbortController();
+    const api = createApiClient({
+      fetch: vi.fn(),
+      xhrFactory: () => xhr as unknown as XMLHttpRequest,
+    });
+    const request = api.uploadFile(
+      "docs",
+      "",
+      new File(["large"], "large.bin"),
+      "csrf",
+      { signal: controller.signal },
+    );
+
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ kind: "aborted" });
+    expect(xhr.aborted).toBe(true);
+  });
 });
+
+class FakeXhr extends EventTarget {
+  readonly upload = new EventTarget();
+  readonly headers = new Map<string, string>();
+  method = "";
+  url = "";
+  body: Document | XMLHttpRequestBodyInit | null = null;
+  status = 0;
+  response: unknown;
+  responseType: XMLHttpRequestResponseType = "";
+  withCredentials = false;
+  aborted = false;
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers.set(name, value);
+  }
+
+  getResponseHeader() {
+    return null;
+  }
+
+  send(body: Document | XMLHttpRequestBodyInit | null) {
+    this.body = body;
+  }
+
+  abort() {
+    this.aborted = true;
+    this.dispatchEvent(new Event("abort"));
+  }
+
+  respond(status: number, response: unknown) {
+    this.status = status;
+    this.response = response;
+    this.dispatchEvent(new Event("load"));
+  }
+}
