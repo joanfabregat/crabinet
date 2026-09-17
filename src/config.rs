@@ -60,6 +60,24 @@ struct RawServerConfig {
     max_upload_size: String,
     /// Maximum file size eligible for preview, for example "2 MiB".
     max_preview_size: String,
+    /// Maximum simultaneous Argon2 password verifications.
+    #[serde(default = "default_auth_max_concurrent")]
+    auth_max_concurrent: usize,
+    /// Session idle timeout in seconds.
+    #[serde(default = "default_session_idle_timeout_seconds")]
+    session_idle_timeout_seconds: u64,
+    /// Session absolute lifetime in seconds.
+    #[serde(default = "default_session_absolute_timeout_seconds")]
+    session_absolute_timeout_seconds: u64,
+    /// Login attempts allowed per normalized username and source address each minute.
+    #[serde(default = "default_login_attempts_per_minute")]
+    login_attempts_per_minute: u32,
+    /// Maximum simultaneously active sessions retained for one user.
+    #[serde(default = "default_max_sessions_per_user")]
+    max_sessions_per_user: usize,
+    /// Maximum simultaneously active sessions retained across all users.
+    #[serde(default = "default_max_sessions_total")]
+    max_sessions_total: usize,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -68,6 +86,9 @@ struct RawUser {
     username: String,
     /// An Argon2id PHC string produced by `index hash-password`.
     password_hash: String,
+    /// Disabled users cannot log in and their existing sessions are rejected.
+    #[serde(default)]
+    disabled: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -129,12 +150,19 @@ pub struct ServerConfig {
     session_secret_file: PathBuf,
     max_upload_size: u64,
     max_preview_size: u64,
+    auth_max_concurrent: usize,
+    session_idle_timeout_seconds: u64,
+    session_absolute_timeout_seconds: u64,
+    login_attempts_per_minute: u32,
+    max_sessions_per_user: usize,
+    max_sessions_total: usize,
 }
 
 #[derive(Clone)]
 pub struct User {
     username: String,
     password_hash: String,
+    disabled: bool,
 }
 
 impl fmt::Debug for User {
@@ -200,6 +228,41 @@ impl Config {
                 "server.max_preview_size must not exceed server.max_upload_size".into(),
             ));
         }
+        if !(1..=16).contains(&raw.server.auth_max_concurrent) {
+            return Err(ConfigError::Validation(
+                "server.auth_max_concurrent must be between 1 and 16".into(),
+            ));
+        }
+        if !(60..=86_400).contains(&raw.server.session_idle_timeout_seconds) {
+            return Err(ConfigError::Validation(
+                "server.session_idle_timeout_seconds must be between 60 and 86400".into(),
+            ));
+        }
+        if !(300..=2_592_000).contains(&raw.server.session_absolute_timeout_seconds) {
+            return Err(ConfigError::Validation(
+                "server.session_absolute_timeout_seconds must be between 300 and 2592000".into(),
+            ));
+        }
+        if raw.server.session_idle_timeout_seconds > raw.server.session_absolute_timeout_seconds {
+            return Err(ConfigError::Validation(
+                "server.session_idle_timeout_seconds must not exceed server.session_absolute_timeout_seconds".into(),
+            ));
+        }
+        if !(1..=1_000).contains(&raw.server.login_attempts_per_minute) {
+            return Err(ConfigError::Validation(
+                "server.login_attempts_per_minute must be between 1 and 1000".into(),
+            ));
+        }
+        if !(1..=256).contains(&raw.server.max_sessions_per_user) {
+            return Err(ConfigError::Validation(
+                "server.max_sessions_per_user must be between 1 and 256".into(),
+            ));
+        }
+        if !(raw.server.max_sessions_per_user..=100_000).contains(&raw.server.max_sessions_total) {
+            return Err(ConfigError::Validation(
+                "server.max_sessions_total must be between max_sessions_per_user and 100000".into(),
+            ));
+        }
 
         let database_path = resolve_path(base, &raw.server.database_path);
         let database_path = validate_database_path(&database_path)?;
@@ -230,6 +293,7 @@ impl Config {
             users.push(User {
                 username: user.username,
                 password_hash: user.password_hash,
+                disabled: user.disabled,
             });
         }
 
@@ -287,6 +351,12 @@ impl Config {
                 session_secret_file,
                 max_upload_size,
                 max_preview_size,
+                auth_max_concurrent: raw.server.auth_max_concurrent,
+                session_idle_timeout_seconds: raw.server.session_idle_timeout_seconds,
+                session_absolute_timeout_seconds: raw.server.session_absolute_timeout_seconds,
+                login_attempts_per_minute: raw.server.login_attempts_per_minute,
+                max_sessions_per_user: raw.server.max_sessions_per_user,
+                max_sessions_total: raw.server.max_sessions_total,
             },
             users,
             shares,
@@ -339,6 +409,30 @@ impl ServerConfig {
     pub fn max_preview_size(&self) -> u64 {
         self.max_preview_size
     }
+
+    pub fn auth_max_concurrent(&self) -> usize {
+        self.auth_max_concurrent
+    }
+
+    pub fn session_idle_timeout_seconds(&self) -> u64 {
+        self.session_idle_timeout_seconds
+    }
+
+    pub fn session_absolute_timeout_seconds(&self) -> u64 {
+        self.session_absolute_timeout_seconds
+    }
+
+    pub fn login_attempts_per_minute(&self) -> u32 {
+        self.login_attempts_per_minute
+    }
+
+    pub fn max_sessions_per_user(&self) -> usize {
+        self.max_sessions_per_user
+    }
+
+    pub fn max_sessions_total(&self) -> usize {
+        self.max_sessions_total
+    }
 }
 
 impl User {
@@ -349,6 +443,34 @@ impl User {
     pub fn password_hash(&self) -> &str {
         &self.password_hash
     }
+
+    pub fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+const fn default_auth_max_concurrent() -> usize {
+    1
+}
+
+const fn default_session_idle_timeout_seconds() -> u64 {
+    1_800
+}
+
+const fn default_session_absolute_timeout_seconds() -> u64 {
+    43_200
+}
+
+const fn default_login_attempts_per_minute() -> u32 {
+    5
+}
+
+const fn default_max_sessions_per_user() -> usize {
+    16
+}
+
+const fn default_max_sessions_total() -> usize {
+    4_096
 }
 
 impl Share {
@@ -714,6 +836,13 @@ permission = "write"
             .replace("read_only = false", "read_only = true");
         let config = tree.load(&text).unwrap();
         assert_eq!(config.server().max_upload_size(), 10 * 1024 * 1024);
+        assert_eq!(config.server().auth_max_concurrent(), 1);
+        assert_eq!(config.server().session_idle_timeout_seconds(), 1_800);
+        assert_eq!(config.server().session_absolute_timeout_seconds(), 43_200);
+        assert_eq!(config.server().login_attempts_per_minute(), 5);
+        assert_eq!(config.server().max_sessions_per_user(), 16);
+        assert_eq!(config.server().max_sessions_total(), 4_096);
+        assert!(!config.users()[0].disabled());
         assert_eq!(config.shares()[0].id(), "files");
         assert_eq!(config.shares()[0].name(), "Files");
         assert_eq!(
@@ -797,6 +926,43 @@ permission = "write"
                 .unwrap_err()
                 .to_string()
                 .contains("no control characters")
+        );
+    }
+
+    #[test]
+    fn authentication_resource_limits_are_bounded() {
+        let tree = TestTree::new();
+        let invalid_concurrency = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\nauth_max_concurrent = 0",
+        );
+        assert!(
+            tree.load(&invalid_concurrency)
+                .unwrap_err()
+                .to_string()
+                .contains("auth_max_concurrent")
+        );
+
+        let invalid_timeouts = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\nsession_idle_timeout_seconds = 600\nsession_absolute_timeout_seconds = 300",
+        );
+        assert!(
+            tree.load(&invalid_timeouts)
+                .unwrap_err()
+                .to_string()
+                .contains("must not exceed")
+        );
+
+        let invalid_session_caps = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\nmax_sessions_per_user = 20\nmax_sessions_total = 10",
+        );
+        assert!(
+            tree.load(&invalid_session_caps)
+                .unwrap_err()
+                .to_string()
+                .contains("max_sessions_total")
         );
     }
 

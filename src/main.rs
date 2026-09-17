@@ -4,10 +4,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use index::{
     app::{AppState, router},
+    auth::AuthService,
+    browse::{BrowseLimits, BrowseState, ConfiguredShare},
     config::Config,
+    filesystem::{GlobalPolicy, ShareFs, ShareId},
     password::hash_confirmed,
     preview::PreviewPolicy,
 };
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
@@ -70,11 +74,54 @@ async fn main() -> Result<()> {
     let config = Config::load(&cli.config).context("startup configuration is invalid")?;
     let preview_policy = PreviewPolicy::new(config.server().max_preview_size())
         .context("configured preview limit is unsafe")?;
+    let browse = browse_state(&config).context("cannot initialize configured shares")?;
     let listen = config.server().listen();
+    let auth = AuthService::from_config(&config).context("cannot initialize authentication")?;
     let listener = TcpListener::bind(listen).await?;
-    let app = router(AppState::new(true).with_preview_policy(preview_policy));
+    let app = router(
+        AppState::new(true)
+            .with_browse(browse)
+            .with_preview_policy(preview_policy)
+            .with_auth_service(auth),
+    );
 
     tracing::info!(%listen, config = %config.source().display(), "server listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
+}
+
+fn browse_state(config: &Config) -> Result<BrowseState> {
+    let shares = config
+        .shares()
+        .iter()
+        .map(|share| {
+            let id = ShareId::new(share.id().to_owned()).context("invalid share identifier")?;
+            let filesystem =
+                ShareFs::open(id, share.root()).context("cannot open configured share")?;
+            ConfiguredShare::new(share.name(), filesystem)
+                .context("invalid configured share display name")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let limits = BrowseLimits {
+        max_text_bytes: config.server().max_preview_size(),
+        ..BrowseLimits::default()
+    };
+    BrowseState::new(
+        shares,
+        limits,
+        GlobalPolicy::default(),
+        derive_cursor_key(config.session_secret()),
+    )
+    .context("invalid browse policy")
+}
+
+fn derive_cursor_key(secret: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"index:browse-cursor:v1\0");
+    digest.update(secret);
+    digest.finalize().into()
 }

@@ -9,6 +9,12 @@ use serde::Serialize;
 pub enum AppError {
     #[error("authentication required")]
     Unauthorized,
+    #[error("authentication failed")]
+    AuthenticationFailed,
+    #[error("request forbidden")]
+    Forbidden,
+    #[error("too many requests")]
+    TooManyRequests,
     #[error("resource not found")]
     NotFound,
     #[error("service is not ready")]
@@ -43,6 +49,17 @@ impl AppError {
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
                 "Authentication required",
+            ),
+            Self::AuthenticationFailed => (
+                StatusCode::UNAUTHORIZED,
+                "authentication_failed",
+                "Authentication failed",
+            ),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "Request forbidden"),
+            Self::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "Too many requests",
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::NotReady => (
@@ -90,9 +107,19 @@ impl IntoResponse for AppError {
         )
             .into_response();
         response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        response.headers_mut().insert(
             "x-content-type-options",
             axum::http::HeaderValue::from_static("nosniff"),
         );
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("60"),
+            );
+        }
         response
     }
 }

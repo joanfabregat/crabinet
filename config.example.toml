@@ -12,11 +12,23 @@ session_secret_file = "secrets/session.key"
 # Sizes are positive integers with an explicit binary unit: B, KiB, MiB, or GiB.
 max_upload_size = "100 MiB"
 max_preview_size = "2 MiB"
+# Each Argon2 verifier uses up to the hash's accepted memory parameter. Keep this at 1
+# for small pods and increase only after measuring the release image under its limit.
+auth_max_concurrent = 1
+session_idle_timeout_seconds = 1800
+session_absolute_timeout_seconds = 43200
+login_attempts_per_minute = 5
+# Deterministic oldest-first cleanup keeps persistent session state bounded even when
+# clients repeatedly omit their previous cookie.
+max_sessions_per_user = 16
+max_sessions_total = 4096
 
 # Generate a hash with `index hash-password`. Never put a clear-text password here.
 [[users]]
 username = "alice"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
+# Disabled users cannot log in and their existing sessions are rejected after restart.
+disabled = false
 
 # IDs are stable URL identifiers. Renaming one changes its externally visible identity.
 [[shares]]

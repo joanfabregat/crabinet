@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderName, HeaderValue, Request},
+    middleware,
     routing::get,
 };
 use serde::Serialize;
@@ -15,7 +16,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{assets, browse, error, preview};
+use crate::{assets, auth, browse, error, preview};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -25,6 +26,7 @@ pub struct AppState {
     ready: Arc<AtomicBool>,
     browse: Arc<browse::BrowseState>,
     preview_policy: preview::PreviewPolicy,
+    auth: Option<auth::AuthService>,
 }
 
 impl AppState {
@@ -33,6 +35,7 @@ impl AppState {
             ready: Arc::new(AtomicBool::new(ready)),
             browse: Arc::new(browse::BrowseState::disabled()),
             preview_policy: preview::PreviewPolicy::default(),
+            auth: None,
         }
     }
 
@@ -56,6 +59,20 @@ impl AppState {
     #[must_use]
     pub const fn preview_policy(&self) -> preview::PreviewPolicy {
         self.preview_policy
+    }
+
+    pub fn with_auth(ready: bool, auth: auth::AuthService) -> Self {
+        Self::new(ready).with_auth_service(auth)
+    }
+
+    #[must_use]
+    pub fn with_auth_service(mut self, auth: auth::AuthService) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    pub fn auth(&self) -> Option<&auth::AuthService> {
+        self.auth.as_ref()
     }
 
     pub fn set_ready(&self, ready: bool) {
@@ -97,8 +114,20 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Health>, error::App
 }
 
 pub fn router(state: AppState) -> Router {
-    let api = browse::router()
-        .merge(preview::router())
+    let protected = browse::router().merge(preview::router());
+    let protected = if state.auth().is_some() {
+        protected.route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_authentication,
+        ))
+    } else {
+        // Isolated handler tests inject a verified identity directly. Without one,
+        // the protected-route extractors still fail closed.
+        protected
+    };
+    let api = Router::new()
+        .merge(auth::router())
+        .merge(protected)
         .fallback(error::api_not_found);
 
     Router::new()
