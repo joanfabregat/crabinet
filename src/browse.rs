@@ -1003,11 +1003,8 @@ mod tests {
             .path()
             .join(".index-tmp-00000000000000000000000000000000");
         fs::write(&interrupted, b"incomplete").expect("interrupted write fixture");
-        let filesystem = ShareFs::open(
-            ShareId::new("documents").expect("share id"),
-            root.path(),
-        )
-        .expect("open share");
+        let filesystem = ShareFs::open(ShareId::new("documents").expect("share id"), root.path())
+            .expect("open share");
 
         ConfiguredShare::new("Documents", filesystem).expect("configured share");
 
