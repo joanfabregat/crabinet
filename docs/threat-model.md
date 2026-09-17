@@ -51,6 +51,8 @@ Configuration and mounted share roots are operator-trusted at startup. Filenames
 13. Logs, errors, test artifacts, and CI output exclude passwords, hashes, cookies, session IDs, secret contents, and file contents.
 14. Release images package the same tested binaries attached to the release; dependency and provenance evidence accompanies releases.
 
+The concrete path grammar, capability lifecycle, alias policy, platform assumptions, and authorization contract are specified in [Filesystem security boundary](filesystem-security.md).
+
 ## Threats and controls
 
 | Threat | Primary controls | Verification |
@@ -78,4 +80,3 @@ Configuration and mounted share roots are operator-trusted at startup. Filenames
 ## Security exception process
 
 Any exception to an invariant or scanner finding must be committed, narrowly scoped, name an owner, explain impact and compensating controls, link to a tracking issue, and include an expiry date. Permanent wildcard suppressions are not accepted.
-

@@ -1,0 +1,901 @@
+//! Capability-scoped filesystem access.
+//!
+//! Ambient paths are accepted exactly once, while constructing a [`ShareFs`]
+//! from operator-trusted configuration. Every request-time operation walks
+//! validated components from that already-open directory handle. Symlinks are
+//! never followed: intermediate directories use `open_dir_nofollow`, and final
+//! files use a no-follow open option before their opened handle is inspected.
+
+use std::{
+    fmt,
+    io::{Read, Write},
+    path::Path,
+};
+
+#[cfg(unix)]
+use cap_fs_ext::MetadataExt as _;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, File, OpenOptions},
+};
+use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
+
+const MAX_COMPONENT_BYTES: usize = 255;
+const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
+const MAX_SHARE_ID_BYTES: usize = 64;
+
+pub type FsResult<T> = Result<T, FsError>;
+
+/// A stable, non-disclosing category suitable for API error mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FsErrorCode {
+    AccessDenied,
+    Conflict,
+    InvalidPath,
+    NotFound,
+    TooLarge,
+    UnsupportedEntry,
+    Unavailable,
+}
+
+/// A filesystem error that intentionally contains no host path or OS detail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsError {
+    code: FsErrorCode,
+}
+
+impl FsError {
+    #[must_use]
+    pub const fn code(&self) -> FsErrorCode {
+        self.code
+    }
+
+    const fn new(code: FsErrorCode) -> Self {
+        Self { code }
+    }
+}
+
+impl fmt::Display for FsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self.code {
+            FsErrorCode::AccessDenied => "access denied",
+            FsErrorCode::Conflict => "entry already exists or changed",
+            FsErrorCode::InvalidPath => "invalid virtual path",
+            FsErrorCode::NotFound => "entry not found",
+            FsErrorCode::TooLarge => "entry exceeds the configured limit",
+            FsErrorCode::UnsupportedEntry => "unsupported filesystem entry",
+            FsErrorCode::Unavailable => "filesystem operation unavailable",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for FsError {}
+
+/// Stable configuration identifier for a mounted share.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ShareId(String);
+
+impl ShareId {
+    pub fn new(value: impl Into<String>) -> FsResult<Self> {
+        let value = value.into();
+        let valid = !value.is_empty()
+            && value.len() <= MAX_SHARE_ID_BYTES
+            && value.as_bytes()[0].is_ascii_alphanumeric()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            && value != "."
+            && value != "..";
+        valid
+            .then_some(Self(value))
+            .ok_or_else(|| FsError::new(FsErrorCode::InvalidPath))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ShareId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ShareId {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One validated filename component.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EntryName(String);
+
+impl EntryName {
+    pub fn new(value: impl Into<String>) -> FsResult<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_COMPONENT_BYTES
+            || matches!(value.as_str(), "." | "..")
+            || value.contains(['/', '\\', '\0'])
+            || value.contains(':')
+            || value.chars().any(char::is_control)
+            || value.ends_with(['.', ' '])
+            || contains_percent_escape(&value)
+            || !value.nfc().eq(value.chars())
+            || is_windows_device_name(&value)
+        {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EntryName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// A validated, slash-separated path relative to a share.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct VirtualPath(Vec<EntryName>);
+
+impl VirtualPath {
+    /// The explicit share root. Empty user-provided path strings remain invalid.
+    #[must_use]
+    pub const fn root() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn parse(value: &str) -> FsResult<Self> {
+        if value.is_empty() || value.len() > MAX_VIRTUAL_PATH_BYTES {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+        let components = value
+            .split('/')
+            .map(|component| EntryName::new(component.to_owned()))
+            .collect::<FsResult<Vec<_>>>()?;
+        Ok(Self(components))
+    }
+
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn components(&self) -> impl ExactSizeIterator<Item = &EntryName> {
+        self.0.iter()
+    }
+
+    fn split_file(&self) -> FsResult<(&[EntryName], &EntryName)> {
+        self.0
+            .split_last()
+            .map(|(name, parents)| (parents, name))
+            .ok_or_else(|| FsError::new(FsErrorCode::InvalidPath))
+    }
+}
+
+impl fmt::Display for VirtualPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, component) in self.0.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str("/")?;
+            }
+            formatter.write_str(component.as_str())?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessLevel {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShareGrant {
+    pub share_id: ShareId,
+    pub access: AccessLevel,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GlobalPolicy {
+    pub read_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryEntry {
+    pub name: EntryName,
+    pub kind: EntryKind,
+    pub size: u64,
+}
+
+/// An open capability for exactly one configured share root.
+pub struct ShareFs {
+    id: ShareId,
+    root: Dir,
+}
+
+impl ShareFs {
+    /// Opens an operator-trusted absolute directory without following a symlink
+    /// in the root's final component. Ambient authority is discarded afterward.
+    pub fn open(id: ShareId, trusted_root: &Path) -> FsResult<Self> {
+        if !trusted_root.is_absolute() {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+
+        let root = match (trusted_root.parent(), trusted_root.file_name()) {
+            (Some(parent), Some(name)) => {
+                let parent = Dir::open_ambient_dir(parent, ambient_authority()).map_err(map_io)?;
+                parent.open_dir_nofollow(name).map_err(map_io)?
+            }
+            _ => Dir::open_ambient_dir(trusted_root, ambient_authority()).map_err(map_io)?,
+        };
+
+        if !root.dir_metadata().map_err(map_io)?.is_dir() {
+            return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+        }
+        Ok(Self { id, root })
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &ShareId {
+        &self.id
+    }
+
+    /// Produces the only object that exposes request-time filesystem methods.
+    /// Missing and wrong-share grants use the same denial.
+    pub fn authorize<'share>(
+        &'share self,
+        grant: Option<&ShareGrant>,
+        policy: GlobalPolicy,
+    ) -> FsResult<AuthorizedShare<'share>> {
+        let grant = grant
+            .filter(|grant| grant.share_id == self.id)
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
+        let access = if policy.read_only {
+            AccessLevel::ReadOnly
+        } else {
+            grant.access
+        };
+        Ok(AuthorizedShare {
+            share: self,
+            access,
+        })
+    }
+
+    fn open_directory(&self, components: &[EntryName]) -> FsResult<Dir> {
+        let mut current = self.root.try_clone().map_err(map_io)?;
+        for component in components {
+            current = current
+                .open_dir_nofollow(component.as_str())
+                .map_err(map_io)?;
+        }
+        Ok(current)
+    }
+
+    fn open_parent<'path>(&self, path: &'path VirtualPath) -> FsResult<(Dir, &'path EntryName)> {
+        let (parents, name) = path.split_file()?;
+        Ok((self.open_directory(parents)?, name))
+    }
+}
+
+/// An authorization-bound view of one share. Cross-share moves are impossible
+/// by construction: operations never accept another `ShareFs` or ambient path.
+pub struct AuthorizedShare<'share> {
+    share: &'share ShareFs,
+    access: AccessLevel,
+}
+
+impl AuthorizedShare<'_> {
+    #[must_use]
+    pub const fn access(&self) -> AccessLevel {
+        self.access
+    }
+
+    pub fn list(&self, path: &VirtualPath) -> FsResult<Vec<DirectoryEntry>> {
+        let directory = self.share.open_directory(&path.0)?;
+        let mut result = Vec::new();
+        for entry in directory.entries().map_err(map_io)? {
+            let entry = entry.map_err(map_io)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+            let name =
+                EntryName::new(name).map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+            let metadata = entry.metadata().map_err(map_io)?;
+            let kind = classify_metadata(&metadata)?;
+            assert_no_external_alias(&metadata, kind)?;
+            result.push(DirectoryEntry {
+                name,
+                kind,
+                size: metadata.len(),
+            });
+        }
+        result.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(result)
+    }
+
+    pub fn read_file(&self, path: &VirtualPath, max_bytes: u64) -> FsResult<Vec<u8>> {
+        let mut file = self.open_regular_file(path, false)?;
+        let metadata = file.metadata().map_err(map_io)?;
+        if metadata.len() > max_bytes {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
+        let take_limit = max_bytes.saturating_add(1);
+        let mut bytes = Vec::with_capacity(metadata.len().min(max_bytes) as usize);
+        Read::by_ref(&mut file)
+            .take(take_limit)
+            .read_to_end(&mut bytes)
+            .map_err(map_io)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
+        Ok(bytes)
+    }
+
+    pub fn create_file(&self, path: &VirtualPath, contents: &[u8]) -> FsResult<()> {
+        self.require_write()?;
+        let (parent, name) = self.share.open_parent(path)?;
+        let mut options = secure_file_options();
+        options.write(true).create_new(true);
+        let mut file = parent.open_with(name.as_str(), &options).map_err(map_io)?;
+        validate_regular_handle(&file)?;
+        file.write_all(contents).map_err(map_io)?;
+        file.sync_all().map_err(map_io)
+    }
+
+    pub fn create_directory(&self, path: &VirtualPath) -> FsResult<()> {
+        self.require_write()?;
+        let (parent, name) = self.share.open_parent(path)?;
+        parent.create_dir(name.as_str()).map_err(map_io)?;
+        // Re-open without following so a concurrently substituted link is never accepted.
+        parent
+            .open_dir_nofollow(name.as_str())
+            .map(|_| ())
+            .map_err(map_io)
+    }
+
+    fn open_regular_file(&self, path: &VirtualPath, write: bool) -> FsResult<File> {
+        let (parent, name) = self.share.open_parent(path)?;
+        let mut options = secure_file_options();
+        options.read(!write).write(write);
+        let file = parent.open_with(name.as_str(), &options).map_err(map_io)?;
+        validate_regular_handle(&file)?;
+        Ok(file)
+    }
+
+    fn require_write(&self) -> FsResult<()> {
+        (self.access == AccessLevel::ReadWrite)
+            .then_some(())
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))
+    }
+}
+
+fn secure_file_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.follow(FollowSymlinks::No).nonblock(true);
+    options
+}
+
+fn validate_regular_handle(file: &File) -> FsResult<()> {
+    let metadata = file.metadata().map_err(map_io)?;
+    let kind = classify_metadata(&metadata)?;
+    if kind != EntryKind::File {
+        return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+    }
+    assert_no_external_alias(&metadata, kind)
+}
+
+fn classify_metadata(metadata: &cap_std::fs::Metadata) -> FsResult<EntryKind> {
+    if metadata.is_file() {
+        Ok(EntryKind::File)
+    } else if metadata.is_dir() {
+        Ok(EntryKind::Directory)
+    } else {
+        Err(FsError::new(FsErrorCode::UnsupportedEntry))
+    }
+}
+
+#[cfg(unix)]
+fn assert_no_external_alias(metadata: &cap_std::fs::Metadata, kind: EntryKind) -> FsResult<()> {
+    if kind == EntryKind::File && metadata.nlink() != 1 {
+        return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn assert_no_external_alias(_metadata: &cap_std::fs::Metadata, _kind: EntryKind) -> FsResult<()> {
+    // Production v1 is Linux-only. Other targets retain capability and
+    // no-follow enforcement but cannot make the hard-link alias guarantee.
+    Err(FsError::new(FsErrorCode::UnsupportedEntry))
+}
+
+fn contains_percent_escape(value: &str) -> bool {
+    value.as_bytes().windows(3).any(|window| {
+        window[0] == b'%' && window[1].is_ascii_hexdigit() && window[2].is_ascii_hexdigit()
+    })
+}
+
+fn is_windows_device_name(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value).to_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    let suffix: String = chars.collect();
+    matches!(prefix.as_str(), "COM" | "LPT")
+        && suffix.chars().count() == 1
+        && suffix
+            .chars()
+            .all(|character| character.is_ascii_digit() || "⁰¹²³⁴⁵⁶⁷⁸⁹".contains(character))
+}
+
+fn map_io(error: std::io::Error) -> FsError {
+    use std::io::ErrorKind;
+    let code = match error.kind() {
+        ErrorKind::NotFound | ErrorKind::NotADirectory => FsErrorCode::NotFound,
+        ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty => FsErrorCode::Conflict,
+        ErrorKind::InvalidInput | ErrorKind::InvalidFilename => FsErrorCode::InvalidPath,
+        ErrorKind::PermissionDenied => FsErrorCode::AccessDenied,
+        _ => FsErrorCode::Unavailable,
+    };
+    FsError::new(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, sync::Arc, thread};
+
+    use proptest::prelude::*;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn fixture() -> (TempDir, ShareFs, ShareGrant, ShareGrant) {
+        let temporary = TempDir::new().expect("temporary directory");
+        fs::write(temporary.path().join("hello.txt"), b"hello").expect("fixture file");
+        fs::create_dir(temporary.path().join("nested")).expect("fixture directory");
+        fs::write(temporary.path().join("nested/inside.txt"), b"inside")
+            .expect("nested fixture file");
+        let id = ShareId::new("documents").expect("valid share id");
+        let share = ShareFs::open(id.clone(), temporary.path()).expect("open share");
+        let read = ShareGrant {
+            share_id: id.clone(),
+            access: AccessLevel::ReadOnly,
+        };
+        let write = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadWrite,
+        };
+        (temporary, share, read, write)
+    }
+
+    #[test]
+    fn path_parser_rejects_ambiguous_or_escaping_input() {
+        let invalid = [
+            "",
+            "/etc/passwd",
+            "etc/",
+            "one//two",
+            ".",
+            "..",
+            "one/../two",
+            r"one\two",
+            "C:boot.ini",
+            "file%2fname",
+            "file%2Ename",
+            "nul",
+            "COM1.txt",
+            "LPT¹",
+            "trailing.",
+            "trailing ",
+            "control\nname",
+            "e\u{301}.txt",
+        ];
+        for value in invalid {
+            assert_eq!(
+                VirtualPath::parse(value).expect_err(value).code(),
+                FsErrorCode::InvalidPath,
+                "accepted {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_parser_preserves_normalized_unicode_and_literal_percent() {
+        let path = VirtualPath::parse("日本語/café/100%done.txt").expect("valid Unicode path");
+        assert_eq!(path.to_string(), "日本語/café/100%done.txt");
+    }
+
+    #[test]
+    fn path_length_properties_hold_at_boundaries() {
+        for length in [1, 2, 63, 254, 255] {
+            let value = "a".repeat(length);
+            assert!(EntryName::new(value).is_ok());
+        }
+        for length in [0, 256, 1024, 4097] {
+            let value = "a".repeat(length);
+            assert!(EntryName::new(value).is_err());
+        }
+        let too_long = format!("{}/{}", "a".repeat(2048), "b".repeat(2048));
+        assert_eq!(
+            VirtualPath::parse(&too_long)
+                .expect_err("path is too long")
+                .code(),
+            FsErrorCode::InvalidPath
+        );
+    }
+
+    #[test]
+    fn authorization_matrix_is_exhaustive() {
+        let (_temporary, share, read, write) = fixture();
+        let wrong = ShareGrant {
+            share_id: ShareId::new("other").expect("valid id"),
+            access: AccessLevel::ReadWrite,
+        };
+        let cases = [
+            (None, false, None),
+            (None, true, None),
+            (Some(&wrong), false, None),
+            (Some(&wrong), true, None),
+            (Some(&read), false, Some(AccessLevel::ReadOnly)),
+            (Some(&read), true, Some(AccessLevel::ReadOnly)),
+            (Some(&write), false, Some(AccessLevel::ReadWrite)),
+            (Some(&write), true, Some(AccessLevel::ReadOnly)),
+        ];
+        for (grant, global_read_only, expected) in cases {
+            let result = share.authorize(
+                grant,
+                GlobalPolicy {
+                    read_only: global_read_only,
+                },
+            );
+            match expected {
+                Some(access) => assert_eq!(result.expect("authorized").access(), access),
+                None => assert_eq!(
+                    result.err().expect("denied").code(),
+                    FsErrorCode::AccessDenied
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_and_global_read_only_block_mutations() {
+        let (_temporary, share, read, write) = fixture();
+        let path = VirtualPath::parse("new.txt").expect("valid path");
+        let read_only = share
+            .authorize(Some(&read), GlobalPolicy::default())
+            .expect("read access");
+        assert_eq!(
+            read_only
+                .create_file(&path, b"no")
+                .expect_err("read only")
+                .code(),
+            FsErrorCode::AccessDenied
+        );
+        let globally_read_only = share
+            .authorize(Some(&write), GlobalPolicy { read_only: true })
+            .expect("read access");
+        assert_eq!(
+            globally_read_only
+                .create_file(&path, b"no")
+                .expect_err("global read only")
+                .code(),
+            FsErrorCode::AccessDenied
+        );
+    }
+
+    #[test]
+    fn basic_operations_are_directory_relative() {
+        let (_temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        assert_eq!(
+            authorized
+                .read_file(&VirtualPath::parse("hello.txt").expect("path"), 5)
+                .expect("read"),
+            b"hello"
+        );
+        assert_eq!(
+            authorized
+                .read_file(&VirtualPath::parse("hello.txt").expect("path"), 4)
+                .expect_err("bounded read")
+                .code(),
+            FsErrorCode::TooLarge
+        );
+        authorized
+            .create_directory(&VirtualPath::parse("created").expect("path"))
+            .expect("create directory");
+        authorized
+            .create_file(
+                &VirtualPath::parse("created/file.txt").expect("path"),
+                b"first",
+            )
+            .expect("create file");
+        let listing = authorized
+            .list(&VirtualPath::parse("created").expect("path"))
+            .expect("list");
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].name.as_str(), "file.txt");
+        assert_eq!(listing[0].kind, EntryKind::File);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_roots_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let outside = TempDir::new().expect("outside directory");
+        let link_parent = TempDir::new().expect("link parent");
+        symlink(outside.path(), link_parent.path().join("root-link")).expect("root symlink");
+        assert!(
+            ShareFs::open(
+                ShareId::new("linked").expect("id"),
+                &link_parent.path().join("root-link")
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_symlinks_and_special_files_are_rejected() {
+        use std::{os::unix::fs::symlink, os::unix::net::UnixListener};
+
+        let (temporary, share, read, _write) = fixture();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("secret.txt"), b"secret").expect("secret");
+        symlink(outside.path(), temporary.path().join("escape")).expect("symlink");
+        let _socket = UnixListener::bind(temporary.path().join("socket")).expect("socket");
+        let authorized = share
+            .authorize(Some(&read), GlobalPolicy::default())
+            .expect("authorized");
+        for path in ["escape/secret.txt", "escape", "socket"] {
+            let path = VirtualPath::parse(path).expect("valid virtual path");
+            assert!(authorized.read_file(&path, 1024).is_err());
+        }
+        assert_eq!(
+            authorized
+                .list(&VirtualPath::root())
+                .expect_err("listing rejects unsupported entries")
+                .code(),
+            FsErrorCode::UnsupportedEntry
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_component_link_race_never_reads_outside() {
+        use std::os::unix::fs::symlink;
+
+        let (temporary, share, read, _write) = fixture();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("secret.txt"), b"secret").expect("secret");
+        let raced = temporary.path().join("raced.txt");
+        fs::write(&raced, b"inside").expect("inside");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let attacker_stop = Arc::clone(&stop);
+        let target = outside.path().join("secret.txt");
+        let attacker = thread::spawn(move || {
+            while !attacker_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = fs::remove_file(&raced);
+                let _ = symlink(&target, &raced);
+                let _ = fs::remove_file(&raced);
+                let _ = fs::write(&raced, b"inside");
+            }
+        });
+        let authorized = share
+            .authorize(Some(&read), GlobalPolicy::default())
+            .expect("authorized");
+        let path = VirtualPath::parse("raced.txt").expect("path");
+        for _ in 0..2_000 {
+            if let Ok(bytes) = authorized.read_file(&path, 32) {
+                assert_ne!(bytes, b"secret");
+                assert!(b"inside".starts_with(&bytes));
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        attacker.join().expect("attacker thread");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_aliases_are_rejected() {
+        let (temporary, share, read, _write) = fixture();
+        fs::hard_link(
+            temporary.path().join("hello.txt"),
+            temporary.path().join("alias.txt"),
+        )
+        .expect("hard link");
+        let authorized = share
+            .authorize(Some(&read), GlobalPolicy::default())
+            .expect("authorized");
+        assert_eq!(
+            authorized
+                .read_file(&VirtualPath::parse("alias.txt").expect("path"), 32)
+                .expect_err("alias rejected")
+                .code(),
+            FsErrorCode::UnsupportedEntry
+        );
+    }
+
+    #[test]
+    fn overlapping_shares_do_not_share_authority() {
+        let root = TempDir::new().expect("root");
+        fs::create_dir(root.path().join("child")).expect("child");
+        fs::write(root.path().join("root.txt"), b"root").expect("root file");
+        fs::write(root.path().join("child/child.txt"), b"child").expect("child file");
+        let root_id = ShareId::new("root").expect("id");
+        let child_id = ShareId::new("child").expect("id");
+        let root_share = ShareFs::open(root_id.clone(), root.path()).expect("root share");
+        let child_share =
+            ShareFs::open(child_id.clone(), &root.path().join("child")).expect("child share");
+        let root_grant = ShareGrant {
+            share_id: root_id,
+            access: AccessLevel::ReadWrite,
+        };
+        assert_eq!(
+            child_share
+                .authorize(Some(&root_grant), GlobalPolicy::default())
+                .err()
+                .expect("wrong share denied")
+                .code(),
+            FsErrorCode::AccessDenied
+        );
+        let root_access = root_share
+            .authorize(Some(&root_grant), GlobalPolicy::default())
+            .expect("root access");
+        assert_eq!(
+            root_access
+                .read_file(&VirtualPath::parse("child/child.txt").expect("path"), 32)
+                .expect("overlap is explicitly in root share"),
+            b"child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_names_are_rejected_without_lossy_conversion() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let (temporary, share, read, _write) = fixture();
+        fs::write(
+            temporary.path().join(OsString::from_vec(vec![0xff, b'x'])),
+            b"invalid",
+        )
+        .expect("invalid UTF-8 fixture");
+        let authorized = share
+            .authorize(Some(&read), GlobalPolicy::default())
+            .expect("authorized");
+        assert_eq!(
+            authorized
+                .list(&VirtualPath::root())
+                .expect_err("invalid UTF-8 rejected")
+                .code(),
+            FsErrorCode::UnsupportedEntry
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn valid_component_sequences_round_trip(
+            raw_components in proptest::collection::vec("[a-z]{1,32}", 1..16)
+        ) {
+            prop_assume!(raw_components
+                .iter()
+                .all(|component| EntryName::new(component.clone()).is_ok()));
+            let encoded = raw_components.join("/");
+            let parsed = VirtualPath::parse(&encoded).expect("generated valid path");
+            let decoded = parsed
+                .components()
+                .map(EntryName::as_str)
+                .collect::<Vec<_>>();
+            prop_assert_eq!(decoded, raw_components);
+            prop_assert_eq!(parsed.to_string(), encoded);
+        }
+
+        #[test]
+        fn separators_and_percent_triplets_are_always_rejected(
+            prefix in "[a-z]{1,24}",
+            suffix in "[a-z]{1,24}",
+            high in prop::sample::select(vec![b'0', b'2', b'9', b'a', b'A', b'f', b'F']),
+            low in prop::sample::select(vec![b'0', b'2', b'9', b'a', b'A', b'f', b'F']),
+        ) {
+            for candidate in [
+                format!("{prefix}\\{suffix}"),
+                format!("{prefix}//{suffix}"),
+                format!("{prefix}/../{suffix}"),
+                format!("{prefix}%{}{}{suffix}", high as char, low as char),
+            ] {
+                prop_assert!(VirtualPath::parse(&candidate).is_err(), "accepted {candidate:?}");
+            }
+        }
+
+        #[test]
+        fn accepted_entry_names_satisfy_the_public_grammar(value in any::<String>()) {
+            if let Ok(name) = EntryName::new(value.clone()) {
+                prop_assert!(!name.as_str().is_empty());
+                prop_assert!(name.as_str().len() <= MAX_COMPONENT_BYTES);
+                prop_assert!(!name.as_str().contains(['/', '\\', '\0', ':']));
+                prop_assert!(!contains_percent_escape(name.as_str()));
+                prop_assert!(name.as_str().nfc().eq(name.as_str().chars()));
+                prop_assert_eq!(
+                    VirtualPath::parse(name.as_str())
+                        .expect("accepted entry is a valid one-component path")
+                        .to_string(),
+                    value
+                );
+            }
+        }
+
+        #[test]
+        fn authorization_obeys_grant_and_global_read_only_properties(
+            grant_kind in 0_u8..4,
+            global_read_only in any::<bool>(),
+        ) {
+            let temporary = TempDir::new().expect("temporary directory");
+            let id = ShareId::new("documents").expect("valid id");
+            let share = ShareFs::open(id.clone(), temporary.path()).expect("open share");
+            let grant = match grant_kind {
+                0 => None,
+                1 => Some(ShareGrant { share_id: id, access: AccessLevel::ReadOnly }),
+                2 => Some(ShareGrant { share_id: id, access: AccessLevel::ReadWrite }),
+                _ => Some(ShareGrant {
+                    share_id: ShareId::new("another-share").expect("valid other id"),
+                    access: AccessLevel::ReadWrite,
+                }),
+            };
+            let result = share.authorize(
+                grant.as_ref(),
+                GlobalPolicy { read_only: global_read_only },
+            );
+            match (grant_kind, global_read_only) {
+                (0 | 3, _) => prop_assert_eq!(
+                    result.err().expect("missing grant denied").code(),
+                    FsErrorCode::AccessDenied
+                ),
+                (1, _) | (_, true) => {
+                    prop_assert_eq!(result.expect("read access").access(), AccessLevel::ReadOnly)
+                }
+                _ => prop_assert_eq!(
+                    result.expect("write access").access(),
+                    AccessLevel::ReadWrite
+                ),
+            }
+        }
+    }
+}

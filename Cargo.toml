@@ -10,6 +10,8 @@ repository = "https://github.com/joanfabregat/index"
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["json", "multipart"] }
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 mime_guess = "2.0.5"
 rust-embed = { version = "8.12.0", features = ["include-exclude"] }
@@ -21,8 +23,10 @@ tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["request-id", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 
 [profile.release]
