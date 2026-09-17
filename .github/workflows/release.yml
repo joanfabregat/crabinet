@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing signed semantic-version tag to resume
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,6 +20,7 @@ env:
   NODE_VERSION: 24
   TRIVY_VERSION: v0.74.0
   SYFT_VERSION: v1.51.1
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
   verify:
@@ -29,9 +36,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
       - name: Validate semantic version tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Release tags must be semantic versions such as v1.2.3" >&2
@@ -40,12 +46,12 @@ jobs:
       - name: Require successful CI on the tagged commit
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ github.sha }}
         run: |
+          release_sha=$(git rev-parse HEAD)
           required=(Frontend Rust "Browser E2E" "Dependency policy" Semgrep Trivy)
           checks=$(gh api --paginate \
             -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}/check-runs?per_page=100" \
+            "repos/${GITHUB_REPOSITORY}/commits/${release_sha}/check-runs?per_page=100" \
             --jq '.check_runs[] | [.name, .conclusion] | @tsv')
           for name in "${required[@]}"; do
             if ! awk -F '\t' -v required="${name}" '$1 == required && $2 == "success" { found=1 } END { exit !found }' <<<"${checks}"; then
@@ -64,6 +70,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -109,6 +116,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
       - name: Download immutable frontend assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -128,7 +136,7 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ env.RELEASE_TAG }}
         run: |
           binary="target/${TARGET}/release/index"
           if ldd "${binary}" 2>&1 | grep -vqiE 'not a dynamic executable|statically linked'; then
@@ -148,7 +156,7 @@ jobs:
         with:
           path: release/index-linux-${{ matrix.arch }}
           format: spdx-json
-          output-file: release/index-${{ github.ref_name }}-linux-${{ matrix.arch }}.spdx.json
+          output-file: release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.spdx.json
           syft-version: ${{ env.SYFT_VERSION }}
           upload-artifact: false
           upload-release-assets: false
@@ -156,7 +164,6 @@ jobs:
         working-directory: release
         env:
           ARCH: ${{ matrix.arch }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           sha256sum \
             "index-${RELEASE_TAG}-linux-${ARCH}.tar.gz" \
@@ -165,15 +172,15 @@ jobs:
       - name: Attest binary archive
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: release/index-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz
+          subject-path: release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
       - name: Upload release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.arch }}
           path: |
             release/index-linux-${{ matrix.arch }}
-            release/index-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz
-            release/index-${{ github.ref_name }}-linux-${{ matrix.arch }}.spdx.json
+            release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
+            release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.spdx.json
             release/SHA256SUMS-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 1
@@ -195,6 +202,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
       - name: Download exact release executable
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -210,10 +218,16 @@ jobs:
           context: .
           file: Containerfile
           platforms: linux/${{ matrix.arch }}
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ env.RELEASE_TAG }}
           outputs: type=oci,dest=image-output/index-${{ matrix.arch }}.tar
           provenance: mode=max
           sbom: true
+      - name: Extract OCI layout for scanning
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "image-output/index-${ARCH}"
+          tar -xf "image-output/index-${ARCH}.tar" -C "image-output/index-${ARCH}"
       - name: Scan exact OCI archive
         id: scan
         continue-on-error: true
@@ -221,7 +235,7 @@ jobs:
         with:
           version: ${{ env.TRIVY_VERSION }}
           scan-type: image
-          input: image-output/index-${{ matrix.arch }}.tar
+          input: image-output/index-${{ matrix.arch }}
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
@@ -243,7 +257,7 @@ jobs:
         with:
           file: image-output/index-${{ matrix.arch }}.tar
           format: spdx-json
-          output-file: image-output/image-${{ github.ref_name }}-${{ matrix.arch }}.spdx.json
+          output-file: image-output/image-${{ env.RELEASE_TAG }}-${{ matrix.arch }}.spdx.json
           syft-version: ${{ env.SYFT_VERSION }}
           upload-artifact: false
           upload-release-assets: false
@@ -270,6 +284,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
       - name: Download release inputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -299,7 +314,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: ghcr.io/${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           version="${RELEASE_TAG#v}"
           IFS=. read -r major minor _patch <<<"${version%%[-+]*}"
@@ -339,14 +353,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_flags=()
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
             release_flags+=(--prerelease)
           fi
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --generate-notes \
-            --title "Index ${GITHUB_REF_NAME}" \
+            --title "Index ${RELEASE_TAG}" \
             "${release_flags[@]}" \
             publish/index-*.tar.gz \
             publish/index-*.spdx.json \
