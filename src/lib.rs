@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod assets;
+pub mod browse;
 pub mod config;
 pub mod error;
 pub mod filesystem;

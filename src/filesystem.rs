@@ -10,6 +10,7 @@ use std::{
     fmt,
     io::{Read, Write},
     path::Path,
+    time::SystemTime,
 };
 
 #[cfg(unix)]
@@ -233,6 +234,54 @@ pub struct DirectoryEntry {
     pub name: EntryName,
     pub kind: EntryKind,
     pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub(crate) file_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EntryMetadata {
+    pub kind: EntryKind,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub(crate) file_id: u64,
+}
+
+/// A validated regular-file handle whose authority is limited to one share.
+///
+/// The API layer owns this handle while streaming. Dropping a response body
+/// closes the handle, so client cancellation does not leave background reads.
+pub struct OpenedFile {
+    file: File,
+    len: u64,
+    modified: Option<SystemTime>,
+    file_id: u64,
+}
+
+impl OpenedFile {
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub const fn modified(&self) -> Option<SystemTime> {
+        self.modified
+    }
+
+    #[must_use]
+    pub const fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
+    #[must_use]
+    pub fn into_std(self) -> std::fs::File {
+        self.file.into_std()
+    }
 }
 
 /// An open capability for exactly one configured share root.
@@ -319,9 +368,23 @@ impl AuthorizedShare<'_> {
     }
 
     pub fn list(&self, path: &VirtualPath) -> FsResult<Vec<DirectoryEntry>> {
+        self.list_bounded(path, usize::MAX)
+    }
+
+    /// Lists at most `max_entries` from a directory. The implementation reads
+    /// one additional entry so it can reject an oversized directory without
+    /// allocating proportionally to attacker-controlled directory contents.
+    pub fn list_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> FsResult<Vec<DirectoryEntry>> {
         let directory = self.share.open_directory(&path.0)?;
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(max_entries.min(256));
         for entry in directory.entries().map_err(map_io)? {
+            if result.len() == max_entries {
+                return Err(FsError::new(FsErrorCode::TooLarge));
+            }
             let entry = entry.map_err(map_io)?;
             let name = entry
                 .file_name()
@@ -336,10 +399,45 @@ impl AuthorizedShare<'_> {
                 name,
                 kind,
                 size: metadata.len(),
+                modified: metadata.modified().ok().map(|time| time.into_std()),
+                file_id: metadata_identity(&metadata),
             });
         }
         result.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(result)
+    }
+
+    pub fn open_file(&self, path: &VirtualPath) -> FsResult<OpenedFile> {
+        let file = self.open_regular_file(path, false)?;
+        let metadata = file.metadata().map_err(map_io)?;
+        Ok(OpenedFile {
+            file,
+            len: metadata.len(),
+            modified: metadata.modified().ok().map(|time| time.into_std()),
+            file_id: metadata_identity(&metadata),
+        })
+    }
+
+    /// Reads metadata from an opened no-follow handle rather than trusting a
+    /// path-based pre-check. Files and directories are the only accepted kinds.
+    pub fn metadata(&self, path: &VirtualPath) -> FsResult<EntryMetadata> {
+        match self.open_regular_file(path, false) {
+            Ok(file) => {
+                let metadata = file.metadata().map_err(map_io)?;
+                Ok(entry_metadata(&metadata, EntryKind::File))
+            }
+            Err(error) if error.code() == FsErrorCode::UnsupportedEntry => {
+                let (parent, name) = self.share.open_parent(path)?;
+                let directory = parent.open_dir_nofollow(name.as_str()).map_err(map_io)?;
+                let metadata = directory.dir_metadata().map_err(map_io)?;
+                let kind = classify_metadata(&metadata)?;
+                if kind != EntryKind::Directory {
+                    return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+                }
+                Ok(entry_metadata(&metadata, kind))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn read_file(&self, path: &VirtualPath, max_bytes: u64) -> FsResult<Vec<u8>> {
@@ -423,6 +521,25 @@ fn classify_metadata(metadata: &cap_std::fs::Metadata) -> FsResult<EntryKind> {
     }
 }
 
+fn entry_metadata(metadata: &cap_std::fs::Metadata, kind: EntryKind) -> EntryMetadata {
+    EntryMetadata {
+        kind,
+        size: metadata.len(),
+        modified: metadata.modified().ok().map(|time| time.into_std()),
+        file_id: metadata_identity(metadata),
+    }
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &cap_std::fs::Metadata) -> u64 {
+    metadata.ino()
+}
+
+#[cfg(not(unix))]
+fn metadata_identity(_metadata: &cap_std::fs::Metadata) -> u64 {
+    0
+}
+
 #[cfg(unix)]
 fn assert_no_external_alias(metadata: &cap_std::fs::Metadata, kind: EntryKind) -> FsResult<()> {
     if kind == EntryKind::File && metadata.nlink() != 1 {
@@ -464,12 +581,21 @@ fn is_windows_device_name(value: &str) -> bool {
 
 fn map_io(error: std::io::Error) -> FsError {
     use std::io::ErrorKind;
-    let code = match error.kind() {
-        ErrorKind::NotFound | ErrorKind::NotADirectory => FsErrorCode::NotFound,
-        ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty => FsErrorCode::Conflict,
-        ErrorKind::InvalidInput | ErrorKind::InvalidFilename => FsErrorCode::InvalidPath,
-        ErrorKind::PermissionDenied => FsErrorCode::AccessDenied,
-        _ => FsErrorCode::Unavailable,
+    // Linux returns ELOOP (40) when O_NOFOLLOW rejects a final symbolic link,
+    // and ENXIO/ENODEV (6/19) when opening some special files. Treat those as
+    // unsupported entries rather than operational failures so the HTTP
+    // boundary can use the same non-disclosing response as missing and
+    // unauthorized paths. Linux is the explicitly supported v1 target.
+    let code = if matches!(error.raw_os_error(), Some(6) | Some(19) | Some(40)) {
+        FsErrorCode::UnsupportedEntry
+    } else {
+        match error.kind() {
+            ErrorKind::NotFound | ErrorKind::NotADirectory => FsErrorCode::NotFound,
+            ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty => FsErrorCode::Conflict,
+            ErrorKind::InvalidInput | ErrorKind::InvalidFilename => FsErrorCode::InvalidPath,
+            ErrorKind::PermissionDenied => FsErrorCode::AccessDenied,
+            _ => FsErrorCode::Unavailable,
+        }
     };
     FsError::new(code)
 }

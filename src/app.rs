@@ -15,7 +15,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{assets, error};
+use crate::{assets, browse, error};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -23,13 +23,26 @@ const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 #[derive(Clone)]
 pub struct AppState {
     ready: Arc<AtomicBool>,
+    browse: Arc<browse::BrowseState>,
 }
 
 impl AppState {
     pub fn new(ready: bool) -> Self {
         Self {
             ready: Arc::new(AtomicBool::new(ready)),
+            browse: Arc::new(browse::BrowseState::disabled()),
         }
+    }
+
+    #[must_use]
+    pub fn with_browse(mut self, browse: browse::BrowseState) -> Self {
+        self.browse = Arc::new(browse);
+        self
+    }
+
+    #[must_use]
+    pub fn browse(&self) -> &browse::BrowseState {
+        &self.browse
     }
 
     pub fn set_ready(&self, ready: bool) {
@@ -71,7 +84,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Health>, error::App
 }
 
 pub fn router(state: AppState) -> Router {
-    let api = Router::new().fallback(error::api_not_found);
+    let api = browse::router().fallback(error::api_not_found);
 
     Router::new()
         .route("/health/live", get(live))
