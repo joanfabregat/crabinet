@@ -1,0 +1,11 @@
+version = 1
+{{SERVER}}
+{{USER}}
+[[shares]]
+id = "parent"
+name = "Parent"
+path = "{{ROOT}}"
+[[shares]]
+id = "child"
+name = "Child"
+path = "{{CHILD}}"

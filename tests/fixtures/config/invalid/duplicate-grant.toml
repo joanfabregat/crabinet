@@ -1,0 +1,13 @@
+version = 1
+{{SERVER}}
+{{USER}}
+[[shares]]
+id = "documents"
+name = "Documents"
+path = "{{ROOT}}"
+[[shares.grants]]
+user = "alice"
+permission = "read"
+[[shares.grants]]
+user = "alice"
+permission = "write"

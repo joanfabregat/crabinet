@@ -1,0 +1,6 @@
+version = 1
+{{SERVER}}
+[[users]]
+username = "alice"
+password_hash = "$2b$12$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+{{SHARE}}
