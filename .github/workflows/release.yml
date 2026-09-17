@@ -338,11 +338,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_flags=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --generate-notes \
             --title "Index ${GITHUB_REF_NAME}" \
+            "${release_flags[@]}" \
             publish/index-*.tar.gz \
             publish/index-*.spdx.json \
             images/image-*.spdx.json \
