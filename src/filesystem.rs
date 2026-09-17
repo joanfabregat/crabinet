@@ -1542,8 +1542,7 @@ mod tests {
             temporary.path().join(&reserved_link),
         )
         .expect("reserved symlink");
-        fs::create_dir(temporary.path().join(&reserved_directory))
-            .expect("reserved directory");
+        fs::create_dir(temporary.path().join(&reserved_directory)).expect("reserved directory");
         symlink(outside.path(), temporary.path().join("directory-link"))
             .expect("directory symlink");
         let _socket = UnixListener::bind(temporary.path().join("socket")).expect("socket");
