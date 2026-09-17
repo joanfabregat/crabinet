@@ -180,6 +180,7 @@ impl From<FsErrorCode> for PreviewError {
         match value {
             FsErrorCode::AccessDenied => Self::AccessDenied,
             FsErrorCode::Conflict => Self::Unavailable,
+            FsErrorCode::CrossDevice => Self::Unavailable,
             FsErrorCode::InvalidPath => Self::InvalidPath,
             FsErrorCode::NotFound => Self::NotFound,
             FsErrorCode::TooLarge => Self::TooLarge,

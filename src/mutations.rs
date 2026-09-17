@@ -682,6 +682,7 @@ fn fs_reason(code: FsErrorCode) -> &'static str {
     match code {
         FsErrorCode::AccessDenied => "access_denied",
         FsErrorCode::Conflict => "conflict",
+        FsErrorCode::CrossDevice => "cross_device",
         FsErrorCode::InvalidPath => "invalid_path",
         FsErrorCode::NotFound => "not_found",
         FsErrorCode::TooLarge => "too_large",
@@ -694,6 +695,7 @@ fn map_mutation_fs_error(error: FsError) -> AppError {
     match error.code() {
         FsErrorCode::AccessDenied => AppError::Forbidden,
         FsErrorCode::Conflict => AppError::Conflict,
+        FsErrorCode::CrossDevice => AppError::InvalidRequest,
         FsErrorCode::InvalidPath => AppError::InvalidRequest,
         FsErrorCode::TooLarge => AppError::TooLarge,
         FsErrorCode::Unavailable => AppError::Internal,

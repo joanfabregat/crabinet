@@ -95,7 +95,7 @@ permission = "write"
 
 Generate hashes only with `index hash-password`; clear-text passwords are never accepted in arguments or environment variables. Keep the session secret out of TOML and every share. Index reads configuration and secrets once, validates all roots before listening, rejects unknown fields, and never hot-reloads. Restart after every policy, user, hash, secret, grant, or limit change. Rotating the session secret invalidates all sessions; changing a password hash or disabling/removing a user takes effect after restart.
 
-A share grant is absent-by-default. `permission = "read"` cannot mutate. `permission = "write"` can mutate unless the share's `read_only = true`, which always wins. The OS user must still have matching host permissions. Writable shares must be mounted into only one Index process; read-only shares may be served by separate read-only replicas.
+A share grant is absent-by-default. `permission = "read"` cannot mutate. `permission = "write"` can mutate unless the share's `read_only = true`, which always wins. The OS user must still have matching host permissions. Each writable share receives a private mode-`0700` `.index-staging` directory for atomic uploads and bounded crash recovery; Index never scans the complete share at startup. Writable shares must be mounted into only one Index process; read-only shares create no staging state and may be served by separate read-only replicas.
 
 ## Rootless Podman pod
 
@@ -178,7 +178,7 @@ For rollback, stop the new process before starting the old one. Restore the pre-
 
 Index emits structured JSON logs to standard output. Set `RUST_LOG=index=debug` only during controlled diagnosis; logs are designed not to include passwords, password hashes, file contents, host paths, session tokens, or CSRF tokens. Every HTTP response includes `X-Request-ID`; correlate that value with the request span.
 
-- Startup fails before listening: run `index check-config`; verify secret mode/length, database parent existence, absolute non-overlapping share roots, and that no sensitive path is inside a share.
+- Startup fails before listening: run `index check-config`; verify secret mode/length, database parent existence, absolute non-overlapping share roots, that no sensitive path is inside a share, and that writable share roots permit creation of the private `.index-staging` directory.
 - Login succeeds but the browser returns to login: confirm end-to-end HTTPS, preserved `Host`, and matching `Origin`; `Secure` cookies are not for plain network HTTP.
 - A user cannot see a share: grants are case-sensitive and absent-by-default; restart after changing the immutable configuration.
 - Writes return `403`: verify a `write` grant, `read_only = false`, a current session/CSRF token, and host filesystem permissions.

@@ -500,6 +500,14 @@ impl Share {
         self.read_only
     }
 
+    pub fn writable(&self) -> bool {
+        !self.read_only
+            && self
+                .grants
+                .values()
+                .any(|permission| *permission == Permission::Write)
+    }
+
     pub fn permission_for(&self, username: &str) -> Option<Permission> {
         self.grants.get(username).map(|permission| {
             if self.read_only {
@@ -867,12 +875,29 @@ permission = "write"
         assert!(!config.users()[0].disabled());
         assert_eq!(config.shares()[0].id(), "files");
         assert_eq!(config.shares()[0].name(), "Files");
+        assert!(!config.shares()[0].writable());
         assert_eq!(
             config.shares()[0].permission_for("alice"),
             Some(Permission::Read)
         );
         assert_eq!(config.shares()[0].permission_for("bob"), None);
         assert!(!format!("{config:?}").contains(HASH));
+    }
+
+    #[test]
+    fn a_share_is_writable_only_with_an_effective_write_grant() {
+        let tree = TestTree::new();
+        let writable = tree.load(&tree.valid_text()).expect("writable config");
+        assert!(writable.shares()[0].writable());
+
+        let without_write = tree
+            .load(
+                &tree
+                    .valid_text()
+                    .replace("permission = \"write\"", "permission = \"read\""),
+            )
+            .expect("read-only grant config");
+        assert!(!without_write.shares()[0].writable());
     }
 
     #[test]

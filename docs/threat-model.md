@@ -65,7 +65,7 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 | Session theft/fixation | Random opaque IDs, hashed server records, rotation, expiry, secure cookies | HTTP integration tests |
 | CSRF | CSRF token plus Origin/Referer validation and SameSite cookies | Cross-origin request tests |
 | Stored XSS/active HTML | Inert rendering, sanitizer, CSP sandbox, iframe sandbox | Real-browser hostile fixtures |
-| Upload exhaustion | Streaming, request/file/count/quota limits, cleanup, bounded concurrency | Multipart failure and resource tests |
+| Upload exhaustion | Streaming, request/file/count/quota limits, private per-share staging, bounded non-recursive recovery, cleanup, bounded concurrency | Multipart failure, staging recovery, and resource tests |
 | Header injection/content sniffing | Validated header values, safe disposition encoding, `nosniff` | Response-header tests |
 | Dependency or workflow compromise | Lockfiles, dependency review, Semgrep, Trivy, pinned Actions, minimal permissions, attestations | Pull-request, weekly, and release CI |
 | Overbroad host access | Explicit mounts, non-root image, read-only rootfs, dropped capabilities | Container smoke tests and operator documentation |

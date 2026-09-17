@@ -104,11 +104,15 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
         .iter()
         .map(|share| {
             let id = ShareId::new(share.id().to_owned()).context("invalid share identifier")?;
-            let filesystem =
-                ShareFs::open(id, share.root()).context("cannot open configured share")?;
+            let filesystem = if share.writable() {
+                ShareFs::open(id, share.root())
+            } else {
+                ShareFs::open_read_only(id, share.root())
+            }
+            .context("cannot open configured share")?;
             let recovered = filesystem
-                .recover_temporary_files(1_000_000)
-                .context("cannot recover interrupted share writes")?;
+                .recover_staging_files(100_000)
+                .context("cannot recover interrupted staged writes")?;
             if recovered > 0 {
                 tracing::warn!(
                     share_id = share.id(),

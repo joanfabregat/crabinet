@@ -13,7 +13,6 @@ use std::{
     time::SystemTime,
 };
 
-#[cfg(unix)]
 use cap_fs_ext::MetadataExt as _;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::{
@@ -26,6 +25,7 @@ use unicode_normalization::UnicodeNormalization;
 const MAX_COMPONENT_BYTES: usize = 255;
 const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
 const MAX_SHARE_ID_BYTES: usize = 64;
+const INTERNAL_STAGING_DIRECTORY: &str = ".index-staging";
 const INTERNAL_TEMP_PREFIX: &str = ".index-tmp-";
 
 pub type FsResult<T> = Result<T, FsError>;
@@ -35,6 +35,7 @@ pub type FsResult<T> = Result<T, FsError>;
 pub enum FsErrorCode {
     AccessDenied,
     Conflict,
+    CrossDevice,
     InvalidPath,
     NotFound,
     TooLarge,
@@ -64,6 +65,7 @@ impl fmt::Display for FsError {
         let message = match self.code {
             FsErrorCode::AccessDenied => "access denied",
             FsErrorCode::Conflict => "entry already exists or changed",
+            FsErrorCode::CrossDevice => "destination crosses a filesystem boundary",
             FsErrorCode::InvalidPath => "invalid virtual path",
             FsErrorCode::NotFound => "entry not found",
             FsErrorCode::TooLarge => "entry exceeds the configured limit",
@@ -136,6 +138,7 @@ impl EntryName {
             || contains_percent_escape(&value)
             || !value.nfc().eq(value.chars())
             || is_windows_device_name(&value)
+            || value == INTERNAL_STAGING_DIRECTORY
             || value.starts_with(INTERNAL_TEMP_PREFIX)
         {
             return Err(FsError::new(FsErrorCode::InvalidPath));
@@ -266,10 +269,11 @@ pub struct EntryMetadata {
     pub(crate) file_id: u64,
 }
 
-/// A newly-created sibling temporary file. Dropping it before publication
-/// removes the temporary name, including when an async request is cancelled.
+/// A newly-created private staging file. Dropping it before publication removes
+/// the temporary name, including when an async request is cancelled.
 pub struct PendingWrite {
-    parent: Dir,
+    staging: Dir,
+    destination_parent: Dir,
     temporary_name: String,
     destination_name: EntryName,
     file: File,
@@ -287,56 +291,62 @@ impl PendingWrite {
         let expected = raw_file_metadata(&self.file)?;
         self.file.sync_all().map_err(map_io)?;
         rustix::fs::renameat_with(
-            &self.parent,
+            &self.staging,
             &self.temporary_name,
-            &self.parent,
+            &self.destination_parent,
             self.destination_name.as_str(),
             rustix::fs::RenameFlags::NOREPLACE,
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-        if metadata_in_parent_raw(&self.parent, self.destination_name.as_str()) != Ok(expected) {
-            let _ = self.parent.remove_file(self.destination_name.as_str());
+        if metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
+            != Ok(expected)
+        {
+            let _ = self
+                .destination_parent
+                .remove_file(self.destination_name.as_str());
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         self.published = true;
-        sync_directory(&self.parent)
+        sync_directory(&self.staging)?;
+        sync_directory(&self.destination_parent)
     }
 
     pub fn publish_replacement(mut self, expected: EntryMetadata) -> FsResult<()> {
         validate_regular_handle(&self.file)?;
         let replacement = raw_file_metadata(&self.file)?;
         self.file.sync_all().map_err(map_io)?;
-        let current = metadata_in_parent(&self.parent, &self.destination_name)?;
+        let current = metadata_in_parent(&self.destination_parent, &self.destination_name)?;
         if current != expected || current.kind != EntryKind::File {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         rustix::fs::renameat_with(
-            &self.parent,
+            &self.staging,
             &self.temporary_name,
-            &self.parent,
+            &self.destination_parent,
             self.destination_name.as_str(),
             rustix::fs::RenameFlags::EXCHANGE,
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-        let valid_exchange = metadata_in_parent_raw(&self.parent, self.destination_name.as_str())
-            == Ok(replacement)
-            && metadata_in_parent_raw(&self.parent, &self.temporary_name) == Ok(expected);
+        let valid_exchange =
+            metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
+                == Ok(replacement)
+                && metadata_in_parent_raw(&self.staging, &self.temporary_name) == Ok(expected);
         if !valid_exchange {
             rustix::fs::renameat_with(
-                &self.parent,
+                &self.staging,
                 &self.temporary_name,
-                &self.parent,
+                &self.destination_parent,
                 self.destination_name.as_str(),
                 rustix::fs::RenameFlags::EXCHANGE,
             )
             .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
             return Err(FsError::new(FsErrorCode::Conflict));
         }
-        if let Err(error) = self.parent.remove_file(&self.temporary_name) {
+        if let Err(error) = self.staging.remove_file(&self.temporary_name) {
             let rollback = rustix::fs::renameat_with(
-                &self.parent,
+                &self.staging,
                 &self.temporary_name,
-                &self.parent,
+                &self.destination_parent,
                 self.destination_name.as_str(),
                 rustix::fs::RenameFlags::EXCHANGE,
             );
@@ -348,14 +358,15 @@ impl PendingWrite {
             };
         }
         self.published = true;
-        sync_directory(&self.parent)
+        sync_directory(&self.staging)?;
+        sync_directory(&self.destination_parent)
     }
 }
 
 impl Drop for PendingWrite {
     fn drop(&mut self) {
         if !self.published {
-            let _ = self.parent.remove_file(&self.temporary_name);
+            let _ = self.staging.remove_file(&self.temporary_name);
         }
     }
 }
@@ -402,12 +413,23 @@ impl OpenedFile {
 pub struct ShareFs {
     id: ShareId,
     root: Dir,
+    staging: Option<Dir>,
 }
 
 impl ShareFs {
     /// Opens an operator-trusted absolute directory without following a symlink
     /// in the root's final component. Ambient authority is discarded afterward.
     pub fn open(id: ShareId, trusted_root: &Path) -> FsResult<Self> {
+        Self::open_with_writes(id, trusted_root, true)
+    }
+
+    /// Opens a share without creating writable staging state. Any write grant
+    /// presented to this instance is reduced to read-only access.
+    pub fn open_read_only(id: ShareId, trusted_root: &Path) -> FsResult<Self> {
+        Self::open_with_writes(id, trusted_root, false)
+    }
+
+    fn open_with_writes(id: ShareId, trusted_root: &Path, writable: bool) -> FsResult<Self> {
         if !trusted_root.is_absolute() {
             return Err(FsError::new(FsErrorCode::InvalidPath));
         }
@@ -423,7 +445,10 @@ impl ShareFs {
         if !root.dir_metadata().map_err(map_io)?.is_dir() {
             return Err(FsError::new(FsErrorCode::UnsupportedEntry));
         }
-        Ok(Self { id, root })
+        let staging = writable
+            .then(|| open_staging_directory(&root))
+            .transpose()?;
+        Ok(Self { id, root, staging })
     }
 
     #[must_use]
@@ -441,7 +466,7 @@ impl ShareFs {
         let grant = grant
             .filter(|grant| grant.share_id == self.id)
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
-        let access = if policy.read_only {
+        let access = if policy.read_only || self.staging.is_none() {
             AccessLevel::ReadOnly
         } else {
             grant.access
@@ -467,12 +492,12 @@ impl ShareFs {
         Ok((self.open_directory(parents)?, name))
     }
 
-    /// Removes reserved regular temporary files left by a terminated process.
-    /// The walk never follows links, ignores unsupported legacy entries, and
-    /// is bounded by `max_entries`.
-    pub fn recover_temporary_files(&self, max_entries: usize) -> FsResult<usize> {
-        let mut visited = 0_usize;
-        recover_directory(&self.root, &mut visited, max_entries, 0)
+    /// Removes reserved regular files left in the private staging directory by
+    /// a terminated process. User content is never traversed.
+    pub fn recover_staging_files(&self, max_entries: usize) -> FsResult<usize> {
+        self.staging.as_ref().map_or(Ok(0), |staging| {
+            recover_staging_directory(staging, max_entries)
+        })
     }
 }
 
@@ -512,7 +537,7 @@ impl AuthorizedShare<'_> {
                 .file_name()
                 .into_string()
                 .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
-            if is_internal_temp_name(&name) {
+            if is_internal_name(&name) {
                 continue;
             }
             let name =
@@ -600,16 +625,25 @@ impl AuthorizedShare<'_> {
 
     pub fn begin_write(&self, path: &VirtualPath) -> FsResult<PendingWrite> {
         self.require_write()?;
-        let (parent, destination_name) = self.share.open_parent(path)?;
+        let (destination_parent, destination_name) = self.share.open_parent(path)?;
+        let staging = self
+            .share
+            .staging
+            .as_ref()
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?
+            .try_clone()
+            .map_err(map_io)?;
+        ensure_same_device(&staging, &destination_parent)?;
         for _ in 0..16 {
             let temporary_name = random_temporary_name()?;
             let mut options = secure_file_options();
             options.read(true).write(true).create_new(true);
-            match parent.open_with(&temporary_name, &options) {
+            match staging.open_with(&temporary_name, &options) {
                 Ok(file) => {
                     validate_regular_handle(&file)?;
                     return Ok(PendingWrite {
-                        parent,
+                        staging,
+                        destination_parent,
                         temporary_name,
                         destination_name: destination_name.clone(),
                         file,
@@ -679,19 +713,25 @@ impl AuthorizedShare<'_> {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         let (parent, name) = self.share.open_parent(path)?;
+        let staging = self
+            .share
+            .staging
+            .as_ref()
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
+        ensure_same_device(staging, &parent)?;
         let staged_name = random_temporary_name()?;
         rustix::fs::renameat_with(
             &parent,
             name.as_str(),
-            &parent,
+            staging,
             &staged_name,
             rustix::fs::RenameFlags::NOREPLACE,
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-        let staged = metadata_in_parent_raw(&parent, &staged_name);
+        let staged = metadata_in_parent_raw(staging, &staged_name);
         if staged.as_ref().is_err() || staged.as_ref().is_ok_and(|value| *value != expected) {
             let rollback = rustix::fs::renameat_with(
-                &parent,
+                staging,
                 &staged_name,
                 &parent,
                 name.as_str(),
@@ -704,12 +744,12 @@ impl AuthorizedShare<'_> {
             };
         }
         let removal = match expected.kind {
-            EntryKind::File => parent.remove_file(&staged_name),
-            EntryKind::Directory => parent.remove_dir(&staged_name),
+            EntryKind::File => staging.remove_file(&staged_name),
+            EntryKind::Directory => staging.remove_dir(&staged_name),
         };
         if let Err(error) = removal {
             let rollback = rustix::fs::renameat_with(
-                &parent,
+                staging,
                 &staged_name,
                 &parent,
                 name.as_str(),
@@ -721,6 +761,7 @@ impl AuthorizedShare<'_> {
                 Err(map_io(error))
             };
         }
+        sync_directory(staging)?;
         sync_directory(&parent)
     }
 
@@ -796,22 +837,58 @@ fn raw_file_metadata(file: &File) -> FsResult<EntryMetadata> {
         .ok_or_else(|| FsError::new(FsErrorCode::UnsupportedEntry))
 }
 
-fn recover_directory(
-    directory: &Dir,
-    visited: &mut usize,
-    max_entries: usize,
-    depth: usize,
-) -> FsResult<usize> {
-    if depth > 256 {
-        return Err(FsError::new(FsErrorCode::TooLarge));
+fn open_staging_directory(root: &Dir) -> FsResult<Dir> {
+    let created =
+        match rustix::fs::mkdirat(root, INTERNAL_STAGING_DIRECTORY, rustix::fs::Mode::RWXU) {
+            Ok(()) => true,
+            Err(error)
+                if std::io::Error::from(error).kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                false
+            }
+            Err(error) => return Err(map_io(std::io::Error::from(error))),
+        };
+    let descriptor = rustix::fs::openat(
+        root,
+        INTERNAL_STAGING_DIRECTORY,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| map_io(std::io::Error::from(error)))?;
+    rustix::fs::fchmod(&descriptor, rustix::fs::Mode::RWXU)
+        .map_err(|error| map_io(std::io::Error::from(error)))?;
+    let staging = root
+        .open_dir_nofollow(INTERNAL_STAGING_DIRECTORY)
+        .map_err(map_io)?;
+    if !staging.dir_metadata().map_err(map_io)?.is_dir() {
+        return Err(FsError::new(FsErrorCode::UnsupportedEntry));
     }
-    let mut removed = 0_usize;
-    let mut removed_here = false;
-    for entry in directory.entries().map_err(map_io)? {
-        *visited = visited
+    if created {
+        sync_directory(&staging)?;
+        sync_directory(root)?;
+    }
+    Ok(staging)
+}
+
+fn ensure_same_device(staging: &Dir, destination: &Dir) -> FsResult<()> {
+    let staging_device = staging.dir_metadata().map_err(map_io)?.dev();
+    let destination_device = destination.dir_metadata().map_err(map_io)?.dev();
+    (staging_device == destination_device)
+        .then_some(())
+        .ok_or_else(|| FsError::new(FsErrorCode::CrossDevice))
+}
+
+fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usize> {
+    let mut visited = 0_usize;
+    let mut recoverable = Vec::with_capacity(max_entries.min(256));
+    for entry in staging.entries().map_err(map_io)? {
+        visited = visited
             .checked_add(1)
             .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-        if *visited > max_entries {
+        if visited > max_entries {
             return Err(FsError::new(FsErrorCode::TooLarge));
         }
         let entry = entry.map_err(map_io)?;
@@ -820,28 +897,20 @@ fn recover_directory(
             continue;
         };
         let file_type = entry.file_type().map_err(map_io)?;
-        if is_internal_temp_name(&name) {
-            if !file_type.is_file() {
-                // Do not follow or remove a symlink, directory, or special
-                // file even when another process gives it a reserved name.
-                continue;
-            }
-            directory.remove_file(&name).map_err(map_io)?;
-            removed = removed
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-            removed_here = true;
-        } else if file_type.is_dir() {
-            let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
-            removed = removed
-                .checked_add(recover_directory(&child, visited, max_entries, depth + 1)?)
-                .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+        if !is_internal_temp_name(&name) || !file_type.is_file() {
+            // Never follow or remove malformed names, symlinks, directories,
+            // or special entries, even inside the private staging directory.
+            continue;
         }
+        recoverable.push(name);
     }
-    if removed_here {
-        sync_directory(directory)?;
+    for name in &recoverable {
+        staging.remove_file(name).map_err(map_io)?;
     }
-    Ok(removed)
+    if !recoverable.is_empty() {
+        sync_directory(staging)?;
+    }
+    Ok(recoverable.len())
 }
 
 fn measure_directory(
@@ -867,7 +936,7 @@ fn measure_directory(
             .file_name()
             .into_string()
             .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
-        if is_internal_temp_name(&name) {
+        if is_internal_name(&name) {
             continue;
         }
         let metadata = entry.metadata().map_err(map_io)?;
@@ -908,6 +977,10 @@ fn is_internal_temp_name(name: &str) -> bool {
         .is_some_and(|suffix| {
             suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
+}
+
+fn is_internal_name(name: &str) -> bool {
+    name == INTERNAL_STAGING_DIRECTORY || is_internal_temp_name(name)
 }
 
 fn sync_directory(directory: &Dir) -> FsResult<()> {
@@ -1397,7 +1470,7 @@ mod tests {
         drop(abandoned);
         assert!(!temporary.path().join("abandoned.txt").exists());
         assert!(
-            fs::read_dir(temporary.path())
+            fs::read_dir(temporary.path().join(INTERNAL_STAGING_DIRECTORY))
                 .unwrap()
                 .all(|entry| !is_internal_temp_name(&entry.unwrap().file_name().to_string_lossy()))
         );
@@ -1510,16 +1583,92 @@ mod tests {
     }
 
     #[test]
-    fn startup_recovery_removes_only_reserved_regular_temporary_files() {
+    fn startup_recovery_scans_only_private_staging() {
         let temporary = TempDir::new().expect("temporary directory");
         let stale = format!("{INTERNAL_TEMP_PREFIX}{}", "a".repeat(32));
-        fs::write(temporary.path().join(&stale), b"partial").expect("stale temp");
+        let user_stale = format!("{INTERNAL_TEMP_PREFIX}{}", "b".repeat(32));
+        fs::create_dir(temporary.path().join("deep")).expect("user directory");
+        fs::write(temporary.path().join(&user_stale), b"user data").expect("user temp-like file");
+        fs::write(
+            temporary.path().join("deep").join(&user_stale),
+            b"nested user data",
+        )
+        .expect("nested user temp-like file");
         fs::write(temporary.path().join("keep.txt"), b"keep").expect("regular file");
         let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        assert_eq!(share.recover_temporary_files(10).expect("recover"), 1);
-        assert!(!temporary.path().join(stale).exists());
+        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        fs::write(staging.join(&stale), b"partial").expect("stale staged file");
+
+        assert_eq!(share.recover_staging_files(10).expect("recover"), 1);
+
+        assert!(!staging.join(stale).exists());
+        assert!(temporary.path().join(&user_stale).exists());
+        assert!(temporary.path().join("deep").join(user_stale).exists());
         assert!(temporary.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn staging_recovery_is_bounded_before_removing_anything() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("open share");
+        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let first = format!("{INTERNAL_TEMP_PREFIX}{}", "a".repeat(32));
+        let second = format!("{INTERNAL_TEMP_PREFIX}{}", "b".repeat(32));
+        fs::write(staging.join(&first), b"first").expect("first staged file");
+        fs::write(staging.join(&second), b"second").expect("second staged file");
+
+        assert_eq!(
+            share
+                .recover_staging_files(1)
+                .expect_err("staging bound")
+                .code(),
+            FsErrorCode::TooLarge
+        );
+        assert!(staging.join(first).exists());
+        assert!(staging.join(second).exists());
+    }
+
+    #[test]
+    fn read_only_shares_create_no_staging_and_reduce_write_grants() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let id = ShareId::new("documents").expect("id");
+        let share = ShareFs::open_read_only(id.clone(), temporary.path()).expect("read-only share");
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadWrite,
+        };
+
+        assert!(!temporary.path().join(INTERNAL_STAGING_DIRECTORY).exists());
+        assert_eq!(
+            share
+                .authorize(Some(&grant), GlobalPolicy::default())
+                .expect("authorized")
+                .access(),
+            AccessLevel::ReadOnly
+        );
+        assert_eq!(share.recover_staging_files(0).expect("no recovery"), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_staging_is_private_and_reserved_from_virtual_paths() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = TempDir::new().expect("temporary directory");
+        ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("open share");
+        let metadata = fs::metadata(temporary.path().join(INTERNAL_STAGING_DIRECTORY))
+            .expect("staging metadata");
+
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            EntryName::new(INTERNAL_STAGING_DIRECTORY)
+                .expect_err("reserved staging name")
+                .code(),
+            FsErrorCode::InvalidPath
+        );
     }
 
     #[cfg(unix)]
@@ -1535,29 +1684,26 @@ mod tests {
         let stale = format!("{INTERNAL_TEMP_PREFIX}{}", "a".repeat(32));
         let reserved_link = format!("{INTERNAL_TEMP_PREFIX}{}", "b".repeat(32));
         let reserved_directory = format!("{INTERNAL_TEMP_PREFIX}{}", "c".repeat(32));
-        fs::write(temporary.path().join(&stale), b"partial").expect("stale temp");
         fs::write(outside.path().join("secret"), b"secret").expect("outside file");
-        symlink(
-            outside.path().join("secret"),
-            temporary.path().join(&reserved_link),
-        )
-        .expect("reserved symlink");
-        fs::create_dir(temporary.path().join(&reserved_directory)).expect("reserved directory");
-        symlink(outside.path(), temporary.path().join("directory-link"))
-            .expect("directory symlink");
-        let _socket = UnixListener::bind(temporary.path().join("socket")).expect("socket");
-        let non_utf8 = OsString::from_vec(vec![0xff, b'x']);
-        fs::write(temporary.path().join(&non_utf8), b"legacy").expect("non-UTF-8 file");
-
         let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        assert_eq!(share.recover_temporary_files(20).expect("recover"), 1);
-        assert!(!temporary.path().join(stale).exists());
-        assert!(temporary.path().join(reserved_link).is_symlink());
-        assert!(temporary.path().join(reserved_directory).is_dir());
-        assert!(temporary.path().join("directory-link").is_symlink());
-        assert!(temporary.path().join("socket").exists());
-        assert!(temporary.path().join(non_utf8).exists());
+        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        fs::write(staging.join(&stale), b"partial").expect("stale temp");
+        symlink(outside.path().join("secret"), staging.join(&reserved_link))
+            .expect("reserved symlink");
+        fs::create_dir(staging.join(&reserved_directory)).expect("reserved directory");
+        symlink(outside.path(), staging.join("directory-link")).expect("directory symlink");
+        let _socket = UnixListener::bind(staging.join("socket")).expect("socket");
+        let non_utf8 = OsString::from_vec(vec![0xff, b'x']);
+        fs::write(staging.join(&non_utf8), b"legacy").expect("non-UTF-8 file");
+
+        assert_eq!(share.recover_staging_files(20).expect("recover"), 1);
+        assert!(!staging.join(stale).exists());
+        assert!(staging.join(reserved_link).is_symlink());
+        assert!(staging.join(reserved_directory).is_dir());
+        assert!(staging.join("directory-link").is_symlink());
+        assert!(staging.join("socket").exists());
+        assert!(staging.join(non_utf8).exists());
         assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
     }
 
@@ -1577,12 +1723,10 @@ mod tests {
             .begin_write(&destination)
             .expect("temporary file");
         let temporary_name = pending.temporary_name.clone();
-        fs::remove_file(temporary.path().join(&temporary_name)).expect("unlink temp name");
-        symlink(
-            outside.path().join("secret"),
-            temporary.path().join(&temporary_name),
-        )
-        .expect("replace temp with symlink");
+        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        fs::remove_file(staging.join(&temporary_name)).expect("unlink temp name");
+        symlink(outside.path().join("secret"), staging.join(&temporary_name))
+            .expect("replace temp with symlink");
         assert!(matches!(
             pending
                 .publish_new()

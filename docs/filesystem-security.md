@@ -2,7 +2,7 @@
 
 ## Capability lifecycle
 
-Each configured share is opened exactly once by `ShareFs::open`. The root path must be absolute and comes only from operator-trusted startup configuration. The root's parent directory is opened with ambient authority, then the final root component is opened with `open_dir_nofollow`; request-time code never receives the ambient path and cannot recover one from `ShareFs`.
+Each configured share is opened exactly once by `ShareFs::open` or `ShareFs::open_read_only`. The root path must be absolute and comes only from operator-trusted startup configuration. The root's parent directory is opened with ambient authority, then the final root component is opened with `open_dir_nofollow`; request-time code never receives the ambient path and cannot recover one from `ShareFs`.
 
 All later operations start from the retained `cap_std::fs::Dir`. Intermediate components are opened one at a time with `cap_fs_ext::DirExt::open_dir_nofollow`. Final files use `OpenOptionsFollowExt::follow(FollowSymlinks::No)` and are classified from the opened handle before bytes are exchanged. File opens are nonblocking so a FIFO cannot stall a worker while it is being rejected. Directory creation is followed by a no-follow reopen. This handle-oriented walk prevents a renamed ancestor or a symlink replacement from redirecting an operation outside its share.
 
@@ -21,13 +21,17 @@ Each component is UTF-8 and NFC-normalized, at most 255 bytes, and excludes:
 
 The complete virtual path is at most 4096 bytes. Existing non-UTF-8 or non-NFC directory entries are rejected rather than lossily renamed or displayed. These restrictions intentionally trade access to a small set of legitimate host filenames for consistent security semantics across proxies, URL decoders, browsers, Linux, macOS, and Windows clients.
 
+`.index-staging` and `.index-tmp-<128-bit hex>` names are reserved for internal use and cannot be expressed as virtual components. Listings and quota measurement omit the staging directory.
+
 ## Authorization contract
 
-Only `AuthorizedShare` exposes request-time operations. It can be created only from a grant whose `ShareId` exactly matches the opened share. Missing and wrong-share grants both return `AccessDenied`. Read-only grants permit listing and reads; read-write grants additionally permit mutations. `GlobalPolicy::read_only` always reduces a read-write grant to read-only.
+Only `AuthorizedShare` exposes request-time operations. It can be created only from a grant whose `ShareId` exactly matches the opened share. Missing and wrong-share grants both return `AccessDenied`. Read-only grants permit listing and reads; read-write grants additionally permit mutations. `GlobalPolicy::read_only` always reduces a read-write grant to read-only. A share opened without staging is also unconditionally reduced to read-only.
 
 Operations accept one authorized share and never accept an ambient source or destination path. Consequently, cross-share rename and move cannot be expressed through this API. A later mutation layer must preserve this constraint and must not expose raw `Dir` handles.
 
-The core intentionally has no existing-file replacement primitive. Truncating a visible file in place can expose partial content after an interrupted or concurrent write. The upload and mutation layer must introduce a separately reviewed atomic replacement abstraction using a same-directory temporary file, bounded streaming, synchronization, no-follow validation, and an atomic final rename where supported.
+Truncating a visible file in place can expose partial content after an interrupted or concurrent write. Writable shares instead retain a capability-opened mode-`0700` `.index-staging` directory. Staged files are streamed and synchronized there, then published with same-filesystem atomic no-replace or exchange renames. Both directory handles are synchronized after publication. The destination device is compared with staging before a write; nested mounts on another device fail with `CrossDevice` and never fall back to copying.
+
+Startup recovery scans only direct staging children, is bounded before it removes anything, accepts only the exact random temporary-name grammar, and removes only regular files. It neither recursively traverses user content nor follows or removes malformed entries, links, directories, or special files.
 
 ## Entry policy and errors
 
@@ -45,4 +49,4 @@ The application does not expose hard-link, symlink, archive extraction, or cross
 
 ## Required verification
 
-Tests cover traversal and separator inputs, encoded percent triplets, Windows prefixes and devices, NFC normalization, boundary lengths, invalid UTF-8 host entries, root and nested links, final-component replacement races, special files, hard-link aliases, overlapping roots, bounded reads, and the complete missing/read/read-write/global-read-only grant matrix.
+Tests cover traversal and separator inputs, encoded percent triplets, Windows prefixes and devices, NFC normalization, boundary lengths, invalid UTF-8 host entries, root and nested links, final-component replacement races, special files, hard-link aliases, overlapping roots, bounded reads, staging isolation and cleanup, non-recursive startup recovery, and the complete missing/read/read-write/global-read-only grant matrix.
