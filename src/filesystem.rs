@@ -467,8 +467,9 @@ impl ShareFs {
         Ok((self.open_directory(parents)?, name))
     }
 
-    /// Removes reserved temporary files left by a terminated process. The walk
-    /// never follows links and is bounded by `max_entries`.
+    /// Removes reserved regular temporary files left by a terminated process.
+    /// The walk never follows links, ignores unsupported legacy entries, and
+    /// is bounded by `max_entries`.
     pub fn recover_temporary_files(&self, max_entries: usize) -> FsResult<usize> {
         let mut visited = 0_usize;
         recover_directory(&self.root, &mut visited, max_entries, 0)
@@ -814,27 +815,27 @@ fn recover_directory(
             return Err(FsError::new(FsErrorCode::TooLarge));
         }
         let entry = entry.map_err(map_io)?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
-        let metadata = entry.metadata().map_err(map_io)?;
+        let Ok(name) = entry.file_name().into_string() else {
+            // A non-UTF-8 name cannot match the reserved ASCII namespace.
+            continue;
+        };
+        let file_type = entry.file_type().map_err(map_io)?;
         if is_internal_temp_name(&name) {
-            if !metadata.is_file() {
-                return Err(FsError::new(FsErrorCode::UnsupportedEntry));
+            if !file_type.is_file() {
+                // Do not follow or remove a symlink, directory, or special
+                // file even when another process gives it a reserved name.
+                continue;
             }
             directory.remove_file(&name).map_err(map_io)?;
             removed = removed
                 .checked_add(1)
                 .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
             removed_here = true;
-        } else if metadata.is_dir() {
+        } else if file_type.is_dir() {
             let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
             removed = removed
                 .checked_add(recover_directory(&child, visited, max_entries, depth + 1)?)
                 .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-        } else if !metadata.is_file() {
-            return Err(FsError::new(FsErrorCode::UnsupportedEntry));
         }
     }
     if removed_here {
@@ -1519,6 +1520,46 @@ mod tests {
         assert_eq!(share.recover_temporary_files(10).expect("recover"), 1);
         assert!(!temporary.path().join(stale).exists());
         assert!(temporary.path().join("keep.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_recovery_ignores_links_special_files_and_non_utf8_names() {
+        use std::{
+            ffi::OsString,
+            os::unix::{ffi::OsStringExt, fs::symlink, net::UnixListener},
+        };
+
+        let temporary = TempDir::new().expect("temporary directory");
+        let outside = TempDir::new().expect("outside directory");
+        let stale = format!("{INTERNAL_TEMP_PREFIX}{}", "a".repeat(32));
+        let reserved_link = format!("{INTERNAL_TEMP_PREFIX}{}", "b".repeat(32));
+        let reserved_directory = format!("{INTERNAL_TEMP_PREFIX}{}", "c".repeat(32));
+        fs::write(temporary.path().join(&stale), b"partial").expect("stale temp");
+        fs::write(outside.path().join("secret"), b"secret").expect("outside file");
+        symlink(
+            outside.path().join("secret"),
+            temporary.path().join(&reserved_link),
+        )
+        .expect("reserved symlink");
+        fs::create_dir(temporary.path().join(&reserved_directory))
+            .expect("reserved directory");
+        symlink(outside.path(), temporary.path().join("directory-link"))
+            .expect("directory symlink");
+        let _socket = UnixListener::bind(temporary.path().join("socket")).expect("socket");
+        let non_utf8 = OsString::from_vec(vec![0xff, b'x']);
+        fs::write(temporary.path().join(&non_utf8), b"legacy").expect("non-UTF-8 file");
+
+        let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("open share");
+        assert_eq!(share.recover_temporary_files(20).expect("recover"), 1);
+        assert!(!temporary.path().join(stale).exists());
+        assert!(temporary.path().join(reserved_link).is_symlink());
+        assert!(temporary.path().join(reserved_directory).is_dir());
+        assert!(temporary.path().join("directory-link").is_symlink());
+        assert!(temporary.path().join("socket").exists());
+        assert!(temporary.path().join(non_utf8).exists());
+        assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
     }
 
     #[cfg(unix)]
