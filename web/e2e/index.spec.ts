@@ -19,6 +19,10 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 
   await signIn(page, "reader");
   await expect(page.getByText("Read only", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "File operations" }),
+  ).toHaveCount(0);
+  await expect(page.locator(".entry-actions")).toHaveCount(0);
 
   const cookies = await context.cookies();
   const sessionCookie = cookies.find(
@@ -41,6 +45,21 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
     },
   );
   expect(forbidden.status()).toBe(403);
+
+  const forbiddenUpload = await page.request.post(
+    `${origin}/api/v1/shares/read-only/uploads?path=`,
+    {
+      headers: { Origin: origin, "X-CSRF-Token": token },
+      multipart: {
+        file: {
+          name: "must-not-upload.txt",
+          mimeType: "text/plain",
+          buffer: Buffer.from("blocked"),
+        },
+      },
+    },
+  );
+  expect(forbiddenUpload.status()).toBe(403);
 
   const isolated = await page.request.get(
     `${origin}/api/v1/shares/writable/directory?path=&limit=100`,

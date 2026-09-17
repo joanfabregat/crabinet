@@ -16,7 +16,7 @@ On the dev VM these commands must run through the repository's constrained Node,
 
 `npm run test:e2e` is the single test command after the production artifact exists. It covers desktop and narrow/mobile Chromium with one worker so state and logs remain deterministic. CI builds the artifact first and uploads the HTML report, trace, screenshot, and video directory on failure.
 
-The current suite covers login/logout and cookie attributes, session loss, grant and share isolation, read-only API enforcement, browsing, direct URLs, history, keyboard focus, responsive layout, automated accessibility checks, code and Markdown previews, and hostile HTML source both in the empty-sandbox iframe and a top-level tab. `e2e/helpers.ts` also provides native drag-and-drop and file-picker helpers for the mutation UI suite; those flows should be enabled in the same production-backed harness when that UI lands.
+The suite covers login/logout and cookie attributes, session loss, grant and share isolation, read-only UI and API enforcement, browsing, direct URLs, history, keyboard focus, responsive layout, automated accessibility checks, code and Markdown previews, and hostile HTML source both in the empty-sandbox iframe and a top-level tab. Production-backed mutation flows cover create, edit, concurrent-save conflicts, move/rename without overwriting, exact-confirm deletion, non-empty directory refusal, native drag-and-drop, the keyboard file picker, upload limits and partial results, explicit replacement, progress, cancellation, disconnect retry, and cancellation when history changes the upload destination.
 
 To regenerate the deterministic README screenshot after an intentional UI change, build the release binary as above and run:
 

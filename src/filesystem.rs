@@ -762,8 +762,13 @@ fn metadata_in_parent_raw(parent: &Dir, name: &str) -> FsResult<EntryMetadata> {
     options.read(true);
     match parent.open_with(name, &options) {
         Ok(file) => {
-            validate_regular_handle(&file)?;
-            raw_file_metadata(&file)
+            // Linux permits opening a directory with O_RDONLY. Preserve that
+            // classification here: this helper validates both staged files and
+            // staged directories after a same-parent rename.
+            let metadata = file.metadata().map_err(map_io)?;
+            let kind = classify_metadata(&metadata)?;
+            assert_no_external_alias(&metadata, kind)?;
+            Ok(entry_metadata(&metadata, kind))
         }
         Err(error)
             if matches!(
@@ -1467,6 +1472,14 @@ mod tests {
             FsErrorCode::Conflict
         );
         assert!(temporary.path().join("nested/inside.txt").exists());
+
+        fs::create_dir(temporary.path().join("empty")).expect("empty directory");
+        let empty = VirtualPath::parse("empty").expect("path");
+        let empty_metadata = authorized.metadata(&empty).expect("metadata");
+        authorized
+            .delete_entry(&empty, empty_metadata)
+            .expect("empty directory delete");
+        assert!(!temporary.path().join("empty").exists());
     }
 
     #[test]
