@@ -18,6 +18,22 @@ env:
   NODE_VERSION: 24
 
 jobs:
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint GitHub Actions workflows
+        run: >-
+          docker run --rm
+          -v "${PWD}:/repo"
+          -w /repo
+          docker.io/rhysd/actionlint@sha256:9d36088643581e728c969f35141f88139fec77280b2be23c1f66f8e40e1025e7
+
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04

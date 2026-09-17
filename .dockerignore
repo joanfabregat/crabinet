@@ -1,0 +1,7 @@
+**
+!Containerfile
+!release/
+!release/index-linux-amd64/
+!release/index-linux-amd64/index
+!release/index-linux-arm64/
+!release/index-linux-arm64/index
