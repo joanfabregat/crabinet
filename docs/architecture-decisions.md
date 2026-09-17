@@ -14,7 +14,7 @@ Users, shares, grants, limits, and secret-file references are operator configura
 
 ## Filesystem data and SQLite runtime state
 
-Files remain normal files in explicitly mounted roots. SQLite stores sessions and audit records, avoiding a database service while keeping runtime state separate from immutable configuration.
+Files remain normal files in explicitly mounted roots. SQLite stores server-side sessions, while structured audit events go to standard output with the rest of the application logs. This avoids a database service while keeping runtime state separate from immutable configuration.
 
 ## Argon2id
 
@@ -27,4 +27,3 @@ Each trusted configured share is opened once as a capability directory. Request 
 ## One binary and one container process
 
 The frontend is compiled before Rust and embedded in the executable. Releases provide that binary directly and package the identical bytes in a minimal, non-root OCI image. Production requires no Node process, static server, Redis, or external database.
-

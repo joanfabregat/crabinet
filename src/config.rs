@@ -42,6 +42,7 @@ struct RawConfig {
     version: u32,
     server: RawServerConfig,
     #[serde(default)]
+    #[schemars(length(min = 1))]
     users: Vec<RawUser>,
     #[serde(default)]
     shares: Vec<RawShare>,
@@ -62,27 +63,34 @@ struct RawServerConfig {
     max_preview_size: String,
     /// Maximum simultaneous Argon2 password verifications.
     #[serde(default = "default_auth_max_concurrent")]
+    #[schemars(range(min = 1, max = 16))]
     auth_max_concurrent: usize,
     /// Session idle timeout in seconds.
     #[serde(default = "default_session_idle_timeout_seconds")]
+    #[schemars(range(min = 60, max = 86_400))]
     session_idle_timeout_seconds: u64,
     /// Session absolute lifetime in seconds.
     #[serde(default = "default_session_absolute_timeout_seconds")]
+    #[schemars(range(min = 300, max = 2_592_000))]
     session_absolute_timeout_seconds: u64,
     /// Login attempts allowed per normalized username and source address each minute.
     #[serde(default = "default_login_attempts_per_minute")]
+    #[schemars(range(min = 1, max = 1_000))]
     login_attempts_per_minute: u32,
     /// Maximum simultaneously active sessions retained for one user.
     #[serde(default = "default_max_sessions_per_user")]
+    #[schemars(range(min = 1, max = 256))]
     max_sessions_per_user: usize,
     /// Maximum simultaneously active sessions retained across all users.
     #[serde(default = "default_max_sessions_total")]
+    #[schemars(range(min = 1, max = 100_000))]
     max_sessions_total: usize,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawUser {
+    #[schemars(length(min = 1, max = 64))]
     username: String,
     /// An Argon2id PHC string produced by `index hash-password`.
     password_hash: String,
@@ -95,6 +103,7 @@ struct RawUser {
 #[serde(deny_unknown_fields)]
 struct RawShare {
     /// Stable identifier used in URLs and grants.
+    #[schemars(length(min = 1, max = 64))]
     id: String,
     /// User-facing label. It may change without changing the share's identity or URLs.
     #[schemars(length(min = 1, max = 128))]
@@ -111,6 +120,7 @@ struct RawShare {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawGrant {
+    #[schemars(length(min = 1, max = 64))]
     user: String,
     permission: Permission,
 }
@@ -891,6 +901,13 @@ permission = "write"
         assert_eq!(
             schema.pointer("/properties/version/maximum"),
             Some(&1.into())
+        );
+        let committed =
+            serde_json::from_str::<serde_json::Value>(include_str!("../config.schema.json"))
+                .unwrap();
+        assert_eq!(
+            schema, committed,
+            "config.schema.json must match the CLI schema"
         );
     }
 

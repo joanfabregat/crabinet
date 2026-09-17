@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RawConfig",
+  "type": "object",
+  "properties": {
+    "server": { "$ref": "#/$defs/RawServerConfig" },
+    "shares": { "type": "array", "items": { "$ref": "#/$defs/RawShare" } },
+    "users": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/RawUser" },
+      "minItems": 1
+    },
+    "version": {
+      "description": "Configuration format version. The only supported value is 1.",
+      "type": "integer",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "required": ["version", "server"],
+  "$defs": {
+    "Permission": { "type": "string", "enum": ["read", "write"] },
+    "RawGrant": {
+      "type": "object",
+      "properties": {
+        "permission": { "$ref": "#/$defs/Permission" },
+        "user": { "type": "string", "maxLength": 64, "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "required": ["user", "permission"]
+    },
+    "RawServerConfig": {
+      "type": "object",
+      "properties": {
+        "auth_max_concurrent": {
+          "description": "Maximum simultaneous Argon2 password verifications.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1,
+          "maximum": 16,
+          "minimum": 1
+        },
+        "database_path": {
+          "description": "SQLite file. Relative paths are resolved from the configuration directory.",
+          "type": "string"
+        },
+        "listen": {
+          "description": "TCP socket address on which the HTTP server listens.",
+          "type": "string"
+        },
+        "login_attempts_per_minute": {
+          "description": "Login attempts allowed per normalized username and source address each minute.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "maximum": 1000,
+          "minimum": 1
+        },
+        "max_preview_size": {
+          "description": "Maximum file size eligible for preview, for example \"2 MiB\".",
+          "type": "string"
+        },
+        "max_sessions_per_user": {
+          "description": "Maximum simultaneously active sessions retained for one user.",
+          "type": "integer",
+          "format": "uint",
+          "default": 16,
+          "maximum": 256,
+          "minimum": 1
+        },
+        "max_sessions_total": {
+          "description": "Maximum simultaneously active sessions retained across all users.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "maximum": 100000,
+          "minimum": 1
+        },
+        "max_upload_size": {
+          "description": "Maximum request upload size, for example \"100 MiB\".",
+          "type": "string"
+        },
+        "session_absolute_timeout_seconds": {
+          "description": "Session absolute lifetime in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 43200,
+          "maximum": 2592000,
+          "minimum": 300
+        },
+        "session_idle_timeout_seconds": {
+          "description": "Session idle timeout in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "maximum": 86400,
+          "minimum": 60
+        },
+        "session_secret_file": {
+          "description": "File containing 32 to 4096 random bytes. Its contents are never printed.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["listen", "database_path", "session_secret_file", "max_upload_size", "max_preview_size"]
+    },
+    "RawShare": {
+      "type": "object",
+      "properties": {
+        "grants": { "type": "array", "items": { "$ref": "#/$defs/RawGrant" } },
+        "id": {
+          "description": "Stable identifier used in URLs and grants.",
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "name": {
+          "description": "User-facing label. It may change without changing the share's identity or URLs.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "path": {
+          "description": "Absolute directory path. The root itself must not be a symbolic link.",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "If true, every grant on this share is effectively read-only.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": ["id", "name", "path"]
+    },
+    "RawUser": {
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Disabled users cannot log in and their existing sessions are rejected.",
+          "type": "boolean",
+          "default": false
+        },
+        "password_hash": {
+          "description": "An Argon2id PHC string produced by `index hash-password`.",
+          "type": "string"
+        },
+        "username": { "type": "string", "maxLength": 64, "minLength": 1 }
+      },
+      "additionalProperties": false,
+      "required": ["username", "password_hash"]
+    }
+  }
+}

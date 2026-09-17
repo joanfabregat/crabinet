@@ -45,7 +45,7 @@ The command reads the password twice with terminal echo disabled and writes only
 
 `auth_max_concurrent` bounds simultaneous Argon2 work. The default is one and is appropriate for a small pod. Generated hashes use 64 MiB; accepted configuration hashes are bounded at 256 MiB, so size the container for the largest accepted configured hash multiplied by this concurrency plus normal process memory. Benchmark the release binary in the intended container before increasing it. `session_idle_timeout_seconds` and `session_absolute_timeout_seconds` default to 30 minutes and 12 hours. Login attempts default to five per normalized account identifier and source address per minute, with bounded in-memory tracking. `max_sessions_per_user` and `max_sessions_total` default to 16 and 4096; successful login removes the deterministically oldest excess rows after expired-session cleanup.
 
-Set `disabled = true` on a user to reject both new logins and sessions that remain in SQLite. Because configuration is immutable, this takes effect when Index restarts. Password hashes remain mandatory for disabled users so a later re-enable cannot silently restore an invalid credential.
+Set `disabled = true` on a user to reject both new logins and sessions that remain in SQLite. The committed example is deliberately disabled so copying it cannot activate its illustrative hash. Because configuration is immutable, this takes effect when Index restarts. Password hashes remain mandatory for disabled users so a later re-enable cannot silently restore an invalid credential.
 
 ## Deployment checklist
 

@@ -27,8 +27,9 @@ max_sessions_total = 4096
 [[users]]
 username = "alice"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
-# Disabled users cannot log in and their existing sessions are rejected after restart.
-disabled = false
+# The example account is intentionally disabled. Replace the hash, then opt in by
+# changing this to false; disabled users cannot log in or reuse existing sessions.
+disabled = true
 
 # IDs are stable URL identifiers. Renaming one changes its externally visible identity.
 [[shares]]
