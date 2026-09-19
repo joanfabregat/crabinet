@@ -9,7 +9,7 @@ export async function signIn(
   await page.getByLabel("Username").fill(username);
   await page.getByLabel("Password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByLabel("Shared folder")).toBeVisible();
+  await expect(page.getByLabel("Shared folder", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
 }
 

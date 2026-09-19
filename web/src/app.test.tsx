@@ -322,7 +322,9 @@ describe("directory browser", () => {
 
     render(<App api={fakeApi({ directory })} navigation={navigation} />);
 
-    expect(await screen.findByText("Grüße 東京 🚀")).toBeVisible();
+    expect(
+      await screen.findByRole("link", { name: "Grüße 東京 🚀" }),
+    ).toBeVisible();
     expect(screen.getByText("<img src=x onerror=alert(1)>.txt")).toBeVisible();
     expect(document.querySelector("img")).toBeNull();
     expect(screen.getByText("Read only")).toBeVisible();
@@ -547,7 +549,7 @@ describe("writable file operations", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("moves and deletes only after fetching a fresh validator", async () => {
+  it("renames only after fetching a fresh validator", async () => {
     const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
       shareId,
       path,
@@ -572,18 +574,61 @@ describe("writable file operations", () => {
 
     const noteActions = await screen.findByLabelText("Actions for notes.txt");
     fireEvent.click(
-      within(noteActions).getByRole("button", { name: "Move / rename" }),
+      within(noteActions).getByRole("button", { name: "Rename notes.txt" }),
     );
-    fireEvent.input(screen.getByLabelText("Destination path"), {
-      target: { value: "archive/notes.txt" },
+    fireEvent.input(screen.getByLabelText("New name"), {
+      target: { value: "renamed.txt" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() =>
       expect(moveEntry).toHaveBeenCalledWith(
         "work",
         "projects/notes.txt",
-        "archive/notes.txt",
+        "projects/renamed.txt",
         'W/"fresh"',
+        "csrf-in-memory",
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
+  it("moves through the touch-friendly folder picker", async () => {
+    const moveEntry = vi.fn<ApiClient["moveEntry"]>(
+      async (shareId, _source, destination) => ({
+        shareId,
+        path: destination,
+        outcome: "success",
+      }),
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            entries: path === "projects" ? writablePage.entries : [],
+          })),
+          moveEntry,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    const actions = await screen.findByLabelText("Actions for notes.txt");
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "Move notes.txt" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Move notes.txt" });
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Shared folder" }),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Move here" }));
+    await waitFor(() =>
+      expect(moveEntry).toHaveBeenCalledWith(
+        "work",
+        "projects/notes.txt",
+        "notes.txt",
+        'W/"test"',
         "csrf-in-memory",
         expect.any(AbortSignal),
       ),
@@ -614,7 +659,9 @@ describe("writable file operations", () => {
     );
 
     const actions = await screen.findByLabelText("Actions for empty");
-    fireEvent.click(within(actions).getByRole("button", { name: "Delete" }));
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "Delete empty" }),
+    );
     const confirmation = screen.getByLabelText("Type empty to confirm");
     fireEvent.input(confirmation, { target: { value: "wrong" } });
     fireEvent.submit(confirmation.closest("form")!);
@@ -629,6 +676,103 @@ describe("writable file operations", () => {
     expect(
       screen.getByText(/non-empty folders are never deleted/i),
     ).toBeInTheDocument();
+  });
+
+  it("uses a checkbox for files and closes only the deleted file's active preview", async () => {
+    const navigation = writableNavigation();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/notes.txt",
+    });
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
+      async (shareId, path) => ({ shareId, path, outcome: "success" }),
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          deleteEntry,
+        })}
+        navigation={navigation}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "notes.txt" }),
+    ).toBeVisible();
+    const actions = await screen.findByLabelText("Actions for notes.txt");
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "Delete notes.txt" }),
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete file notes.txt",
+    });
+    expect(
+      within(dialog).queryByLabelText(/Type notes\.txt to confirm/),
+    ).not.toBeInTheDocument();
+    const confirmation = within(dialog).getByRole("checkbox", {
+      name: "I understand that notes.txt will be permanently deleted",
+    });
+    const deleteButton = within(dialog).getByRole("button", {
+      name: "Delete",
+      exact: true,
+    });
+    expect(deleteButton).toBeDisabled();
+    fireEvent.click(confirmation);
+    expect(deleteButton).toBeEnabled();
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
+    expect(
+      screen.queryByRole("heading", { name: "notes.txt" }),
+    ).not.toBeInTheDocument();
+    expect(navigation.visits.at(-1)).toEqual({
+      route: { shareId: "work", path: "projects" },
+      replace: true,
+    });
+  });
+
+  it("keeps another active preview open when a different file is deleted", async () => {
+    const navigation = writableNavigation();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/other.txt",
+    });
+    render(
+      <App
+        api={fakeApi({ directory: vi.fn(async () => writablePage) })}
+        navigation={navigation}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "other.txt" }),
+    ).toBeVisible();
+    fireEvent.click(
+      within(await screen.findByLabelText("Actions for notes.txt")).getByRole(
+        "button",
+        { name: "Delete notes.txt" },
+      ),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete file notes.txt",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "I understand that notes.txt will be permanently deleted",
+      }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete", exact: true }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "other.txt" })).toBeVisible(),
+    );
+    expect(navigation.visits).toEqual([]);
   });
 
   it("keeps edits explicit and refuses to hide a concurrent-write conflict", async () => {
@@ -653,7 +797,9 @@ describe("writable file operations", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
     const editor = await screen.findByLabelText("UTF-8 text content");
     fireEvent.input(editor, { target: { value: "new" } });
     expect(screen.getByText("Unsaved changes")).toBeVisible();

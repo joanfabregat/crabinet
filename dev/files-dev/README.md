@@ -7,6 +7,8 @@ The preview has two processes:
 - `index-dev.service` runs Vite against the mounted `web/` checkout. Preact, TypeScript, and CSS changes use Vite HMR over `wss://files-dev.jf.ffwip.com`.
 - `index-dev-backend.service` watches `Cargo.toml`, `Cargo.lock`, `src/**/*.rs`, and `tests/**/*.rs`. A successful incremental build replaces the running debug backend; a failed build leaves the last good backend available.
 
+Authenticated pages show a development banner containing the loaded Git revision and an explicit live-HMR marker, so the preview cannot be mistaken for production.
+
 Vite proxies `/api` and `/health` to the backend on the private `index-dev` Podman network. Traefik discovers the frontend container through its labels and routes the development hostname to it. The production service is separate and is not restarted by this environment.
 
 ## Isolation
@@ -73,7 +75,7 @@ Create `/etc/index-dev/config.toml` from the repository's `config.example.toml`,
 
 The existing dev-vm installation already has this runtime material. Reinstallation should preserve it unless the preview is intentionally reset.
 
-Initialize `/data/index-dev/shares` from `fixtures/` only for a new or explicitly reset environment. Do not recopy fixtures during normal restarts because files created through the development UI are disposable but may still be under active review.
+Initialize `/data/index-dev/shares` from `fixtures/` only for a new or explicitly reset environment. The fixtures cover code, Markdown, hostile-safe HTML, nested tree navigation, and Linux colon-containing names. Do not recopy fixtures during normal restarts because files created through the development UI are disposable but may still be under active review.
 
 The checked-in systemd units are the application-owned service definitions for the approved current preview. Their installation is an operator action because it changes host state. They mount the watcher scripts and lock hashes directly from this checkout, so this directory remains their source of truth.
 
@@ -96,14 +98,7 @@ journalctl -fu index-dev-backend.service
 ## Verify
 
 ```sh
-curl --fail --silent --show-error \
-  http://127.0.0.1:18082/health/ready
-curl --fail --silent --show-error \
-  http://127.0.0.1:18081/health/ready
-curl --fail --silent --show-error \
-  https://files-dev.jf.ffwip.com/health/ready
-curl --fail --silent --show-error \
-  https://files-dev.jf.ffwip.com/@vite/client >/dev/null
+sh dev/files-dev/verify.sh
 ```
 
 The final request distinguishes the HMR server from the production binary's embedded frontend.

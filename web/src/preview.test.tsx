@@ -30,6 +30,7 @@ const files: DirectoryPage = {
     { name: "unsafe.md", kind: "file", size: 42 },
     { name: "demo.html", kind: "file", size: 42 },
     { name: "code.rs", kind: "file", size: 42 },
+    { name: "photo.png", kind: "file", size: 2048 },
   ],
 };
 
@@ -165,7 +166,7 @@ describe("secure file previews", () => {
     expect(readable).toHaveFocus();
   });
 
-  it("uses only the inert HTML endpoint in an empty-sandbox iframe", async () => {
+  it("uses rendered and inert-source HTML tabs in an empty-sandbox iframe", async () => {
     const api = fakeApi({
       preview: vi.fn(async () =>
         previewDocument("<script>alert(1)</script>", {
@@ -186,18 +187,23 @@ describe("secure file previews", () => {
       name: "demo.html",
     });
     const frame = await within(panel).findByTitle(
-      "Inert HTML source for demo.html",
+      "Sandboxed HTML preview for demo.html",
     );
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame).toHaveAttribute(
       "src",
-      "/api/v1/shares/docs/preview/html?path=demo.html",
+      "/api/v1/shares/docs/preview/html/rendered?path=demo.html",
     );
     expect(frame.getAttribute("sandbox")?.split(/\s+/).filter(Boolean)).toEqual(
       [],
     );
     expect(panel).toHaveTextContent(
-      "Scripts, forms, navigation, storage, popups, and external requests are disabled",
+      "Scripts, forms, navigation, storage, popups, and network requests are disabled",
+    );
+    fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
+    expect(frame).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/html?path=demo.html",
     );
     expect(
       within(panel).getByRole("link", { name: "Open HTML source in new tab" }),
@@ -228,7 +234,49 @@ describe("secure file previews", () => {
     );
     expect(navigation.visits.at(-1)).toEqual({ shareId: "docs", path: "" });
     expect(trigger).toHaveFocus();
-    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("complementary", { name: "code.rs" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens a zoomable full-page raster preview from validated metadata", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "",
+      previewPath: "photo.png",
+    });
+    const api = fakeApi({
+      preview: vi.fn<ApiClient["preview"]>(async () => ({
+        kind: "image",
+        source: "",
+        mimeType: "image/png",
+        width: 800,
+        height: 600,
+        size: 2048,
+        truncated: false,
+      })),
+    });
+    render(<App api={api} navigation={navigation} />);
+
+    const image = await screen.findByRole("img", {
+      name: "Preview of photo.png",
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/image?path=photo.png",
+    );
+    expect(screen.getByText(/800 × 600/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(screen.getByText("110%")).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open full-page preview" }),
+    );
+    expect(navigation.visits.at(-1)).toEqual({
+      shareId: "docs",
+      path: "",
+      previewPath: "photo.png",
+      previewMode: "full",
+    });
   });
 
   it("aborts stale previews and ignores a late session error from the old file", async () => {

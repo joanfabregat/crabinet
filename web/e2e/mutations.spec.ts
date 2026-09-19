@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-import { chooseFiles, dropFiles, openSignedIn } from "./helpers";
+import { chooseFiles, csrfToken, dropFiles, openSignedIn } from "./helpers";
 
 test.describe("writable share operations", () => {
   test.beforeEach(({ page }, testInfo) => {
@@ -35,70 +35,92 @@ test.describe("writable share operations", () => {
     const saved = await readText(page, "writable", "e2e-note.txt");
     expect(saved).toBe("Production-backed browser edit\n");
 
-    await entryAction(page, "e2e-note.txt", "Move / rename").click();
-    const moveDialog = page.getByRole("dialog", { name: "Move or rename" });
+    await entryAction(page, "e2e-note.txt", "Move").click();
+    const moveDialog = page.getByRole("dialog", { name: "Move e2e-note.txt" });
     await moveDialog
-      .getByLabel("Destination path")
-      .fill("e2e-folder/note-renamed.txt");
-    await moveDialog.getByRole("button", { name: "Confirm" }).click();
+      .getByRole("button", { name: "e2e-folder", exact: true })
+      .click();
+    await moveDialog.getByRole("button", { name: "Move here" }).click();
     await expect(page.getByRole("link", { name: "e2e-note.txt" })).toHaveCount(
       0,
     );
 
     await page.getByRole("link", { name: "e2e-folder" }).click();
     await expect(
-      page.getByRole("link", { name: "note-renamed.txt" }),
+      page.getByRole("link", { name: "e2e-note.txt" }),
     ).toBeVisible();
+
+    await entryAction(page, "e2e-note.txt", "Rename").click();
+    const renameDialog = page.getByRole("dialog", {
+      name: "Rename e2e-note.txt",
+    });
+    await renameDialog.getByLabel("New name").fill("note-renamed.txt");
+    await renameDialog.getByRole("button", { name: "Confirm" }).click();
 
     const originalDestination = await readText(
       page,
       "writable",
       "Projects/example.toml",
     );
-    await entryAction(page, "note-renamed.txt", "Move / rename").click();
+    await entryAction(page, "note-renamed.txt", "Rename").click();
+    const targetNameDialog = page.getByRole("dialog", {
+      name: "Rename note-renamed.txt",
+    });
+    await targetNameDialog.getByLabel("New name").fill("example.toml");
+    await targetNameDialog.getByRole("button", { name: "Confirm" }).click();
+    await entryAction(page, "example.toml", "Move").click();
     const overwriteDialog = page.getByRole("dialog", {
-      name: "Move or rename",
+      name: "Move example.toml",
     });
     await overwriteDialog
-      .getByLabel("Destination path")
-      .fill("Projects/example.toml");
-    await overwriteDialog.getByRole("button", { name: "Confirm" }).click();
+      .getByRole("button", { name: "Projects", exact: true })
+      .click();
+    await overwriteDialog.getByRole("button", { name: "Move here" }).click();
     await expect(overwriteDialog.getByRole("alert")).toContainText(
       "destination already exists",
     );
     expect(await readText(page, "writable", "Projects/example.toml")).toBe(
       originalDestination,
     );
-    expect(
-      await readText(page, "writable", "e2e-folder/note-renamed.txt"),
-    ).toBe("Production-backed browser edit\n");
+    expect(await readText(page, "writable", "e2e-folder/example.toml")).toBe(
+      "Production-backed browser edit\n",
+    );
     await overwriteDialog.getByRole("button", { name: "Cancel" }).click();
 
-    await entryAction(page, "note-renamed.txt", "Delete").click();
-    const deleteDialog = page.getByRole("dialog", { name: "Delete item" });
-    const confirmation = deleteDialog.getByLabel(
-      "Type note-renamed.txt to confirm",
-    );
-    await confirmation.fill("note-renamed");
-    await deleteDialog
-      .getByRole("button", { name: "Delete", exact: true })
-      .click();
-    await expect(deleteDialog.getByRole("alert")).toContainText("exactly");
+    await page.getByRole("link", { name: "example.toml" }).click();
     await expect(
-      page.getByRole("link", { name: "note-renamed.txt" }),
+      page.getByRole("heading", { name: "example.toml" }),
     ).toBeVisible();
-
-    await confirmation.fill("note-renamed.txt");
+    await entryAction(page, "example.toml", "Delete").click();
+    const deleteDialog = page.getByRole("dialog", {
+      name: "Delete file example.toml",
+    });
+    const confirmation = deleteDialog.getByRole("checkbox", {
+      name: "I understand that example.toml will be permanently deleted",
+    });
+    await expect(
+      deleteDialog.getByRole("button", { name: "Delete", exact: true }),
+    ).toBeDisabled();
+    await confirmation.check();
     await deleteDialog
       .getByRole("button", { name: "Delete", exact: true })
       .click();
+    await expect(page.getByRole("link", { name: "example.toml" })).toHaveCount(
+      0,
+    );
     await expect(
-      page.getByRole("link", { name: "note-renamed.txt" }),
+      page.getByRole("heading", { name: "example.toml" }),
     ).toHaveCount(0);
+    await expect(page).not.toHaveURL(/preview=/);
 
-    await page.getByRole("link", { name: "Working files" }).click();
+    await page
+      .getByLabel("Breadcrumb")
+      .getByRole("link", { name: "Working files" })
+      .click();
     await entryAction(page, "e2e-folder", "Delete").click();
-    const folderDelete = page.getByRole("dialog", { name: "Delete item" });
+    const folderDelete = page.getByRole("dialog", {
+      name: "Delete folder e2e-folder",
+    });
     await folderDelete
       .getByLabel("Type e2e-folder to confirm")
       .fill("e2e-folder");
@@ -108,7 +130,9 @@ test.describe("writable share operations", () => {
     await expect(page.getByRole("link", { name: "e2e-folder" })).toHaveCount(0);
 
     await entryAction(page, "Projects", "Delete").click();
-    const nonEmptyDelete = page.getByRole("dialog", { name: "Delete item" });
+    const nonEmptyDelete = page.getByRole("dialog", {
+      name: "Delete folder Projects",
+    });
     await nonEmptyDelete
       .getByLabel("Type Projects to confirm")
       .fill("Projects");
@@ -134,7 +158,9 @@ test.describe("writable share operations", () => {
     await openSignedIn(page, "/browse/writable", "writer");
     const competingPage = await context.newPage();
     await competingPage.goto("/browse/writable");
-    await expect(competingPage.getByLabel("Shared folder")).toBeVisible();
+    await expect(
+      competingPage.getByLabel("Shared folder", { exact: true }),
+    ).toBeVisible();
 
     await entryAction(page, "README.md", "Edit").click();
     await expect(page.getByLabel("UTF-8 text content")).toBeFocused();
@@ -162,6 +188,40 @@ test.describe("writable share operations", () => {
     await competingPage
       .getByRole("button", { name: "Close", exact: true })
       .click();
+  });
+
+  test("refreshes the current directory after an out-of-band filesystem mutation", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/browse/writable", "writer");
+    await expect(page.getByRole("link", { name: "README.md" })).toBeVisible();
+    await page.waitForTimeout(500);
+
+    const token = await csrfToken(page);
+    const origin = new URL(page.url()).origin;
+    const created = await page.request.post(
+      `${origin}/api/v1/shares/writable/directories`,
+      {
+        data: { path: "sse-external" },
+        headers: { Origin: origin, "X-CSRF-Token": token },
+      },
+    );
+    expect(created.ok()).toBe(true);
+    await expect(
+      page.getByRole("link", { name: "sse-external" }),
+    ).toBeVisible();
+
+    await entryAction(page, "sse-external", "Delete").click();
+    const dialog = page.getByRole("dialog", {
+      name: "Delete folder sse-external",
+    });
+    await dialog
+      .getByLabel("Type sse-external to confirm")
+      .fill("sse-external");
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(page.getByRole("link", { name: "sse-external" })).toHaveCount(
+      0,
+    );
   });
 
   test("uploads by native drop and file picker with partial limits, conflict, and explicit replacement", async ({
@@ -355,7 +415,7 @@ async function createEntry(
 function entryAction(page: Page, entry: string, action: string): Locator {
   return page
     .getByLabel(`Actions for ${entry}`)
-    .getByRole("button", { name: action, exact: true });
+    .getByRole("button", { name: `${action} ${entry}`, exact: true });
 }
 
 function uploadJob(dialog: Locator, name: string): Locator {

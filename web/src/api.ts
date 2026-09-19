@@ -84,12 +84,17 @@ export interface UploadOptions {
   onProgress?: (loaded: number, total?: number) => void;
 }
 
-export type PreviewKind = "text" | "code" | "markdown_source" | "html_source";
+export type PreviewKind =
+  "text" | "code" | "markdown_source" | "html_source" | "image";
 
 export interface PreviewDocument {
   kind: PreviewKind;
   source: string;
   language?: string;
+  mimeType?:
+    "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif";
+  width?: number;
+  height?: number;
   size: number;
   truncated: boolean;
 }
@@ -541,6 +546,7 @@ const previewKinds = new Set<PreviewKind>([
   "code",
   "markdown_source",
   "html_source",
+  "image",
 ]);
 
 const maxPreviewBytes = 16 * 1024 * 1024;
@@ -557,14 +563,16 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     !Number.isSafeInteger(value.size) ||
     value.size < 0 ||
     value.size > maxPreviewBytes ||
-    new TextEncoder().encode(value.source).byteLength !== value.size ||
+    ((value.kind as PreviewKind) !== "image" &&
+      new TextEncoder().encode(value.source).byteLength !== value.size) ||
     typeof value.truncated !== "boolean" ||
     (language !== undefined &&
       (typeof language !== "string" || !previewLanguages.has(language))) ||
     !previewLanguageMatchesKind(
       value.kind as PreviewKind,
       language as string | undefined,
-    )
+    ) ||
+    !previewImageMetadataIsValid(value)
   ) {
     throw invalidResponse();
   }
@@ -574,6 +582,11 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     size: value.size as number,
     truncated: value.truncated as boolean,
     ...(typeof language === "string" ? { language } : {}),
+    ...(typeof value.mimeType === "string"
+      ? { mimeType: value.mimeType as PreviewDocument["mimeType"] }
+      : {}),
+    ...(typeof value.width === "number" ? { width: value.width } : {}),
+    ...(typeof value.height === "number" ? { height: value.height } : {}),
   };
 }
 
@@ -584,7 +597,39 @@ function previewLanguageMatchesKind(
   if (kind === "html_source") return language === "html";
   if (kind === "markdown_source") return language === "markdown";
   if (kind === "text") return language === undefined;
+  if (kind === "image") return language === undefined;
   return language !== "html" && language !== "markdown";
+}
+
+const imageMimeTypes = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+]);
+
+function previewImageMetadataIsValid(value: Record<string, unknown>): boolean {
+  const isImage = value.kind === "image";
+  if (!isImage) {
+    return (
+      value.mimeType === undefined &&
+      value.width === undefined &&
+      value.height === undefined
+    );
+  }
+  const validDimension = (dimension: unknown) =>
+    dimension === undefined ||
+    (typeof dimension === "number" &&
+      Number.isSafeInteger(dimension) &&
+      dimension > 0);
+  return (
+    value.source === "" &&
+    typeof value.mimeType === "string" &&
+    imageMimeTypes.has(value.mimeType) &&
+    validDimension(value.width) &&
+    validDimension(value.height)
+  );
 }
 
 function hasInvalidText(value: string): boolean {
@@ -615,6 +660,22 @@ export function previewApiUrl(shareId: string, path: string): string {
 
 export function htmlPreviewUrl(shareId: string, path: string): string {
   return fileApiUrl(shareId, path, "preview/html");
+}
+
+export function renderedHtmlPreviewUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "preview/html/rendered");
+}
+
+export function imagePreviewUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "preview/image");
+}
+
+export function directoryEventsUrl(shareId: string, path: string): string {
+  if (!isValidVirtualPath(path)) {
+    throw new ApiError("invalid-request", "The virtual path is invalid");
+  }
+  const query = new URLSearchParams({ path });
+  return `/api/v1/shares/${encodeURIComponent(shareId)}/events?${query.toString()}`;
 }
 
 export function downloadUrl(shareId: string, path: string): string {
