@@ -1,6 +1,6 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { Maximize2, Minus, Plus, RotateCcw, X } from "lucide-preact";
+import { Maximize2, Minimize2, X } from "lucide-preact";
 
 import {
   ApiError,
@@ -837,7 +837,6 @@ function PreviewPanel({
 }: PreviewPanelProps) {
   const [state, setState] = useState<PreviewState>({ status: "loading" });
   const [refreshKey, setRefreshKey] = useState(0);
-  const [zoom, setZoom] = useState(100);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const filename = path.split("/").at(-1) ?? path;
 
@@ -865,7 +864,12 @@ function PreviewPanel({
     return () => window.clearTimeout(timer);
   }, [path]);
 
-  useEffect(() => setZoom(100), [path]);
+  useEffect(() => {
+    if (!fullScreen) return;
+    document.documentElement.classList.add("preview-fullscreen-open");
+    return () =>
+      document.documentElement.classList.remove("preview-fullscreen-open");
+  }, [fullScreen]);
 
   useEffect(() => {
     if (!fullScreen) return;
@@ -892,7 +896,9 @@ function PreviewPanel({
     >
       <header class="preview-header">
         <div class="preview-heading">
-          <p class="eyebrow">File preview</p>
+          <p class="eyebrow">
+            {fullScreen ? "Full screen preview" : "File preview"}
+          </p>
           <h2 id="preview-title" ref={titleRef} tabIndex={-1}>
             {filename}
           </h2>
@@ -902,15 +908,18 @@ function PreviewPanel({
         </div>
         <div class="preview-window-actions">
           <button
-            class="icon-button"
+            class="button button-secondary preview-fullscreen-button"
             type="button"
             onClick={onToggleFullScreen}
-            aria-label={
-              fullScreen ? "Restore side preview" : "Open full-page preview"
-            }
-            title={fullScreen ? "Restore side preview" : "Full-page preview"}
+            aria-label={fullScreen ? "Exit full screen" : "Enter full screen"}
+            title={fullScreen ? "Exit full screen" : "Enter full screen"}
           >
-            <Maximize2 size={19} aria-hidden="true" />
+            {fullScreen ? (
+              <Minimize2 size={18} aria-hidden="true" />
+            ) : (
+              <Maximize2 size={18} aria-hidden="true" />
+            )}
+            <span>{fullScreen ? "Exit full screen" : "Full screen"}</span>
           </button>
           <button
             class="icon-button"
@@ -933,48 +942,28 @@ function PreviewPanel({
           Download file
         </a>
         {state.status === "ready" && state.document.kind === "html_source" && (
-          <a
-            class="button button-secondary"
-            href={htmlPreviewUrl(shareId, path)}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open HTML source in new tab
-          </a>
+          <>
+            <a
+              class="button button-secondary"
+              href={renderedHtmlPreviewUrl(shareId, path)}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open rendered HTML in new tab
+            </a>
+            <a
+              class="button button-secondary"
+              href={htmlPreviewUrl(shareId, path)}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open HTML source in new tab
+            </a>
+          </>
         )}
-        <div class="zoom-controls" role="group" aria-label="Preview zoom">
-          <button
-            class="icon-button"
-            type="button"
-            disabled={zoom <= 70}
-            aria-label="Zoom out"
-            onClick={() => setZoom((value) => Math.max(70, value - 10))}
-          >
-            <Minus size={18} aria-hidden="true" />
-          </button>
-          <output aria-live="polite">{zoom}%</output>
-          <button
-            class="icon-button"
-            type="button"
-            disabled={zoom === 100}
-            aria-label="Reset zoom"
-            onClick={() => setZoom(100)}
-          >
-            <RotateCcw size={17} aria-hidden="true" />
-          </button>
-          <button
-            class="icon-button"
-            type="button"
-            disabled={zoom >= 180}
-            aria-label="Zoom in"
-            onClick={() => setZoom((value) => Math.min(180, value + 10))}
-          >
-            <Plus size={18} aria-hidden="true" />
-          </button>
-        </div>
       </div>
 
-      <div class="preview-body" style={{ fontSize: `${zoom}%` }}>
+      <div class="preview-body">
         {state.status === "loading" ? (
           <p class="status-message" role="status" aria-live="polite">
             Loading preview…
@@ -991,7 +980,6 @@ function PreviewPanel({
             htmlRenderedUrl={renderedHtmlPreviewUrl(shareId, path)}
             imageUrl={imagePreviewUrl(shareId, path)}
             filename={filename}
-            zoom={zoom}
           />
         )}
       </div>
@@ -1005,14 +993,12 @@ function PreviewContent({
   htmlRenderedUrl,
   imageUrl,
   filename,
-  zoom,
 }: {
   document: PreviewDocument;
   htmlSourceUrl: string;
   htmlRenderedUrl: string;
   imageUrl: string;
   filename: string;
-  zoom: number;
 }) {
   if (document.kind === "html_source") {
     return (
@@ -1027,11 +1013,7 @@ function PreviewContent({
   if (document.kind === "image") {
     return (
       <figure class="image-preview">
-        <img
-          src={imageUrl}
-          alt={`Preview of ${filename}`}
-          style={{ width: `${zoom}%` }}
-        />
+        <img src={imageUrl} alt={`Preview of ${filename}`} />
         <figcaption>
           {document.mimeType}
           {document.width && document.height

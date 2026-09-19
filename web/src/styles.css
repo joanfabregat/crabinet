@@ -466,6 +466,57 @@ select {
   overflow: hidden;
 }
 
+html.preview-fullscreen-open,
+html.preview-fullscreen-open body {
+  overflow: hidden;
+}
+
+.preview-panel.is-fullscreen {
+  border: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  inset: 0;
+  max-height: none;
+  position: fixed;
+  width: 100vw;
+  z-index: 1000;
+}
+
+.preview-panel.is-fullscreen .preview-header,
+.preview-panel.is-fullscreen .preview-actions {
+  flex: 0 0 auto;
+}
+
+.preview-panel.is-fullscreen .preview-header {
+  padding-left: max(1.25rem, env(safe-area-inset-left));
+  padding-right: max(1.25rem, env(safe-area-inset-right));
+  padding-top: max(1.25rem, env(safe-area-inset-top));
+}
+
+.preview-panel.is-fullscreen .preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.preview-panel.is-fullscreen .html-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.preview-panel.is-fullscreen .html-source-frame {
+  flex: 1 1 auto;
+  height: auto;
+}
+
+.preview-panel.is-fullscreen .source-code,
+.preview-panel.is-fullscreen .markdown-code {
+  max-height: none;
+}
+
 .preview-header {
   align-items: flex-start;
   border-bottom: 1px solid var(--line);
@@ -500,22 +551,15 @@ select {
   padding: 0.8rem 1.25rem;
 }
 
-.preview-window-actions,
-.zoom-controls {
+.preview-window-actions {
   align-items: center;
   display: flex;
   gap: 0.35rem;
 }
 
-.zoom-controls {
-  margin-left: auto;
-}
-
-.zoom-controls output {
-  color: var(--muted);
-  font-size: 0.78rem;
-  min-width: 3rem;
-  text-align: center;
+.preview-fullscreen-button {
+  gap: 0.45rem;
+  white-space: nowrap;
 }
 
 .icon-button {
@@ -669,8 +713,9 @@ select {
   display: block;
   height: auto;
   margin: 0 auto;
-  max-width: none;
+  max-width: 100%;
   object-fit: contain;
+  width: auto;
 }
 
 .image-preview figcaption {
@@ -1122,9 +1167,24 @@ select {
     flex-direction: column;
   }
 
-  .zoom-controls {
-    justify-content: center;
-    margin-left: 0;
+  .preview-panel.is-fullscreen .preview-header {
+    align-items: flex-start;
+    flex-direction: row;
+  }
+
+  .preview-panel.is-fullscreen .preview-window-actions {
+    flex: 0 0 auto;
+  }
+
+  .preview-panel.is-fullscreen .preview-actions {
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+
+  .preview-panel.is-fullscreen .preview-actions > * {
+    flex: 0 0 auto;
   }
 
   .source-code,

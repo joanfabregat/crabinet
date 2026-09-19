@@ -120,7 +120,7 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   page,
 }) => {
   const externalRequests: string[] = [];
-  page.on("response", (response) => {
+  context.on("response", (response) => {
     if (response.url().startsWith("https://attacker.invalid")) {
       externalRequests.push(response.url());
     }
@@ -129,6 +129,12 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   page.on("dialog", async (dialog) => {
     dialogs += 1;
     await dialog.dismiss();
+  });
+  context.on("page", (openedPage) => {
+    openedPage.on("dialog", async (dialog) => {
+      dialogs += 1;
+      await dialog.dismiss();
+    });
   });
 
   await openSignedIn(page);
@@ -164,6 +170,27 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   expect(await page.evaluate(() => localStorage.getItem("hostile"))).toBeNull();
   expect(externalRequests).toEqual([]);
   expect(dialogs).toBe(0);
+
+  const [renderedPage] = await Promise.all([
+    page.waitForEvent("popup"),
+    page.getByRole("link", { name: "Open rendered HTML in new tab" }).click(),
+  ]);
+  await renderedPage.waitForLoadState("domcontentloaded");
+  await expect(renderedPage.locator("body")).toContainText("Sign out");
+  expect(
+    await renderedPage.evaluate(() =>
+      Boolean(
+        (window as Window & { __indexHostileHtml?: boolean })
+          .__indexHostileHtml,
+      ),
+    ),
+  ).toBe(false);
+  expect(await renderedPage.evaluate(() => window.opener)).toBeNull();
+  expect(renderedPage.url()).toContain(
+    "/api/v1/shares/read-only/preview/html/rendered?path=hostile.html",
+  );
+  expect(externalRequests).toEqual([]);
+  await renderedPage.close();
 
   await page.getByRole("tab", { name: "Source" }).click();
   const sourceFrame = page.getByTitle("Inert HTML source for hostile.html");
@@ -227,6 +254,36 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   await signIn(page, "reader");
   await page.getByRole("link", { name: "hello.rs" }).click();
   await expect(page.getByLabel("File source")).toBeVisible();
+
+  await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Zoom out" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Zoom in" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Enter full screen" }).click();
+  const fullScreenPreview = page.locator(".preview-panel.is-fullscreen");
+  await expect(fullScreenPreview).toBeVisible();
+  await expect(page.getByText("Full screen preview")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Exit full screen" }),
+  ).toContainText("Exit full screen");
+  const fullScreenBox = await fullScreenPreview.boundingBox();
+  const viewport = page.viewportSize();
+  expect(fullScreenBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(fullScreenBox!.x).toBe(0);
+  expect(fullScreenBox!.y).toBe(0);
+  expect(Math.round(fullScreenBox!.width)).toBe(viewport!.width);
+  expect(Math.round(fullScreenBox!.height)).toBe(viewport!.height);
+  results = await new AxeBuilder({ page }).exclude("iframe").analyze();
+  expect(
+    results.violations.filter(({ impact }) =>
+      ["critical", "serious"].includes(impact ?? ""),
+    ),
+  ).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "Enter full screen" }),
+  ).toBeVisible();
+  await expect(fullScreenPreview).toHaveCount(0);
 
   const dimensions = await page.evaluate(() => ({
     viewport: window.innerWidth,
