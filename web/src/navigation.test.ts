@@ -70,7 +70,7 @@ describe("browser navigation", () => {
     });
   });
 
-  it("round-trips an explicit full-page preview without changing the folder", () => {
+  it("round-trips an explicit full-screen preview without changing the folder", () => {
     const href = previewRouteUrl("docs", "projects", "projects/app.rs", "full");
     expect(href).toBe(
       "/browse/docs?path=projects&preview=projects%2Fapp.rs&view=full",

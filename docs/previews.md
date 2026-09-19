@@ -22,7 +22,7 @@ Code highlighting uses Shiki with a fixed language allowlist and dynamically loa
 
 The dedicated HTML-source endpoint intentionally uses `Content-Type: text/plain; charset=utf-8`. It returns the exact validated UTF-8 source and does not parse or escape it into an HTML wrapper. Opening this endpoint in an iframe or a new tab therefore remains inert.
 
-The rendered endpoint uses `Content-Type: text/html; charset=utf-8`, but the frontend embeds it only in an iframe with an empty `sandbox` attribute. The response independently applies a CSP sandbox with `default-src 'none'`, allows only inline styles and embedded `data:` images, and blocks base-URL changes, form submissions, ancestor origins other than self, and navigation. No iframe sandbox tokens are granted: scripts, event handlers, application storage, same-origin access, forms, popups, top navigation, and external network requests remain unavailable. The rendered tab shows layout and safe CSS, not an executable web application.
+The rendered endpoint uses `Content-Type: text/html; charset=utf-8`. The frontend embeds it in an iframe with an empty `sandbox` attribute and also offers an explicit new-tab preview. The response independently applies a CSP sandbox in both contexts with `default-src 'none'`, allows only inline styles and embedded `data:` images, and blocks base-URL changes, form submissions, ancestor origins other than self, and navigation. No iframe sandbox tokens are granted: scripts, event handlers, application storage, same-origin access, forms, popups, top navigation, and external network requests remain unavailable. The rendered view shows layout and safe CSS, not an executable web application.
 
 Every preview response adds:
 

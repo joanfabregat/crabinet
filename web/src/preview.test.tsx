@@ -205,6 +205,14 @@ describe("secure file previews", () => {
       "src",
       "/api/v1/shares/docs/preview/html?path=demo.html",
     );
+    const renderedNewTab = within(panel).getByRole("link", {
+      name: "Open rendered HTML in new tab",
+    });
+    expect(renderedNewTab).toHaveAttribute(
+      "href",
+      "/api/v1/shares/docs/preview/html/rendered?path=demo.html",
+    );
+    expect(renderedNewTab).toHaveAttribute("rel", "noopener noreferrer");
     expect(
       within(panel).getByRole("link", { name: "Open HTML source in new tab" }),
     ).toHaveAttribute("rel", "noopener noreferrer");
@@ -239,7 +247,7 @@ describe("secure file previews", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("opens a zoomable full-page raster preview from validated metadata", async () => {
+  it("opens a full-screen raster preview from validated metadata", async () => {
     const navigation = new MemoryNavigation({
       shareId: "docs",
       path: "",
@@ -266,17 +274,44 @@ describe("secure file previews", () => {
       "/api/v1/shares/docs/preview/image?path=photo.png",
     );
     expect(screen.getByText(/800 × 600/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
-    expect(screen.getByText("110%")).toBeVisible();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open full-page preview" }),
-    );
+    expect(
+      screen.queryByRole("button", { name: "Reset zoom" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Zoom out" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Zoom in" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Enter full screen" }));
     expect(navigation.visits.at(-1)).toEqual({
       shareId: "docs",
       path: "",
       previewPath: "photo.png",
       previewMode: "full",
     });
+    const fullScreenPanel = screen.getByRole("complementary", {
+      name: "photo.png",
+    });
+    expect(fullScreenPanel).toHaveClass("is-fullscreen");
+    expect(screen.getByText("Full screen preview")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Exit full screen" }),
+    ).toHaveTextContent("Exit full screen");
+    expect(document.documentElement).toHaveClass("preview-fullscreen-open");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(navigation.visits.at(-1)).toEqual({
+      shareId: "docs",
+      path: "",
+      previewPath: "photo.png",
+      previewMode: "side",
+    });
+    await waitFor(() =>
+      expect(document.documentElement).not.toHaveClass(
+        "preview-fullscreen-open",
+      ),
+    );
   });
 
   it("aborts stale previews and ignores a late session error from the old file", async () => {

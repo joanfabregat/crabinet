@@ -427,9 +427,10 @@ pub fn html_source_response(document: PreviewDocument) -> Result<Response, Previ
     Ok(response)
 }
 
-/// Returns uploaded HTML as a document that can only render inside the UI's
-/// doubly-sandboxed iframe. The CSP forbids scripts, forms, navigation,
-/// same-origin access, network requests, plugins, and storage capabilities.
+/// Returns uploaded HTML as a sandboxed document for either the UI's
+/// doubly-sandboxed iframe or a top-level preview tab. The response CSP forbids
+/// scripts, forms, navigation, same-origin access, network requests, plugins,
+/// and storage capabilities in both contexts.
 pub fn html_rendered_response(document: PreviewDocument) -> Result<Response, PreviewError> {
     if document.kind != PreviewKind::HtmlSource {
         return Err(PreviewError::UnsupportedEntry);
