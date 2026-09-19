@@ -1,11 +1,15 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { Maximize2, Minus, Plus, RotateCcw, X } from "lucide-preact";
 
 import {
   ApiError,
   createApiClient,
+  directoryEventsUrl,
   downloadUrl,
   htmlPreviewUrl,
+  imagePreviewUrl,
+  renderedHtmlPreviewUrl,
   type ApiClient,
   type DirectoryEntry,
   type DirectoryPage,
@@ -21,6 +25,9 @@ import {
   type EntryOperation,
   type UploadSelection,
 } from "./operations";
+import { EntryIcon } from "./file-icons";
+import { HighlightedCode } from "./highlighted-code";
+import { CopyPathButton } from "./copy-path-button";
 import {
   browserNavigation,
   directoryUrl,
@@ -30,8 +37,10 @@ import {
   type BrowserRoute,
 } from "./navigation";
 import { SafeMarkdown } from "./safe-markdown";
+import { beginEntryDrag, ShareTree } from "./tree";
 
 const defaultApi = createApiClient();
+declare const __INDEX_DEV_REVISION__: string | null;
 
 type AuthState =
   | { status: "loading" }
@@ -300,6 +309,12 @@ function AuthenticatedShell({
           </Button>
         </div>
       </AppHeader>
+      {import.meta.env.DEV && (
+        <div class="development-banner" role="status">
+          Development preview · revision{" "}
+          {__INDEX_DEV_REVISION__ ?? "working tree"} · live HMR
+        </div>
+      )}
       {logoutError && (
         <div class="global-notice">
           <Notice tone="danger">{logoutError}</Notice>
@@ -337,6 +352,7 @@ function AuthenticatedShell({
             navigation={navigation}
             route={route}
             share={selectedShare}
+            shares={session.shares}
             onSessionExpired={onSessionExpired}
           />
         ) : (
@@ -353,6 +369,7 @@ interface DirectoryBrowserProps {
   navigation: BrowserNavigation;
   route: BrowserRoute;
   share: Share;
+  shares: Share[];
   onSessionExpired: () => void;
 }
 
@@ -362,6 +379,7 @@ function DirectoryBrowser({
   navigation,
   route,
   share,
+  shares,
   onSessionExpired,
 }: DirectoryBrowserProps) {
   const [page, setPage] = useState<DirectoryPage>();
@@ -375,6 +393,9 @@ function DirectoryBrowser({
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previewTriggerRef = useRef<HTMLAnchorElement>();
   const operationLocation = useRef(`${share.id}\u0000${route.path}`);
+  const focusedLocation = useRef<string>();
+  const activePreview = useRef(route.previewPath);
+  activePreview.current = route.previewPath;
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
@@ -389,6 +410,9 @@ function DirectoryBrowser({
 
   useEffect(() => {
     const controller = new AbortController();
+    const location = `${share.id}\u0000${route.path}`;
+    const shouldFocusHeading = focusedLocation.current !== location;
+    focusedLocation.current = location;
     loadMoreController.current?.abort();
     setLoading(true);
     setPage(undefined);
@@ -398,7 +422,9 @@ function DirectoryBrowser({
       (result) => {
         setPage(result);
         setLoading(false);
-        requestAnimationFrame(() => headingRef.current?.focus());
+        if (shouldFocusHeading) {
+          requestAnimationFrame(() => headingRef.current?.focus());
+        }
       },
       (cause: unknown) => {
         if (isAborted(cause)) return;
@@ -416,6 +442,52 @@ function DirectoryBrowser({
       loadMoreController.current?.abort();
     };
   }, [api, onSessionExpired, refreshKey, route.path, share.id]);
+
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return;
+    const events = new EventSource(directoryEventsUrl(share.id, route.path));
+    let debounce: number | undefined;
+    let fallback: number | undefined;
+    let fallbackDelay = 5_000;
+    const invalidate = () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(
+        () => setRefreshKey((value) => value + 1),
+        150,
+      );
+    };
+    const clearFallback = () => window.clearTimeout(fallback);
+    const scheduleFallback = () => {
+      clearFallback();
+      if (document.visibilityState !== "visible") return;
+      fallback = window.setTimeout(() => {
+        invalidate();
+        fallbackDelay = Math.min(fallbackDelay * 2, 60_000);
+        scheduleFallback();
+      }, fallbackDelay);
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState === "visible" && events.readyState !== 1) {
+        scheduleFallback();
+      } else if (document.visibilityState !== "visible") {
+        clearFallback();
+      }
+    };
+    events.onopen = () => {
+      fallbackDelay = 5_000;
+      clearFallback();
+    };
+    events.onerror = scheduleFallback;
+    events.addEventListener("invalidate", invalidate);
+    events.addEventListener("resync", invalidate);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () => {
+      window.clearTimeout(debounce);
+      clearFallback();
+      document.removeEventListener("visibilitychange", visibilityChanged);
+      events.close();
+    };
+  }, [route.path, share.id]);
 
   const loadMore = async () => {
     if (!page?.nextCursor || loadingMore) return;
@@ -461,13 +533,36 @@ function DirectoryBrowser({
     requestAnimationFrame(() => previewTriggerRef.current?.focus());
   };
 
-  const changed = () => {
+  const changed = (completedOperation: EntryOperation) => {
     setOperation(undefined);
+    if (
+      completedOperation.kind === "delete" &&
+      activePreview.current === completedOperation.path
+    ) {
+      navigation.go({ shareId: share.id, path: route.path }, { replace: true });
+      requestAnimationFrame(() => headingRef.current?.focus());
+    }
     setRefreshKey((value) => value + 1);
   };
 
   return (
-    <div class={`browser-workspace${route.previewPath ? " has-preview" : ""}`}>
+    <div
+      class={`browser-workspace${route.previewPath ? " has-preview" : ""}${route.previewMode === "full" ? " preview-full" : ""}`}
+    >
+      <ShareTree
+        api={api}
+        shares={shares}
+        revision={refreshKey}
+        activeShareId={share.id}
+        activePath={route.path}
+        navigation={navigation}
+        onCreateFile={() => setOperation({ kind: "create-file" })}
+        onCreateFolder={() => setOperation({ kind: "create-folder" })}
+        onMove={(entry, path, destinationDirectory) =>
+          setOperation({ kind: "move", entry, path, destinationDirectory })
+        }
+        onSessionExpired={onSessionExpired}
+      />
       <section class="directory-panel" aria-labelledby="directory-title">
         <nav class="breadcrumbs" aria-label="Breadcrumb">
           <ol>
@@ -510,18 +605,14 @@ function DirectoryBrowser({
               {crumbs.at(-1)?.name ?? share.name}
             </h1>
           </div>
-          <Button
-            variant="secondary"
-            onClick={() => setRefreshKey((value) => value + 1)}
-          >
-            Refresh
-          </Button>
+          <CopyPathButton
+            value={`${share.id}${route.path ? `/${route.path}` : ""}`}
+            label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
+          />
         </div>
 
         {share.access === "read-write" && (
           <WriteToolbar
-            onCreateFile={() => setOperation({ kind: "create-file" })}
-            onCreateFolder={() => setOperation({ kind: "create-folder" })}
             onUpload={(files) =>
               setUploadSelection({ id: crypto.randomUUID(), files })
             }
@@ -564,8 +655,8 @@ function DirectoryBrowser({
             />
             {error && (
               <Notice tone="danger">
-                More items could not be loaded. The folder may have changed;
-                refresh and try again.
+                More items could not be loaded. The folder may have changed; use
+                Load more to try again.
               </Notice>
             )}
             {page.nextCursor && (
@@ -588,7 +679,16 @@ function DirectoryBrowser({
           api={api}
           path={route.previewPath}
           shareId={share.id}
+          fullScreen={route.previewMode === "full"}
           onClose={closePreview}
+          onToggleFullScreen={() =>
+            navigation.go({
+              shareId: share.id,
+              path: route.path,
+              previewPath: route.previewPath,
+              previewMode: route.previewMode === "full" ? "side" : "full",
+            })
+          }
           onSessionExpired={onSessionExpired}
         />
       )}
@@ -643,12 +743,20 @@ function EntryList({
       {entries.map((entry) => {
         const key = `${entry.kind}:${entry.name}`;
         return (
-          <div class="entry-row" role="listitem" key={key}>
+          <div
+            class="entry-row"
+            role="listitem"
+            key={key}
+            draggable={writable}
+            onDragStart={(event) =>
+              beginEntryDrag(event, shareId, joinPath(path, entry.name), entry)
+            }
+          >
             <span
               class={`entry-icon entry-icon-${entry.kind}`}
               aria-hidden="true"
             >
-              {entry.kind === "directory" ? "▰" : "▪"}
+              <EntryIcon entry={entry} size={22} strokeWidth={1.8} />
             </span>
             <div class="entry-primary">
               {entry.kind === "directory" ? (
@@ -689,13 +797,13 @@ function EntryList({
               </span>
             </div>
             <span class="entry-meta">{formatSize(entry.size)}</span>
-            {writable && (
-              <EntryActionButtons
-                entry={entry}
-                path={joinPath(path, entry.name)}
-                onOperation={onOperation}
-              />
-            )}
+            <EntryActionButtons
+              entry={entry}
+              path={joinPath(path, entry.name)}
+              copyPath={`${shareId}/${joinPath(path, entry.name)}`}
+              writable={writable}
+              onOperation={onOperation}
+            />
           </div>
         );
       })}
@@ -707,7 +815,9 @@ interface PreviewPanelProps {
   api: ApiClient;
   path: string;
   shareId: string;
+  fullScreen: boolean;
   onClose: () => void;
+  onToggleFullScreen: () => void;
   onSessionExpired: () => void;
 }
 
@@ -720,11 +830,14 @@ function PreviewPanel({
   api,
   path,
   shareId,
+  fullScreen,
   onClose,
+  onToggleFullScreen,
   onSessionExpired,
 }: PreviewPanelProps) {
   const [state, setState] = useState<PreviewState>({ status: "loading" });
   const [refreshKey, setRefreshKey] = useState(0);
+  const [zoom, setZoom] = useState(100);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const filename = path.split("/").at(-1) ?? path;
 
@@ -752,8 +865,31 @@ function PreviewPanel({
     return () => window.clearTimeout(timer);
   }, [path]);
 
+  useEffect(() => setZoom(100), [path]);
+
+  useEffect(() => {
+    if (!fullScreen) return;
+    const leaveFullScreen = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        event.key !== "Escape" ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)))
+      ) {
+        return;
+      }
+      onToggleFullScreen();
+    };
+    window.addEventListener("keydown", leaveFullScreen);
+    return () => window.removeEventListener("keydown", leaveFullScreen);
+  }, [fullScreen, onToggleFullScreen]);
+
   return (
-    <aside class="preview-panel" aria-labelledby="preview-title">
+    <aside
+      class={`preview-panel${fullScreen ? " is-fullscreen" : ""}`}
+      aria-labelledby="preview-title"
+    >
       <header class="preview-header">
         <div class="preview-heading">
           <p class="eyebrow">File preview</p>
@@ -764,16 +900,35 @@ function PreviewPanel({
             {path}
           </p>
         </div>
-        <Button
-          variant="secondary"
-          onClick={onClose}
-          aria-label={`Close preview of ${filename}`}
-        >
-          Close
-        </Button>
+        <div class="preview-window-actions">
+          <button
+            class="icon-button"
+            type="button"
+            onClick={onToggleFullScreen}
+            aria-label={
+              fullScreen ? "Restore side preview" : "Open full-page preview"
+            }
+            title={fullScreen ? "Restore side preview" : "Full-page preview"}
+          >
+            <Maximize2 size={19} aria-hidden="true" />
+          </button>
+          <button
+            class="icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label={`Close preview of ${filename}`}
+            title="Close preview"
+          >
+            <X size={20} aria-hidden="true" />
+          </button>
+        </div>
       </header>
 
       <div class="preview-actions" aria-label="File actions">
+        <CopyPathButton
+          value={`${shareId}/${path}`}
+          label={`Copy full path for ${filename}`}
+        />
         <a class="button button-secondary" href={downloadUrl(shareId, path)}>
           Download file
         </a>
@@ -787,9 +942,39 @@ function PreviewPanel({
             Open HTML source in new tab
           </a>
         )}
+        <div class="zoom-controls" role="group" aria-label="Preview zoom">
+          <button
+            class="icon-button"
+            type="button"
+            disabled={zoom <= 70}
+            aria-label="Zoom out"
+            onClick={() => setZoom((value) => Math.max(70, value - 10))}
+          >
+            <Minus size={18} aria-hidden="true" />
+          </button>
+          <output aria-live="polite">{zoom}%</output>
+          <button
+            class="icon-button"
+            type="button"
+            disabled={zoom === 100}
+            aria-label="Reset zoom"
+            onClick={() => setZoom(100)}
+          >
+            <RotateCcw size={17} aria-hidden="true" />
+          </button>
+          <button
+            class="icon-button"
+            type="button"
+            disabled={zoom >= 180}
+            aria-label="Zoom in"
+            onClick={() => setZoom((value) => Math.min(180, value + 10))}
+          >
+            <Plus size={18} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
-      <div class="preview-body">
+      <div class="preview-body" style={{ fontSize: `${zoom}%` }}>
         {state.status === "loading" ? (
           <p class="status-message" role="status" aria-live="polite">
             Loading preview…
@@ -803,7 +988,10 @@ function PreviewPanel({
           <PreviewContent
             document={state.document}
             htmlSourceUrl={htmlPreviewUrl(shareId, path)}
+            htmlRenderedUrl={renderedHtmlPreviewUrl(shareId, path)}
+            imageUrl={imagePreviewUrl(shareId, path)}
             filename={filename}
+            zoom={zoom}
           />
         )}
       </div>
@@ -814,26 +1002,44 @@ function PreviewPanel({
 function PreviewContent({
   document,
   htmlSourceUrl,
+  htmlRenderedUrl,
+  imageUrl,
   filename,
+  zoom,
 }: {
   document: PreviewDocument;
   htmlSourceUrl: string;
+  htmlRenderedUrl: string;
+  imageUrl: string;
   filename: string;
+  zoom: number;
 }) {
   if (document.kind === "html_source") {
     return (
-      <div class="html-preview">
-        <Notice tone="warning">
-          HTML is shown as inert source. Scripts, forms, navigation, storage,
-          popups, and external requests are disabled.
-        </Notice>
-        <iframe
-          class="html-source-frame"
-          src={htmlSourceUrl}
-          sandbox=""
-          title={`Inert HTML source for ${filename}`}
+      <HtmlPreview
+        filename={filename}
+        renderedUrl={htmlRenderedUrl}
+        sourceUrl={htmlSourceUrl}
+      />
+    );
+  }
+
+  if (document.kind === "image") {
+    return (
+      <figure class="image-preview">
+        <img
+          src={imageUrl}
+          alt={`Preview of ${filename}`}
+          style={{ width: `${zoom}%` }}
         />
-      </div>
+        <figcaption>
+          {document.mimeType}
+          {document.width && document.height
+            ? ` · ${document.width} × ${document.height}`
+            : ""}
+          {` · ${formatSize(document.size)}`}
+        </figcaption>
+      </figure>
     );
   }
 
@@ -842,6 +1048,75 @@ function PreviewContent({
   }
 
   return <SourcePreview document={document} />;
+}
+
+function HtmlPreview({
+  filename,
+  renderedUrl,
+  sourceUrl,
+}: {
+  filename: string;
+  renderedUrl: string;
+  sourceUrl: string;
+}) {
+  const [mode, setMode] = useState<"rendered" | "source">("rendered");
+  const renderedTab = useRef<HTMLButtonElement>(null);
+  const sourceTab = useRef<HTMLButtonElement>(null);
+  const chooseMode = (next: "rendered" | "source") => {
+    setMode(next);
+    requestAnimationFrame(() =>
+      (next === "rendered" ? renderedTab : sourceTab).current?.focus(),
+    );
+  };
+  const handleKeys = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "Home") {
+      event.preventDefault();
+      chooseMode("rendered");
+    } else if (event.key === "ArrowRight" || event.key === "End") {
+      event.preventDefault();
+      chooseMode("source");
+    }
+  };
+
+  return (
+    <div class="html-preview">
+      <p class="preview-security-note">
+        Rendered HTML runs in an isolated sandbox. Scripts, forms, navigation,
+        storage, popups, and network requests are disabled.
+      </p>
+      <div class="preview-tabs" role="tablist" aria-label="HTML view">
+        <button
+          ref={renderedTab}
+          type="button"
+          role="tab"
+          aria-selected={mode === "rendered"}
+          tabIndex={mode === "rendered" ? 0 : -1}
+          onClick={() => chooseMode("rendered")}
+          onKeyDown={handleKeys}
+        >
+          Rendered
+        </button>
+        <button
+          ref={sourceTab}
+          type="button"
+          role="tab"
+          aria-selected={mode === "source"}
+          tabIndex={mode === "source" ? 0 : -1}
+          onClick={() => chooseMode("source")}
+          onKeyDown={handleKeys}
+        >
+          Source
+        </button>
+      </div>
+      <iframe
+        class="html-source-frame"
+        src={mode === "rendered" ? renderedUrl : sourceUrl}
+        sandbox=""
+        referrerPolicy="no-referrer"
+        title={`${mode === "rendered" ? "Sandboxed HTML preview" : "Inert HTML source"} for ${filename}`}
+      />
+    </div>
+  );
 }
 
 function SourcePreview({ document }: { document: PreviewDocument }) {
@@ -867,6 +1142,12 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
       )}
       {document.source === "" ? (
         <p class="preview-empty">This file is empty.</p>
+      ) : document.kind === "code" && document.language ? (
+        <HighlightedCode
+          source={document.source}
+          language={document.language}
+          wrap={wrap}
+        />
       ) : (
         <pre
           class={`source-code${wrap ? " source-code-wrap" : ""}`}

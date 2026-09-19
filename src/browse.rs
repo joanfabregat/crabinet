@@ -7,8 +7,10 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    convert::Infallible,
     io::SeekFrom,
-    sync::Arc,
+    mem::MaybeUninit,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,14 +19,20 @@ use axum::{
     body::Body,
     extract::{FromRequestParts, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
+    response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::stream;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::{Duration, Instant, sleep},
+};
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -39,6 +47,8 @@ use crate::{
 type HmacSha256 = Hmac<Sha256>;
 const CURSOR_VERSION: u8 = 1;
 const CURSOR_BYTES: usize = 1 + 8 + 32 + 32;
+const MAX_EVENT_CONNECTIONS: usize = 64;
+const MAX_EVENT_CONNECTIONS_PER_SUBJECT: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct AuthenticatedIdentity {
@@ -146,6 +156,64 @@ pub struct BrowseState {
     limits: BrowseLimits,
     policy: GlobalPolicy,
     cursor_key: [u8; 32],
+    event_gate: DirectoryEventGate,
+}
+
+struct DirectoryEventGate {
+    process: Arc<Semaphore>,
+    subjects: Arc<Mutex<HashMap<Arc<str>, usize>>>,
+    per_subject: usize,
+}
+
+struct DirectoryEventLease {
+    _process: OwnedSemaphorePermit,
+    subject: Arc<str>,
+    subjects: Arc<Mutex<HashMap<Arc<str>, usize>>>,
+}
+
+impl DirectoryEventGate {
+    fn new(process: usize, per_subject: usize) -> Self {
+        Self {
+            process: Arc::new(Semaphore::new(process)),
+            subjects: Arc::new(Mutex::new(HashMap::new())),
+            per_subject,
+        }
+    }
+
+    fn try_acquire(&self, subject: &str) -> Result<DirectoryEventLease, AppError> {
+        let process = self
+            .process
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AppError::TooManyRequests)?;
+        let subject: Arc<str> = Arc::from(subject);
+        let mut subjects = self.subjects.lock().map_err(|_| AppError::Internal)?;
+        let active = subjects.entry(subject.clone()).or_default();
+        if *active >= self.per_subject {
+            return Err(AppError::TooManyRequests);
+        }
+        *active += 1;
+        drop(subjects);
+        Ok(DirectoryEventLease {
+            _process: process,
+            subject,
+            subjects: self.subjects.clone(),
+        })
+    }
+}
+
+impl Drop for DirectoryEventLease {
+    fn drop(&mut self) {
+        let Ok(mut subjects) = self.subjects.lock() else {
+            return;
+        };
+        if let Some(active) = subjects.get_mut(&self.subject) {
+            *active = active.saturating_sub(1);
+            if *active == 0 {
+                subjects.remove(&self.subject);
+            }
+        }
+    }
 }
 
 impl BrowseState {
@@ -181,6 +249,10 @@ impl BrowseState {
             limits,
             policy,
             cursor_key,
+            event_gate: DirectoryEventGate::new(
+                MAX_EVENT_CONNECTIONS,
+                MAX_EVENT_CONNECTIONS_PER_SUBJECT,
+            ),
         })
     }
 
@@ -190,6 +262,10 @@ impl BrowseState {
             limits: BrowseLimits::default(),
             policy: GlobalPolicy::default(),
             cursor_key: [0; 32],
+            event_gate: DirectoryEventGate::new(
+                MAX_EVENT_CONNECTIONS,
+                MAX_EVENT_CONNECTIONS_PER_SUBJECT,
+            ),
         }
     }
 
@@ -203,6 +279,13 @@ impl BrowseState {
             .filesystem
             .authorize(identity.grant_for(share_id), self.policy)
             .map_err(non_disclosing_fs_error)
+    }
+
+    fn acquire_event_connection(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<DirectoryEventLease, AppError> {
+        self.event_gate.try_acquire(identity.subject())
     }
 
     /// Builds the same opaque validator returned by the metadata/read APIs.
@@ -233,6 +316,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/shares", get(discover_shares))
         .route("/shares/{share_id}/directory", get(list_directory))
+        .route("/shares/{share_id}/events", get(directory_events))
         .route("/shares/{share_id}/metadata", get(read_metadata))
         .route("/shares/{share_id}/text", get(read_text))
         .route("/shares/{share_id}/download", get(download))
@@ -381,6 +465,71 @@ async fn list_directory(
         entries,
         next_cursor,
     }))
+}
+
+/// Sends event-driven invalidation hints for one explicitly selected
+/// directory. Each connection is bounded to five minutes, then browsers
+/// reconnect through authentication middleware. No directory contents are
+/// scanned by the event stream.
+async fn directory_events(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    Path(raw_share_id): Path<String>,
+    Query(query): Query<DirectoryQuery>,
+) -> Result<Response, AppError> {
+    let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
+    let path = parse_query_path(query.path.as_deref())?;
+    let authorized = state.browse().authorize(&identity, &share_id)?;
+    let lease = state.browse().acquire_event_connection(&identity)?;
+    let watcher = authorized.watch_directory(&path).map_err(map_fs_error)?;
+    let deadline = Instant::now() + Duration::from_secs(5 * 60);
+
+    let events = stream::unfold(
+        (watcher, deadline, lease),
+        |(watcher, deadline, lease)| async move {
+            loop {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                sleep(Duration::from_millis(250)).await;
+                let mut buffer = [MaybeUninit::uninit(); 4096];
+                match rustix::fs::inotify::Reader::new(&watcher, &mut buffer).next() {
+                    Ok(_) => {
+                        return Some((
+                            Ok::<Event, Infallible>(
+                                Event::default().event("invalidate").data("{}"),
+                            ),
+                            (watcher, deadline, lease),
+                        ));
+                    }
+                    Err(rustix::io::Errno::AGAIN) => {}
+                    Err(_) => {
+                        return Some((
+                            Ok::<Event, Infallible>(Event::default().event("resync").data("{}")),
+                            (watcher, Instant::now(), lease),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+
+    let mut response = Sse::new(events)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -1573,7 +1722,6 @@ mod tests {
                 "/api/v1/shares/documents/download?path=socket",
                 "/api/v1/shares/documents/text?path=socket",
                 "/api/v1/shares/documents/metadata?path=socket",
-                "/api/v1/shares/documents/directory",
             ] {
                 let response = send(
                     &fixture.app,
@@ -1583,6 +1731,15 @@ mod tests {
                 .await;
                 assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
             }
+            let listing = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get("/api/v1/shares/documents/directory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(listing.status(), StatusCode::OK);
         }
 
         let directory_limits = BrowseLimits {
@@ -1691,4 +1848,22 @@ mod tests {
             Err(BrowseStateError::InvalidLimits)
         ));
     }
+}
+#[test]
+fn directory_event_connections_are_bounded_and_released() {
+    let gate = DirectoryEventGate::new(2, 1);
+    let alice = gate.try_acquire("alice").expect("first user lease");
+    assert!(matches!(
+        gate.try_acquire("alice"),
+        Err(AppError::TooManyRequests)
+    ));
+    let bob = gate.try_acquire("bob").expect("second process lease");
+    assert!(matches!(
+        gate.try_acquire("charlie"),
+        Err(AppError::TooManyRequests)
+    ));
+    drop(alice);
+    let alice = gate.try_acquire("alice").expect("released user lease");
+    drop((alice, bob));
+    assert!(gate.try_acquire("charlie").is_ok());
 }

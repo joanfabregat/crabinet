@@ -5,6 +5,7 @@ export interface BrowserRoute {
   path: string;
   /** A virtual file path selected for preview, or null when browsing only. */
   previewPath?: string | null;
+  previewMode?: "side" | "full";
 }
 
 export interface BrowserNavigation {
@@ -45,6 +46,7 @@ export function routeFromUrl(url: URL): BrowserRoute {
     };
     if (previewPath !== null && isValidVirtualPath(previewPath)) {
       route.previewPath = previewPath;
+      if (url.searchParams.get("view") === "full") route.previewMode = "full";
     }
     return route;
   } catch {
@@ -60,8 +62,9 @@ export function previewRouteUrl(
   shareId: string,
   directoryPath: string,
   previewPath: string,
+  previewMode: "side" | "full" = "side",
 ): string {
-  return browserUrl({ shareId, path: directoryPath, previewPath });
+  return browserUrl({ shareId, path: directoryPath, previewPath, previewMode });
 }
 
 function browserUrl(route: BrowserRoute): string {
@@ -72,6 +75,7 @@ function browserUrl(route: BrowserRoute): string {
   if (safePath) query.set("path", safePath);
   if (route.previewPath && isValidVirtualPath(route.previewPath)) {
     query.set("preview", route.previewPath);
+    if (route.previewMode === "full") query.set("view", "full");
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return `/browse/${encodeURIComponent(shareId)}${suffix}`;

@@ -1,5 +1,12 @@
 import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import {
+  FilePenLine,
+  FolderInput,
+  Pencil,
+  Trash2,
+  Upload,
+} from "lucide-preact";
 
 import {
   ApiError,
@@ -7,15 +14,18 @@ import {
   type DirectoryEntry,
   type EntryMetadata,
 } from "./api";
-import { isValidPathComponent, isValidVirtualPath } from "./virtual-path";
+import { isValidPathComponent } from "./virtual-path";
+import { FolderPicker } from "./tree";
+import { CopyPathButton } from "./copy-path-button";
 
 export type EntryOperation =
   | { kind: "create-file" }
   | { kind: "create-folder" }
   | {
-      kind: "rename" | "delete" | "edit";
+      kind: "rename" | "delete" | "edit" | "move";
       entry: DirectoryEntry;
       path: string;
+      destinationDirectory?: string;
     };
 
 export interface UploadSelection {
@@ -24,12 +34,8 @@ export interface UploadSelection {
 }
 
 export function WriteToolbar({
-  onCreateFile,
-  onCreateFolder,
   onUpload,
 }: {
-  onCreateFile: () => void;
-  onCreateFolder: () => void;
   onUpload: (files: File[]) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
@@ -42,22 +48,6 @@ export function WriteToolbar({
 
   return (
     <section class="write-toolbar" aria-label="File operations">
-      <div class="write-actions">
-        <button
-          class="button button-primary"
-          type="button"
-          onClick={onCreateFile}
-        >
-          New file
-        </button>
-        <button
-          class="button button-secondary"
-          type="button"
-          onClick={onCreateFolder}
-        >
-          New folder
-        </button>
-      </div>
       <div
         class={`upload-dropzone${dragging ? " is-dragging" : ""}`}
         onDragEnter={(event) => {
@@ -87,6 +77,7 @@ export function WriteToolbar({
           type="button"
           onClick={() => input.current?.click()}
         >
+          <Upload size={17} aria-hidden="true" />
           choose files
         </button>
         <input
@@ -105,37 +96,68 @@ export function WriteToolbar({
 export function EntryActionButtons({
   entry,
   path,
+  copyPath,
+  writable,
   onOperation,
 }: {
   entry: DirectoryEntry;
   path: string;
+  copyPath: string;
+  writable: boolean;
   onOperation: (operation: EntryOperation) => void;
 }) {
   return (
     <div class="entry-actions" aria-label={`Actions for ${entry.name}`}>
-      {entry.kind === "file" && (
+      {writable && entry.kind === "file" && (
         <button
           class="entry-action"
           type="button"
+          aria-label={`Edit ${entry.name}`}
+          title="Edit"
           onClick={() => onOperation({ kind: "edit", entry, path })}
         >
-          Edit
+          <FilePenLine size={18} aria-hidden="true" />
         </button>
       )}
-      <button
-        class="entry-action"
-        type="button"
-        onClick={() => onOperation({ kind: "rename", entry, path })}
-      >
-        Move / rename
-      </button>
-      <button
-        class="entry-action entry-action-danger"
-        type="button"
-        onClick={() => onOperation({ kind: "delete", entry, path })}
-      >
-        Delete
-      </button>
+      {writable && (
+        <>
+          <button
+            class="entry-action"
+            type="button"
+            aria-label={`Rename ${entry.name}`}
+            title="Rename"
+            onClick={() => onOperation({ kind: "rename", entry, path })}
+          >
+            <Pencil size={18} aria-hidden="true" />
+          </button>
+          <button
+            class="entry-action"
+            type="button"
+            aria-label={`Move ${entry.name}`}
+            title="Move to…"
+            onClick={() => onOperation({ kind: "move", entry, path })}
+          >
+            <FolderInput size={18} aria-hidden="true" />
+          </button>
+        </>
+      )}
+      <CopyPathButton
+        value={copyPath}
+        label={`Copy full path for ${entry.name}`}
+        className="entry-action"
+        size={18}
+      />
+      {writable && (
+        <button
+          class="entry-action entry-action-danger"
+          type="button"
+          aria-label={`Delete ${entry.name}`}
+          title="Delete"
+          onClick={() => onOperation({ kind: "delete", entry, path })}
+        >
+          <Trash2 size={18} aria-hidden="true" />
+        </button>
+      )}
     </div>
   );
 }
@@ -147,12 +169,13 @@ interface OperationDialogProps {
   directory: string;
   shareId: string;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: (operation: EntryOperation) => void;
   onSessionExpired: () => void;
 }
 
 export function OperationDialog(props: OperationDialogProps) {
   if (props.operation.kind === "edit") return <EditorDialog {...props} />;
+  if (props.operation.kind === "move") return <MoveDialog {...props} />;
   return <SimpleOperationDialog {...props} />;
 }
 
@@ -167,9 +190,11 @@ function SimpleOperationDialog({
   onSessionExpired,
 }: OperationDialogProps) {
   const destructive = operation.kind === "delete";
-  const initial =
-    operation.kind === "rename" ? operation.path : destructive ? "" : "";
+  const deletesFile = destructive && operation.entry.kind === "file";
+  const deletesFolder = destructive && operation.entry.kind === "directory";
+  const initial = operation.kind === "rename" ? operation.entry.name : "";
   const [value, setValue] = useState(initial);
+  const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController>();
@@ -180,8 +205,10 @@ function SimpleOperationDialog({
       : operation.kind === "create-folder"
         ? "Create folder"
         : operation.kind === "rename"
-          ? "Move or rename"
-          : "Delete item";
+          ? `Rename ${operation.entry.name}`
+          : operation.entry.kind === "directory"
+            ? `Delete folder ${operation.entry.name}`
+            : `Delete file ${operation.entry.name}`;
 
   useEffect(() => {
     input.current?.focus();
@@ -209,16 +236,16 @@ function SimpleOperationDialog({
       }
       destination = joinPath(directory, value);
     } else if (operation.kind === "rename") {
-      if (
-        !isValidVirtualPath(value) ||
-        value === "" ||
-        value === operation.path
-      ) {
-        setError("Enter a different valid path inside this shared folder.");
+      if (!isValidPathComponent(value) || value === operation.entry.name) {
+        setError("Enter a different valid file or folder name.");
         return;
       }
-    } else if (value !== operation.entry.name) {
+      destination = joinPath(parentPath(operation.path), value);
+    } else if (deletesFolder && value !== operation.entry.name) {
       setError(`Type ${operation.entry.name} exactly to confirm deletion.`);
+      return;
+    } else if (deletesFile && !confirmed) {
+      setError(`Confirm permanent deletion of ${operation.entry.name}.`);
       return;
     }
 
@@ -266,7 +293,7 @@ function SimpleOperationDialog({
           );
         }
       }
-      onChanged();
+      onChanged(operation);
     } catch (cause) {
       if (isUnauthorized(cause)) {
         onSessionExpired();
@@ -278,10 +305,10 @@ function SimpleOperationDialog({
     }
   };
 
-  const fieldLabel = destructive
+  const fieldLabel = deletesFolder
     ? `Type ${operation.entry.name} to confirm`
     : operation.kind === "rename"
-      ? "Destination path"
+      ? "New name"
       : operation.kind === "create-file"
         ? "File name"
         : "Folder name";
@@ -297,20 +324,39 @@ function SimpleOperationDialog({
         )}
         {operation.kind === "rename" && (
           <p class="muted">
-            Enter a path relative to the shared folder. Existing items are never
+            Rename this item in its current folder. Existing items are never
             overwritten.
           </p>
         )}
-        <label for="operation-value">{fieldLabel}</label>
-        <input
-          ref={input}
-          id="operation-value"
-          value={value}
-          required
-          autocomplete="off"
-          onInput={(event) => setValue(event.currentTarget.value)}
-          aria-describedby={error ? "operation-error" : undefined}
-        />
+        {deletesFile ? (
+          <label class="confirmation-check" for="operation-confirm-delete">
+            <input
+              ref={input}
+              id="operation-confirm-delete"
+              type="checkbox"
+              checked={confirmed}
+              onChange={(event) => setConfirmed(event.currentTarget.checked)}
+              aria-describedby={error ? "operation-error" : undefined}
+            />
+            <span>
+              I understand that {operation.entry.name} will be permanently
+              deleted
+            </span>
+          </label>
+        ) : (
+          <>
+            <label for="operation-value">{fieldLabel}</label>
+            <input
+              ref={input}
+              id="operation-value"
+              value={value}
+              required
+              autocomplete="off"
+              onInput={(event) => setValue(event.currentTarget.value)}
+              aria-describedby={error ? "operation-error" : undefined}
+            />
+          </>
+        )}
         {error && (
           <p id="operation-error" class="field-error" role="alert">
             {error}
@@ -328,9 +374,119 @@ function SimpleOperationDialog({
           <button
             class={`button ${destructive ? "button-danger" : "button-primary"}`}
             type="submit"
-            disabled={busy}
+            disabled={
+              busy ||
+              (deletesFile && !confirmed) ||
+              (deletesFolder && value !== operation.entry.name)
+            }
           >
             {busy ? "Working…" : destructive ? "Delete" : "Confirm"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function MoveDialog({
+  api,
+  csrfToken,
+  operation,
+  directory,
+  shareId,
+  onClose,
+  onChanged,
+  onSessionExpired,
+}: OperationDialogProps) {
+  if (operation.kind !== "move")
+    throw new Error("move dialog requires an entry");
+  const [destinationDirectory, setDestinationDirectory] = useState(
+    operation.destinationDirectory ?? directory,
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const controller = useRef<AbortController>();
+
+  useEffect(() => () => controller.current?.abort(), []);
+
+  const destination = joinPath(destinationDirectory, operation.entry.name);
+  const invalid =
+    destination === operation.path ||
+    (operation.entry.kind === "directory" &&
+      destinationDirectory.startsWith(`${operation.path}/`));
+
+  const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy || invalid) return;
+    setBusy(true);
+    setError(undefined);
+    const nextController = new AbortController();
+    controller.current = nextController;
+    try {
+      const metadata = await api.metadata(
+        shareId,
+        operation.path,
+        nextController.signal,
+      );
+      await api.moveEntry(
+        shareId,
+        operation.path,
+        destination,
+        metadata.etag,
+        csrfToken,
+        nextController.signal,
+      );
+      onChanged(operation);
+    } catch (cause) {
+      if (isUnauthorized(cause)) onSessionExpired();
+      else if (!isAborted(cause)) setError(operationError(cause, "rename"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`Move ${operation.entry.name}`} onClose={onClose} busy={busy}>
+      <form class="operation-form" onSubmit={submit}>
+        <p class="muted">
+          Choose a destination in this shared folder. Existing items are never
+          overwritten.
+        </p>
+        <FolderPicker
+          api={api}
+          share={{ id: shareId, name: "Shared folder", access: "read-write" }}
+          selected={destinationDirectory}
+          onSelect={setDestinationDirectory}
+          onSessionExpired={onSessionExpired}
+        />
+        <p class="move-destination">
+          Destination: <strong>{destination || operation.entry.name}</strong>
+        </p>
+        {invalid && (
+          <p class="field-error">
+            Choose a different folder outside this item.
+          </p>
+        )}
+        {error && (
+          <p class="field-error" role="alert">
+            {error}
+          </p>
+        )}
+        <div class="dialog-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button
+            class="button button-primary"
+            type="submit"
+            disabled={busy || invalid}
+          >
+            {busy ? "Moving…" : "Move here"}
           </button>
         </div>
       </form>
@@ -425,7 +581,7 @@ function EditorDialog({
         nextController.signal,
       );
       setInitialText(text);
-      onChanged();
+      onChanged(operation);
     } catch (cause) {
       if (isUnauthorized(cause)) onSessionExpired();
       else if (cause instanceof ApiError && cause.kind === "conflict")
@@ -817,17 +973,22 @@ function joinPath(parent: string, child: string): string {
   return parent ? `${parent}/${child}` : child;
 }
 
+function parentPath(path: string): string {
+  const separator = path.lastIndexOf("/");
+  return separator < 0 ? "" : path.slice(0, separator);
+}
+
 function operationError(
   cause: unknown,
   operation: EntryOperation["kind"],
 ): string {
   if (cause instanceof ApiError) {
     if (cause.kind === "forbidden")
-      return "Your write access changed. Refresh the page or contact an administrator.";
+      return "Your write access changed. Reload the page or contact an administrator.";
     if (cause.kind === "conflict")
-      return "The item changed or the destination already exists. Refresh and try again.";
+      return "The item changed or the destination already exists. Reload the folder and try again.";
     if (cause.kind === "not-found")
-      return "The item no longer exists. Refresh the folder.";
+      return "The item no longer exists. Reload the folder.";
     if (cause.status === 413)
       return "The content is larger than the server allows.";
     if (cause.status === 415) return "Only valid UTF-8 text can be edited.";

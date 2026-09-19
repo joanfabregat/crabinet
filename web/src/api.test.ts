@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ApiError, createApiClient, downloadUrl, htmlPreviewUrl } from "./api";
+import {
+  ApiError,
+  createApiClient,
+  directoryEventsUrl,
+  downloadUrl,
+  htmlPreviewUrl,
+  imagePreviewUrl,
+  renderedHtmlPreviewUrl,
+} from "./api";
 
 describe("API client", () => {
   it("uses the versioned same-origin contract and encodes share and path values", async () => {
@@ -278,6 +286,29 @@ describe("API client", () => {
     });
   });
 
+  it("accepts only bounded server-validated raster metadata", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "image",
+        source: "",
+        language: null,
+        mimeType: "image/png",
+        width: 640,
+        height: 480,
+        size: 2048,
+        truncated: false,
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).preview("docs", "photo.png"),
+    ).resolves.toMatchObject({
+      kind: "image",
+      mimeType: "image/png",
+      width: 640,
+      height: 480,
+    });
+  });
+
   it.each([
     { kind: "active_html", source: "x", size: 1, truncated: false },
     { kind: "code", source: "x", size: 2, truncated: false },
@@ -321,6 +352,15 @@ describe("API client", () => {
     );
     expect(downloadUrl("team/a", "pages/demo.html")).toBe(
       "/api/v1/shares/team%2Fa/download?path=pages%2Fdemo.html",
+    );
+    expect(renderedHtmlPreviewUrl("team/a", "pages/demo.html")).toBe(
+      "/api/v1/shares/team%2Fa/preview/html/rendered?path=pages%2Fdemo.html",
+    );
+    expect(imagePreviewUrl("team/a", "photo.png")).toBe(
+      "/api/v1/shares/team%2Fa/preview/image?path=photo.png",
+    );
+    expect(directoryEventsUrl("team/a", "pages")).toBe(
+      "/api/v1/shares/team%2Fa/events?path=pages",
     );
     expect(() => downloadUrl("docs", "../secret")).toThrow(ApiError);
   });

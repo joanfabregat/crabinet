@@ -22,7 +22,12 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   await expect(
     page.getByRole("region", { name: "File operations" }),
   ).toHaveCount(0);
-  await expect(page.locator(".entry-actions")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^(Edit|Rename|Move|Delete) / }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^Copy full path for / }).first(),
+  ).toBeVisible();
 
   const cookies = await context.cookies();
   const sessionCookie = cookies.find(
@@ -87,13 +92,18 @@ test("direct routes, share selection, breadcrumbs, and browser history", async (
   ).toBeFocused();
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
-  await page.getByRole("link", { name: "Working files" }).click();
+  await page
+    .getByLabel("Breadcrumb")
+    .getByRole("link", { name: "Working files" })
+    .click();
   await expect(page).toHaveURL(/\/browse\/writable$/);
   await page.goBack();
   await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
-  await page.getByLabel("Shared folder").selectOption("read-only");
+  await page
+    .getByLabel("Shared folder", { exact: true })
+    .selectOption("read-only");
   await expect(page).toHaveURL(/\/browse\/read-only$/);
   await expect(page.getByText("Read only", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "nested" })).toBeVisible();
@@ -110,9 +120,9 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   page,
 }) => {
   const externalRequests: string[] = [];
-  page.on("request", (request) => {
-    if (request.url().startsWith("https://attacker.invalid")) {
-      externalRequests.push(request.url());
+  page.on("response", (response) => {
+    if (response.url().startsWith("https://attacker.invalid")) {
+      externalRequests.push(response.url());
     }
   });
   let dialogs = 0;
@@ -144,21 +154,29 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   await page.getByRole("button", { name: "Close preview of Guide.md" }).click();
 
   await page.getByRole("link", { name: "hostile.html" }).click();
-  const frame = page.getByTitle("Inert HTML source for hostile.html");
+  const frame = page.getByTitle("Sandboxed HTML preview for hostile.html");
   await expect(frame).toHaveAttribute("sandbox", "");
   await expect(frame).toHaveAttribute(
     "src",
-    "/api/v1/shares/read-only/preview/html?path=hostile.html",
+    "/api/v1/shares/read-only/preview/html/rendered?path=hostile.html",
   );
-  await expect(frame.contentFrame().locator("body")).toContainText(
-    "window.__indexHostileHtml",
-  );
-  expect(
-    await frame.contentFrame().locator("script, form, img, svg").count(),
-  ).toBe(0);
+  await expect(frame.contentFrame().locator("body")).toContainText("Sign out");
   expect(await page.evaluate(() => localStorage.getItem("hostile"))).toBeNull();
   expect(externalRequests).toEqual([]);
   expect(dialogs).toBe(0);
+
+  await page.getByRole("tab", { name: "Source" }).click();
+  const sourceFrame = page.getByTitle("Inert HTML source for hostile.html");
+  await expect(sourceFrame).toHaveAttribute(
+    "src",
+    "/api/v1/shares/read-only/preview/html?path=hostile.html",
+  );
+  await expect(sourceFrame.contentFrame().locator("body")).toContainText(
+    "window.__indexHostileHtml",
+  );
+  expect(
+    await sourceFrame.contentFrame().locator("script, form, img, svg").count(),
+  ).toBe(0);
 
   const sourceResponse = await page.request.get(
     "/api/v1/shares/read-only/preview/html?path=hostile.html",
@@ -246,7 +264,7 @@ test("connection failure can recover and an expired session returns to login", a
 
   await signIn(page, "reader");
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
-  await page.route("**/api/v1/shares/*/directory?**", async (route) => {
+  await page.route("**/api/v1/shares/*/preview?**", async (route) => {
     await route.fulfill({
       status: 401,
       contentType: "application/json",
@@ -255,7 +273,7 @@ test("connection failure can recover and an expired session returns to login", a
       }),
     });
   });
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("link", { name: "Guide.md" }).click();
   await expect(
     page.getByText("Your session expired. Sign in again to continue."),
   ).toBeVisible();

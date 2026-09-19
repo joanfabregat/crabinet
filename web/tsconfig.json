@@ -13,7 +13,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vitest/globals", "node"]
+    "types": ["vitest/globals", "vite/client", "node"]
   },
   "include": ["src", "e2e", "playwright.config.ts", "vite.config.ts"]
 }

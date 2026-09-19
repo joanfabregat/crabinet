@@ -70,6 +70,19 @@ describe("browser navigation", () => {
     });
   });
 
+  it("round-trips an explicit full-page preview without changing the folder", () => {
+    const href = previewRouteUrl("docs", "projects", "projects/app.rs", "full");
+    expect(href).toBe(
+      "/browse/docs?path=projects&preview=projects%2Fapp.rs&view=full",
+    );
+    expect(routeFromUrl(new URL(href, "https://index.test"))).toEqual({
+      shareId: "docs",
+      path: "projects",
+      previewPath: "projects/app.rs",
+      previewMode: "full",
+    });
+  });
+
   it("ignores an ambiguous preview path while keeping the directory route", () => {
     const url = new URL("https://index.test/browse/docs?path=projects");
     url.searchParams.set("preview", "../secret");

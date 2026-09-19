@@ -15,7 +15,7 @@ HTTP and routing code must decode a path exactly once before calling `VirtualPat
 Each component is UTF-8 and NFC-normalized, at most 255 bytes, and excludes:
 
 - empty, `.` and `..` components;
-- slash, backslash, NUL, control characters, colon, and trailing dot or space;
+- slash, backslash, NUL, control characters, and trailing dot or space;
 - percent triplets such as `%2f`, which could be decoded inconsistently by another layer;
 - Windows device names, including superscript-digit `COM` and `LPT` variants.
 

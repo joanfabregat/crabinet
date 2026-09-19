@@ -132,7 +132,6 @@ impl EntryName {
             || value.len() > MAX_COMPONENT_BYTES
             || matches!(value.as_str(), "." | "..")
             || value.contains(['/', '\\', '\0'])
-            || value.contains(':')
             || value.chars().any(char::is_control)
             || value.ends_with(['.', ' '])
             || contains_percent_escape(&value)
@@ -518,6 +517,35 @@ impl AuthorizedShare<'_> {
         self.list_bounded(path, usize::MAX)
     }
 
+    /// Creates a non-recursive kernel watch for one already-authorized
+    /// directory without revealing or reconstructing its ambient host path.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn watch_directory(&self, path: &VirtualPath) -> FsResult<rustix::fd::OwnedFd> {
+        use std::os::fd::{AsFd as _, AsRawFd as _};
+
+        use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
+
+        let directory = self.share.open_directory(&path.0)?;
+        let watcher = inotify::init(CreateFlags::CLOEXEC | CreateFlags::NONBLOCK)
+            .map_err(|error| map_io(error.into()))?;
+        let capability_path = format!("/proc/self/fd/{}", directory.as_fd().as_raw_fd());
+        inotify::add_watch(
+            &watcher,
+            capability_path,
+            WatchFlags::ATTRIB
+                | WatchFlags::CLOSE_WRITE
+                | WatchFlags::CREATE
+                | WatchFlags::DELETE
+                | WatchFlags::DELETE_SELF
+                | WatchFlags::MOVE_SELF
+                | WatchFlags::MOVED_FROM
+                | WatchFlags::MOVED_TO
+                | WatchFlags::ONLYDIR,
+        )
+        .map_err(|error| map_io(error.into()))?;
+        Ok(watcher)
+    }
+
     /// Lists at most `max_entries` from a directory. The implementation reads
     /// one additional entry so it can reject an oversized directory without
     /// allocating proportionally to attacker-controlled directory contents.
@@ -528,23 +556,32 @@ impl AuthorizedShare<'_> {
     ) -> FsResult<Vec<DirectoryEntry>> {
         let directory = self.share.open_directory(&path.0)?;
         let mut result = Vec::with_capacity(max_entries.min(256));
-        for entry in directory.entries().map_err(map_io)? {
-            if result.len() == max_entries {
+        for (scanned, entry) in directory.entries().map_err(map_io)?.enumerate() {
+            if scanned == max_entries {
                 return Err(FsError::new(FsErrorCode::TooLarge));
             }
             let entry = entry.map_err(map_io)?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
             if is_internal_name(&name) {
                 continue;
             }
-            let name =
-                EntryName::new(name).map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
+            let Ok(name) = EntryName::new(name) else {
+                continue;
+            };
             let metadata = entry.metadata().map_err(map_io)?;
-            let kind = classify_metadata(&metadata)?;
-            assert_no_external_alias(&metadata, kind)?;
+            let kind = match classify_metadata(&metadata) {
+                Ok(kind) => kind,
+                Err(error) if error.code() == FsErrorCode::UnsupportedEntry => continue,
+                Err(error) => return Err(error),
+            };
+            if let Err(error) = assert_no_external_alias(&metadata, kind) {
+                if error.code() == FsErrorCode::UnsupportedEntry {
+                    continue;
+                }
+                return Err(error);
+            }
             result.push(DirectoryEntry {
                 name,
                 kind,
@@ -1145,7 +1182,6 @@ mod tests {
             "..",
             "one/../two",
             r"one\two",
-            "C:boot.ini",
             "file%2fname",
             "file%2Ename",
             "nul",
@@ -1166,9 +1202,10 @@ mod tests {
     }
 
     #[test]
-    fn path_parser_preserves_normalized_unicode_and_literal_percent() {
-        let path = VirtualPath::parse("日本語/café/100%done.txt").expect("valid Unicode path");
-        assert_eq!(path.to_string(), "日本語/café/100%done.txt");
+    fn path_parser_preserves_linux_names_normalized_unicode_and_literal_percent() {
+        let path =
+            VirtualPath::parse("日本語/café/report: 100%done.txt").expect("valid Unicode path");
+        assert_eq!(path.to_string(), "日本語/café/report: 100%done.txt");
     }
 
     #[test]
@@ -1305,7 +1342,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn nested_symlinks_and_special_files_are_rejected() {
+    fn nested_symlinks_and_special_files_are_rejected_without_poisoning_listing() {
         use std::{os::unix::fs::symlink, os::unix::net::UnixListener};
 
         let (temporary, share, read, _write) = fixture();
@@ -1320,13 +1357,11 @@ mod tests {
             let path = VirtualPath::parse(path).expect("valid virtual path");
             assert!(authorized.read_file(&path, 1024).is_err());
         }
-        assert_eq!(
-            authorized
-                .list(&VirtualPath::root())
-                .expect_err("listing rejects unsupported entries")
-                .code(),
-            FsErrorCode::UnsupportedEntry
-        );
+        let listing = authorized
+            .list(&VirtualPath::root())
+            .expect("unsupported entries are omitted");
+        assert!(listing.iter().all(|entry| entry.name.as_str() != "escape"));
+        assert!(listing.iter().all(|entry| entry.name.as_str() != "socket"));
     }
 
     #[cfg(unix)]
@@ -1421,7 +1456,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn invalid_utf8_names_are_rejected_without_lossy_conversion() {
+    fn invalid_utf8_names_are_omitted_without_lossy_conversion() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
         let (temporary, share, read, _write) = fixture();
@@ -1433,13 +1468,14 @@ mod tests {
         let authorized = share
             .authorize(Some(&read), GlobalPolicy::default())
             .expect("authorized");
-        assert_eq!(
-            authorized
-                .list(&VirtualPath::root())
-                .expect_err("invalid UTF-8 rejected")
-                .code(),
-            FsErrorCode::UnsupportedEntry
-        );
+        let listing = authorized
+            .list(&VirtualPath::root())
+            .expect("invalid UTF-8 entry omitted");
+        let names = listing
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["hello.txt", "nested"]);
     }
 
     #[test]
@@ -1860,7 +1896,7 @@ mod tests {
             if let Ok(name) = EntryName::new(value.clone()) {
                 prop_assert!(!name.as_str().is_empty());
                 prop_assert!(name.as_str().len() <= MAX_COMPONENT_BYTES);
-                prop_assert!(!name.as_str().contains(['/', '\\', '\0', ':']));
+                prop_assert!(!name.as_str().contains(['/', '\\', '\0']));
                 prop_assert!(!contains_percent_escape(name.as_str()));
                 prop_assert!(name.as_str().nfc().eq(name.as_str().chars()));
                 prop_assert_eq!(
