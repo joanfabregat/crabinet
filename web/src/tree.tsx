@@ -320,7 +320,7 @@ function TreeNode(props: TreeNodeProps) {
         </a>
         {level === 0 && (
           <span class="tree-access">
-            {share.access === "read" ? "RO" : "RW"}
+            {share.access === "read" ? "Read only" : "Read & write"}
           </span>
         )}
         <CopyPathButton

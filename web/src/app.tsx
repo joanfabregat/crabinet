@@ -1,6 +1,6 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { Maximize2, Minimize2, X } from "lucide-preact";
+import { Maximize2, Minimize2, Upload, X } from "lucide-preact";
 
 import {
   ApiError,
@@ -321,25 +321,6 @@ function AuthenticatedShell({
         </div>
       )}
       <main class="browser-layout">
-        <section class="browser-toolbar" aria-label="File browser controls">
-          <label for="share-select">Shared folder</label>
-          <select
-            id="share-select"
-            value={selectedShare?.id ?? ""}
-            disabled={session.shares.length === 0}
-            onChange={(event) =>
-              navigation.go({ shareId: event.currentTarget.value, path: "" })
-            }
-          >
-            {session.shares.map((share) => (
-              <option key={share.id} value={share.id}>
-                {share.name} — {accessLabel(share)}
-              </option>
-            ))}
-          </select>
-          {selectedShare && <AccessBadge share={selectedShare} />}
-        </section>
-
         {session.shares.length === 0 ? (
           <EmptyState
             title="No shared folders"
@@ -389,6 +370,8 @@ function DirectoryBrowser({
   const [refreshKey, setRefreshKey] = useState(0);
   const [operation, setOperation] = useState<EntryOperation>();
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
+  const [fileDragActive, setFileDragActive] = useState(false);
+  const fileDragDepth = useRef(0);
   const loadMoreController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previewTriggerRef = useRef<HTMLAnchorElement>();
@@ -396,6 +379,7 @@ function DirectoryBrowser({
   const focusedLocation = useRef<string>();
   const activePreview = useRef(route.previewPath);
   activePreview.current = route.previewPath;
+  const writable = share.access === "read-write";
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
@@ -407,6 +391,56 @@ function DirectoryBrowser({
       setUploadSelection(undefined);
     }
   }, [route.path, share.id]);
+
+  useEffect(() => {
+    const resetFileDrag = () => {
+      fileDragDepth.current = 0;
+      setFileDragActive(false);
+    };
+    const hasFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const dragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      fileDragDepth.current += 1;
+      setFileDragActive(true);
+    };
+    const dragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    };
+    const dragLeave = () => {
+      if (fileDragDepth.current === 0) return;
+      fileDragDepth.current -= 1;
+      if (fileDragDepth.current === 0) setFileDragActive(false);
+    };
+    const drop = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      resetFileDrag();
+      if (writable && files.length > 0) {
+        setUploadSelection({ id: crypto.randomUUID(), files });
+      }
+    };
+
+    document.addEventListener("dragenter", dragEnter);
+    document.addEventListener("dragover", dragOver);
+    document.addEventListener("dragleave", dragLeave);
+    document.addEventListener("drop", drop);
+    document.addEventListener("dragend", resetFileDrag);
+    window.addEventListener("blur", resetFileDrag);
+    return () => {
+      document.removeEventListener("dragenter", dragEnter);
+      document.removeEventListener("dragover", dragOver);
+      document.removeEventListener("dragleave", dragLeave);
+      document.removeEventListener("drop", drop);
+      document.removeEventListener("dragend", resetFileDrag);
+      window.removeEventListener("blur", resetFileDrag);
+      resetFileDrag();
+    };
+  }, [route.path, share.id, writable]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -611,7 +645,7 @@ function DirectoryBrowser({
           />
         </div>
 
-        {share.access === "read-write" && (
+        {writable && (
           <WriteToolbar
             onUpload={(files) =>
               setUploadSelection({ id: crypto.randomUUID(), files })
@@ -650,7 +684,7 @@ function DirectoryBrowser({
               path={route.path}
               navigation={navigation}
               onOpenPreview={openPreview}
-              writable={share.access === "read-write"}
+              writable={writable}
               onOperation={setOperation}
             />
             {error && (
@@ -716,6 +750,32 @@ function DirectoryBrowser({
           onChanged={() => setRefreshKey((value) => value + 1)}
           onSessionExpired={onSessionExpired}
         />
+      )}
+      {fileDragActive && (
+        <div
+          class="upload-drop-overlay"
+          data-testid="upload-drop-overlay"
+          role="status"
+          aria-live="polite"
+        >
+          <div class="upload-drop-overlay-content">
+            <Upload size={42} strokeWidth={1.8} aria-hidden="true" />
+            {writable ? (
+              <>
+                <strong>Drop files to upload</strong>
+                <span>
+                  Upload to {share.name}
+                  {route.path ? ` / ${route.path}` : ""}
+                </span>
+              </>
+            ) : (
+              <>
+                <strong>Upload unavailable</strong>
+                <span>{share.name} is read only</span>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -838,6 +898,7 @@ function PreviewPanel({
   const [state, setState] = useState<PreviewState>({ status: "loading" });
   const [refreshKey, setRefreshKey] = useState(0);
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const filename = path.split("/").at(-1) ?? path;
 
   useEffect(() => {
@@ -873,117 +934,142 @@ function PreviewPanel({
 
   useEffect(() => {
     if (!fullScreen) return;
-    const leaveFullScreen = (event: KeyboardEvent) => {
-      const target = event.target;
-      if (
-        event.key !== "Escape" ||
-        (target instanceof HTMLElement &&
-          (target.isContentEditable ||
-            ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)))
-      ) {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const focusTimer = window.setTimeout(() => titleRef.current?.focus(), 0);
+    const handleModalKeys = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onToggleFullScreen();
         return;
       }
-      onToggleFullScreen();
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = Array.from(
+        panelRef.current.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [href]",
+        ),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    window.addEventListener("keydown", leaveFullScreen);
-    return () => window.removeEventListener("keydown", leaveFullScreen);
+    window.addEventListener("keydown", handleModalKeys);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleModalKeys);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, [fullScreen, onToggleFullScreen]);
 
   return (
-    <aside
-      class={`preview-panel${fullScreen ? " is-fullscreen" : ""}`}
-      aria-labelledby="preview-title"
-    >
-      <header class="preview-header">
-        <div class="preview-heading">
-          <p class="eyebrow">
-            {fullScreen ? "Full screen preview" : "File preview"}
-          </p>
-          <h2 id="preview-title" ref={titleRef} tabIndex={-1}>
-            {filename}
-          </h2>
-          <p class="preview-path" title={path}>
-            {path}
-          </p>
-        </div>
-        <div class="preview-window-actions">
-          <button
-            class="button button-secondary preview-fullscreen-button"
-            type="button"
-            onClick={onToggleFullScreen}
-            aria-label={fullScreen ? "Exit full screen" : "Enter full screen"}
-            title={fullScreen ? "Exit full screen" : "Enter full screen"}
-          >
-            {fullScreen ? (
-              <Minimize2 size={18} aria-hidden="true" />
-            ) : (
-              <Maximize2 size={18} aria-hidden="true" />
+    <>
+      {fullScreen && <div class="preview-modal-backdrop" aria-hidden="true" />}
+      <aside
+        ref={panelRef}
+        class={`preview-panel${fullScreen ? " is-fullscreen" : ""}`}
+        aria-labelledby="preview-title"
+        role={fullScreen ? "dialog" : undefined}
+        aria-modal={fullScreen ? "true" : undefined}
+      >
+        <header class="preview-header">
+          <div class="preview-heading">
+            <p class="eyebrow">
+              {fullScreen ? "Expanded preview" : "File preview"}
+            </p>
+            <h2 id="preview-title" ref={titleRef} tabIndex={-1}>
+              {filename}
+            </h2>
+            <p class="preview-path" title={path}>
+              {path}
+            </p>
+          </div>
+          <div class="preview-window-actions">
+            <button
+              class="button button-secondary preview-fullscreen-button"
+              type="button"
+              onClick={onToggleFullScreen}
+              aria-label={
+                fullScreen ? "Restore side preview" : "Expand preview"
+              }
+              title={fullScreen ? "Restore side preview" : "Expand preview"}
+            >
+              {fullScreen ? (
+                <Minimize2 size={18} aria-hidden="true" />
+              ) : (
+                <Maximize2 size={18} aria-hidden="true" />
+              )}
+              <span>{fullScreen ? "Restore side preview" : "Expand"}</span>
+            </button>
+            <button
+              class="icon-button"
+              type="button"
+              onClick={onClose}
+              aria-label={`Close preview of ${filename}`}
+              title="Close preview"
+            >
+              <X size={20} aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div class="preview-actions" aria-label="File actions">
+          <CopyPathButton
+            value={`${shareId}/${path}`}
+            label={`Copy full path for ${filename}`}
+          />
+          <a class="button button-secondary" href={downloadUrl(shareId, path)}>
+            Download file
+          </a>
+          {state.status === "ready" &&
+            state.document.kind === "html_source" && (
+              <>
+                <a
+                  class="button button-secondary"
+                  href={renderedHtmlPreviewUrl(shareId, path)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open rendered HTML in new tab
+                </a>
+                <a
+                  class="button button-secondary"
+                  href={htmlPreviewUrl(shareId, path)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open HTML source in new tab
+                </a>
+              </>
             )}
-            <span>{fullScreen ? "Exit full screen" : "Full screen"}</span>
-          </button>
-          <button
-            class="icon-button"
-            type="button"
-            onClick={onClose}
-            aria-label={`Close preview of ${filename}`}
-            title="Close preview"
-          >
-            <X size={20} aria-hidden="true" />
-          </button>
         </div>
-      </header>
 
-      <div class="preview-actions" aria-label="File actions">
-        <CopyPathButton
-          value={`${shareId}/${path}`}
-          label={`Copy full path for ${filename}`}
-        />
-        <a class="button button-secondary" href={downloadUrl(shareId, path)}>
-          Download file
-        </a>
-        {state.status === "ready" && state.document.kind === "html_source" && (
-          <>
-            <a
-              class="button button-secondary"
-              href={renderedHtmlPreviewUrl(shareId, path)}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Open rendered HTML in new tab
-            </a>
-            <a
-              class="button button-secondary"
-              href={htmlPreviewUrl(shareId, path)}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Open HTML source in new tab
-            </a>
-          </>
-        )}
-      </div>
-
-      <div class="preview-body">
-        {state.status === "loading" ? (
-          <p class="status-message" role="status" aria-live="polite">
-            Loading preview…
-          </p>
-        ) : state.status === "error" ? (
-          <PreviewErrorState
-            error={state.error}
-            retry={() => setRefreshKey((value) => value + 1)}
-          />
-        ) : (
-          <PreviewContent
-            document={state.document}
-            htmlSourceUrl={htmlPreviewUrl(shareId, path)}
-            htmlRenderedUrl={renderedHtmlPreviewUrl(shareId, path)}
-            imageUrl={imagePreviewUrl(shareId, path)}
-            filename={filename}
-          />
-        )}
-      </div>
-    </aside>
+        <div class="preview-body">
+          {state.status === "loading" ? (
+            <p class="status-message" role="status" aria-live="polite">
+              Loading preview…
+            </p>
+          ) : state.status === "error" ? (
+            <PreviewErrorState
+              error={state.error}
+              retry={() => setRefreshKey((value) => value + 1)}
+            />
+          ) : (
+            <PreviewContent
+              document={state.document}
+              htmlSourceUrl={htmlPreviewUrl(shareId, path)}
+              htmlRenderedUrl={renderedHtmlPreviewUrl(shareId, path)}
+              imageUrl={imagePreviewUrl(shareId, path)}
+              filename={filename}
+            />
+          )}
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -1372,14 +1458,6 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-function AccessBadge({ share }: { share: Share }) {
-  return (
-    <span class={`access-badge access-${share.access}`}>
-      {share.access === "read-write" ? "Read & write" : "Read only"}
-    </span>
-  );
-}
-
 function Notice({
   children,
   tone,
@@ -1416,10 +1494,6 @@ function Button({
       {children}
     </button>
   );
-}
-
-function accessLabel(share: Share): string {
-  return share.access === "read-write" ? "Read & write" : "Read only";
 }
 
 function joinPath(path: string, name: string): string {

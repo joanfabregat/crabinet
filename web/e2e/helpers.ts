@@ -9,7 +9,9 @@ export async function signIn(
   await page.getByLabel("Username").fill(username);
   await page.getByLabel("Password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByLabel("Shared folder", { exact: true })).toBeVisible();
+  await expect(
+    page.getByLabel("Shared folders", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
 }
 
@@ -43,7 +45,11 @@ export interface BrowserFile {
 }
 
 /** Native drop helper reserved for the mutation-flow suite added with the upload UI. */
-export async function dropFiles(target: Locator, files: BrowserFile[]) {
+export async function dropFiles(
+  target: Locator,
+  files: BrowserFile[],
+  beforeDrop?: () => Promise<void>,
+) {
   const dataTransfer = await target.page().evaluateHandle((items) => {
     const transfer = new DataTransfer();
     for (const item of items) {
@@ -56,6 +62,7 @@ export async function dropFiles(target: Locator, files: BrowserFile[]) {
   try {
     await target.dispatchEvent("dragenter", { dataTransfer });
     await target.dispatchEvent("dragover", { dataTransfer });
+    await beforeDrop?.();
     await target.dispatchEvent("drop", { dataTransfer });
   } finally {
     await dataTransfer.dispose();

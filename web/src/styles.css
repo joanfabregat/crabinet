@@ -141,8 +141,7 @@ a {
   margin-top: 1.5rem;
 }
 
-.login-form label,
-.browser-toolbar label {
+.login-form label {
   font-size: 0.875rem;
   font-weight: 720;
 }
@@ -254,36 +253,6 @@ select {
 .browser-layout {
   padding-bottom: 4rem;
   padding-top: 2rem;
-}
-
-.browser-toolbar {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
-}
-
-.browser-toolbar select {
-  max-width: 28rem;
-  min-width: min(20rem, 100%);
-}
-
-.access-badge {
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 800;
-  padding: 0.35rem 0.6rem;
-}
-
-.access-read {
-  background: #e8ecf5;
-  color: #35486d;
-}
-
-.access-read-write {
-  background: #e3f2e9;
-  color: #1e6041;
 }
 
 .directory-panel {
@@ -472,16 +441,23 @@ html.preview-fullscreen-open body {
 }
 
 .preview-panel.is-fullscreen {
-  border: 0;
-  border-radius: 0;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
   display: flex;
   flex-direction: column;
-  height: 100dvh;
-  inset: 0;
+  inset-block: clamp(0.75rem, 3vh, 2rem);
+  inset-inline: clamp(1rem, 8vw, 10rem);
   max-height: none;
   position: fixed;
-  width: 100vw;
   z-index: 1000;
+}
+
+.preview-modal-backdrop {
+  backdrop-filter: blur(6px);
+  background: rgb(10 20 15 / 52%);
+  inset: 0;
+  position: fixed;
+  z-index: 999;
 }
 
 .preview-panel.is-fullscreen .preview-header,
@@ -770,7 +746,7 @@ html.preview-fullscreen-open body {
   border-top: 1px solid var(--line);
   display: flex;
   gap: 1rem;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 0.85rem 1.25rem;
 }
 
@@ -783,24 +759,6 @@ html.preview-fullscreen-open body {
   gap: 0.55rem;
 }
 
-.upload-dropzone {
-  align-items: center;
-  border: 2px dashed #aeb8b0;
-  border-radius: 0.65rem;
-  color: var(--muted);
-  display: flex;
-  font-size: 0.88rem;
-  gap: 0.35rem;
-  min-height: 2.75rem;
-  padding: 0.4rem 0.7rem;
-}
-
-.upload-dropzone.is-dragging {
-  background: #e3f2e9;
-  border-color: var(--accent);
-}
-
-.upload-picker,
 .entry-action,
 .modal-close {
   background: transparent;
@@ -818,6 +776,43 @@ html.preview-fullscreen-open body {
   align-items: center;
   display: inline-flex;
   gap: 0.3rem;
+}
+
+.upload-drop-overlay {
+  align-items: center;
+  backdrop-filter: blur(4px);
+  background: rgb(12 67 46 / 80%);
+  color: white;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 1rem;
+  pointer-events: none;
+  position: fixed;
+  z-index: 1100;
+}
+
+.upload-drop-overlay-content {
+  align-items: center;
+  border: 2px dashed rgb(255 255 255 / 80%);
+  border-radius: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  justify-content: center;
+  min-height: min(22rem, calc(100dvh - 2rem));
+  padding: 2rem;
+  text-align: center;
+  width: min(42rem, 100%);
+}
+
+.upload-drop-overlay-content strong {
+  font-size: clamp(1.35rem, 4vw, 2rem);
+}
+
+.upload-drop-overlay-content span {
+  color: rgb(255 255 255 / 82%);
+  overflow-wrap: anywhere;
 }
 
 .entry-list {
@@ -1117,21 +1112,6 @@ html.preview-fullscreen-open body {
     padding-top: max(1rem, env(safe-area-inset-top));
   }
 
-  .browser-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .browser-toolbar select {
-    max-width: none;
-    min-width: 0;
-    width: 100%;
-  }
-
-  .access-badge {
-    align-self: flex-start;
-  }
-
   .directory-heading {
     align-items: flex-start;
     gap: 1rem;
@@ -1185,6 +1165,13 @@ html.preview-fullscreen-open body {
 
   .preview-panel.is-fullscreen .preview-actions > * {
     flex: 0 0 auto;
+  }
+
+  .preview-panel.is-fullscreen {
+    inset: max(0.5rem, env(safe-area-inset-top))
+      max(0.5rem, env(safe-area-inset-right))
+      max(0.5rem, env(safe-area-inset-bottom))
+      max(0.5rem, env(safe-area-inset-left));
   }
 
   .source-code,

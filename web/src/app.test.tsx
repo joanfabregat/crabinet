@@ -61,6 +61,15 @@ class MemoryNavigation implements BrowserNavigation {
   }
 }
 
+function dispatchDrag(
+  type: "dragenter" | "drop",
+  dataTransfer: { types: string[]; files: File[] },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+  fireEvent(document, event);
+}
+
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     session: overrides.session ?? vi.fn(async () => session),
@@ -298,9 +307,10 @@ describe("directory browser", () => {
     expect(
       screen.getByRole("navigation", { name: "Breadcrumb" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Shared folder")).toBeInstanceOf(
-      HTMLSelectElement,
-    );
+    expect(
+      screen.getByRole("complementary", { name: "Shared folders" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Shared folder")).not.toBeInTheDocument();
     for (const button of screen.getAllByRole("button")) {
       expect(button).toHaveAccessibleName();
     }
@@ -328,9 +338,7 @@ describe("directory browser", () => {
     expect(screen.getByText("<img src=x onerror=alert(1)>.txt")).toBeVisible();
     expect(document.querySelector("img")).toBeNull();
     expect(screen.getByText("Read only")).toBeVisible();
-    expect(
-      screen.getByRole("option", { name: "Working files — Read & write" }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Read & write")).toBeVisible();
 
     fireEvent.click(screen.getByRole("link", { name: "Grüße 東京 🚀" }));
     expect(navigation.visits.at(-1)?.route).toEqual({
@@ -338,9 +346,11 @@ describe("directory browser", () => {
       path: "Grüße 東京 🚀",
     });
 
-    fireEvent.change(screen.getByLabelText("Shared folder"), {
-      target: { value: "work" },
-    });
+    fireEvent.click(
+      within(
+        screen.getByRole("complementary", { name: "Shared folders" }),
+      ).getByRole("link", { name: "Working files" }),
+    );
     expect(navigation.visits.at(-1)?.route).toEqual({
       shareId: "work",
       path: "",
@@ -449,6 +459,27 @@ describe("directory browser", () => {
     expect(
       await screen.findByRole("heading", { name: "This folder is empty" }),
     ).toBeVisible();
+  });
+
+  it("blocks native file drops without attempting an upload in a read-only share", async () => {
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>();
+    render(
+      <App api={fakeApi({ uploadFile })} navigation={new MemoryNavigation()} />,
+    );
+    await screen.findByRole("heading", { name: "This folder is empty" });
+    const files = [new File(["blocked"], "blocked.txt")];
+
+    dispatchDrag("dragenter", { types: ["Files"], files });
+    expect(await screen.findByTestId("upload-drop-overlay")).toHaveTextContent(
+      "Upload unavailable",
+    );
+    expect(screen.getByTestId("upload-drop-overlay")).toHaveTextContent(
+      "Reference is read only",
+    );
+    dispatchDrag("drop", { types: ["Files"], files });
+
+    expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
+    expect(uploadFile).not.toHaveBeenCalled();
   });
 
   it("recovers from a directory that disappeared while browsing", async () => {
@@ -848,15 +879,27 @@ describe("writable file operations", () => {
         navigation={writableNavigation()}
       />,
     );
-    const dropzone = await screen.findByText("Drop files here or");
-    fireEvent.drop(dropzone.closest(".upload-dropzone")!, {
-      dataTransfer: {
-        files: [
-          new File(["one"], "new.txt", { type: "text/plain" }),
-          new File(["two"], "exists.txt", { type: "text/plain" }),
-        ],
-      },
+    await screen.findByRole("button", { name: "Upload files" });
+    await screen.findByRole("link", { name: "notes.txt" });
+    dispatchDrag("dragenter", {
+      types: ["application/x-index-entry"],
+      files: [],
     });
+    expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
+
+    const files = [
+      new File(["one"], "new.txt", { type: "text/plain" }),
+      new File(["two"], "exists.txt", { type: "text/plain" }),
+    ];
+    dispatchDrag("dragenter", { types: ["Files"], files });
+    expect(await screen.findByTestId("upload-drop-overlay")).toHaveTextContent(
+      "Drop files to upload",
+    );
+    expect(screen.getByTestId("upload-drop-overlay")).toHaveTextContent(
+      "Working files / projects",
+    );
+    dispatchDrag("drop", { types: ["Files"], files });
+    expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
 
     expect(await screen.findByText("Succeeded")).toBeVisible();
     expect(screen.getByText("Needs attention")).toBeVisible();

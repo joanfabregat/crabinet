@@ -159,7 +159,7 @@ test.describe("writable share operations", () => {
     const competingPage = await context.newPage();
     await competingPage.goto("/browse/writable");
     await expect(
-      competingPage.getByLabel("Shared folder", { exact: true }),
+      competingPage.getByLabel("Shared folders", { exact: true }),
     ).toBeVisible();
 
     await entryAction(page, "README.md", "Edit").click();
@@ -230,23 +230,33 @@ test.describe("writable share operations", () => {
     await openSignedIn(page, "/browse/writable", "writer");
     await createEntry(page, "New file", "File name", "replace-me.txt");
 
-    await dropFiles(page.locator(".upload-dropzone"), [
-      {
-        name: "dragged.txt",
-        mimeType: "text/plain",
-        contents: "native drag and drop\n",
+    await dropFiles(
+      page.locator("body"),
+      [
+        {
+          name: "dragged.txt",
+          mimeType: "text/plain",
+          contents: "native drag and drop\n",
+        },
+        {
+          name: "replace-me.txt",
+          mimeType: "text/plain",
+          contents: "replacement requires confirmation\n",
+        },
+        {
+          name: "too-large.bin",
+          mimeType: "application/octet-stream",
+          contents: "x".repeat(1024 * 1024 + 1),
+        },
+      ],
+      async () => {
+        const overlay = page.getByTestId("upload-drop-overlay");
+        await expect(overlay).toBeVisible();
+        await expect(overlay).toContainText("Drop files to upload");
+        await expect(overlay).toContainText("Working files");
       },
-      {
-        name: "replace-me.txt",
-        mimeType: "text/plain",
-        contents: "replacement requires confirmation\n",
-      },
-      {
-        name: "too-large.bin",
-        mimeType: "application/octet-stream",
-        contents: "x".repeat(1024 * 1024 + 1),
-      },
-    ]);
+    );
+    await expect(page.getByTestId("upload-drop-overlay")).toHaveCount(0);
 
     const uploads = page.getByRole("dialog", { name: "Uploads" });
     await expect(uploadJob(uploads, "dragged.txt")).toContainText("Succeeded");
