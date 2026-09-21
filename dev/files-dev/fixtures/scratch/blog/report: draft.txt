@@ -1,1 +1,0 @@
-Colon-containing Linux filenames remain browseable and editable.

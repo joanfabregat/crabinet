@@ -9,7 +9,6 @@ Thank you for improving Index. Security-sensitive changes need evidence: a clear
 - `tests/`: Rust CLI/config integration fixtures.
 - `docs/`: security rationale, current first-party API behavior, and operator details.
 - `.github/workflows/`: CI, weekly security scans, and tag-driven release publication.
-- `dev/files-dev/`: application-owned scripts, service definitions, and synthetic fixtures for the routed HMR development preview.
 
 ## Toolchains and isolation
 
@@ -48,8 +47,6 @@ Rust commands use the constrained wrapper from the repository root:
 ~/.claude/local/scripts/run-rust clippy --all-targets --all-features -- -D warnings
 ~/.claude/local/scripts/run-rust test --all-targets --all-features
 ```
-
-For browser-accessible frontend HMR and automatic Rust rebuilds on the approved development environment, follow [the routed preview runbook](dev/files-dev/README.md). Runtime configuration, credentials, session state, and build output stay outside the repository.
 
 CI rebuilds the frontend before compiling Rust. If you build locally, do the same so `rust-embed` sees current assets. Never commit `node_modules`, `target`, generated frontend bundles, session databases, secrets, test credentials, or share fixtures containing private data.
 
