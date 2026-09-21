@@ -217,8 +217,14 @@ describe("secure file previews", () => {
       within(panel).getByRole("link", { name: "Open HTML source in new tab" }),
     ).toHaveAttribute("rel", "noopener noreferrer");
     expect(
-      within(panel).getByRole("link", { name: "Download file" }),
+      within(panel).getByRole("link", { name: "Download demo.html" }),
     ).toHaveAttribute("href", "/api/v1/shares/docs/download?path=demo.html");
+    expect(
+      within(panel).getByRole("link", { name: "Download demo.html" }),
+    ).toHaveAttribute("data-tooltip", "Download demo.html");
+    expect(
+      within(panel).getByRole("link", { name: "Download demo.html" }),
+    ).not.toHaveAttribute("title");
   });
 
   it("preserves deep links and restores focus to the opening file on close", async () => {
@@ -307,7 +313,7 @@ describe("secure file previews", () => {
     expect(screen.getByText("Expanded preview")).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Restore side preview" }),
-    ).toHaveTextContent("Restore side preview");
+    ).toHaveAttribute("data-tooltip", "Restore side preview");
     expect(document.querySelector(".preview-modal-backdrop")).toBeVisible();
     expect(document.documentElement).toHaveClass("preview-fullscreen-open");
     const details = screen.getByLabelText("File details");
@@ -443,7 +449,9 @@ describe("secure file previews", () => {
     expect(
       screen.queryByText("sensitive backend detail"),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Download file" })).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "Download code.rs" }),
+    ).toBeVisible();
   });
 
   it("announces empty and truncated previews without hiding the download path", async () => {

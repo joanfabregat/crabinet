@@ -30,11 +30,15 @@ describe("CopyPathButton", () => {
       />,
     );
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Copy full path for Café notes.md",
-      }),
+    const button = screen.getByRole("button", {
+      name: "Copy full path for Café notes.md",
+    });
+    expect(button).toHaveAttribute(
+      "data-tooltip",
+      "Copy full path for Café notes.md",
     );
+    expect(button).not.toHaveAttribute("title");
+    fireEvent.click(button);
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith("scratch/blog/Café notes.md"),
@@ -42,6 +46,7 @@ describe("CopyPathButton", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Copied scratch/blog/Café notes.md",
     );
+    expect(button).toHaveAttribute("data-tooltip", "Copied");
   });
 
   it("shows a selected read-only fallback when clipboard access fails", async () => {

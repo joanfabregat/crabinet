@@ -622,9 +622,9 @@ describe("writable file operations", () => {
       await screen.findByRole("heading", { name: "notes.txt" }),
     ).toBeVisible();
 
-    const noteActions = await screen.findByLabelText("Actions for notes.txt");
+    const preview = screen.getByRole("complementary", { name: "notes.txt" });
     fireEvent.click(
-      within(noteActions).getByRole("button", { name: "Rename notes.txt" }),
+      within(preview).getByRole("button", { name: "Rename notes.txt" }),
     );
     fireEvent.input(screen.getByLabelText("New name"), {
       target: { value: "renamed.md" },
@@ -657,6 +657,12 @@ describe("writable file operations", () => {
   });
 
   it("moves through the touch-friendly folder picker", async () => {
+    const navigation = writableNavigation();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/notes.txt",
+    });
     const moveEntry = vi.fn<ApiClient["moveEntry"]>(
       async (shareId, _source, destination) => ({
         shareId,
@@ -674,13 +680,15 @@ describe("writable file operations", () => {
           })),
           moveEntry,
         })}
-        navigation={writableNavigation()}
+        navigation={navigation}
       />,
     );
 
-    const actions = await screen.findByLabelText("Actions for notes.txt");
+    const preview = await screen.findByRole("complementary", {
+      name: "notes.txt",
+    });
     fireEvent.click(
-      within(actions).getByRole("button", { name: "Move notes.txt" }),
+      within(preview).getByRole("button", { name: "Move notes.txt" }),
     );
     const dialog = screen.getByRole("dialog", { name: "Move notes.txt" });
     fireEvent.click(
@@ -697,6 +705,19 @@ describe("writable file operations", () => {
         expect.any(AbortSignal),
       ),
     );
+    await waitFor(() =>
+      expect(navigation.visits.at(-1)).toEqual({
+        route: {
+          shareId: "work",
+          path: "projects",
+          previewPath: "notes.txt",
+        },
+        replace: true,
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "notes.txt" }),
+    ).toBeVisible();
   });
 
   it("requires an exact destructive confirmation and reports non-empty folders honestly", async () => {
@@ -765,9 +786,9 @@ describe("writable file operations", () => {
     expect(
       await screen.findByRole("heading", { name: "notes.txt" }),
     ).toBeVisible();
-    const actions = await screen.findByLabelText("Actions for notes.txt");
+    const preview = screen.getByRole("complementary", { name: "notes.txt" });
     fireEvent.click(
-      within(actions).getByRole("button", { name: "Delete notes.txt" }),
+      within(preview).getByRole("button", { name: "Delete notes.txt" }),
     );
 
     const dialog = screen.getByRole("dialog", {
@@ -866,10 +887,16 @@ describe("writable file operations", () => {
       within(rowActions).queryByRole("button", { name: "Edit notes.txt" }),
     ).not.toBeInTheDocument();
     expect(
-      within(rowActions).queryByRole("button", {
+      within(rowActions).getByRole("button", {
         name: "Copy full path for notes.txt",
       }),
-    ).not.toBeInTheDocument();
+    ).toHaveAttribute("data-tooltip", "Copy full path for notes.txt");
+    expect(
+      within(await screen.findByLabelText("Actions for empty")).getByRole(
+        "button",
+        { name: "Copy full path for empty" },
+      ),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole("link", { name: "notes.txt" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit notes.txt" }),
