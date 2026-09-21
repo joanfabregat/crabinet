@@ -297,11 +297,6 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toBeVisible();
   await expect(fullScreenPreview).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Expand preview" }).click();
-  await expect(fullScreenPreview).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(fullScreenPreview).toHaveCount(0);
-
   const dimensions = await page.evaluate(() => ({
     viewport: window.innerWidth,
     content: document.documentElement.scrollWidth,

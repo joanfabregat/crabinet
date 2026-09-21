@@ -1570,9 +1570,8 @@ mod tests {
         let expected = authorized.metadata(&source).expect("metadata");
         let mut timestamp_only_change = expected;
         timestamp_only_change.accessed = Some(SystemTime::UNIX_EPOCH);
-        timestamp_only_change.created = Some(
-            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
-        );
+        timestamp_only_change.created =
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
         assert!(timestamp_only_change.matches_validator(&expected));
         assert_eq!(
             authorized
