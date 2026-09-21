@@ -8,6 +8,7 @@ import {
   type DirectoryEntry,
   type EntryMetadata,
 } from "./api";
+import { CopyPathButton } from "./copy-path-button";
 import { isValidPathComponent } from "./virtual-path";
 import { FolderPicker } from "./tree";
 
@@ -63,44 +64,56 @@ export function WriteToolbar({
 export function EntryActionButtons({
   entry,
   path,
+  copyPath,
   writable,
   onOperation,
 }: {
   entry: DirectoryEntry;
   path: string;
+  copyPath: string;
   writable: boolean;
   onOperation: (operation: EntryOperation) => void;
 }) {
   return (
-    <div class="entry-actions" aria-label={`Actions for ${entry.name}`}>
+    <div
+      class="entry-actions"
+      role="group"
+      aria-label={`Actions for ${entry.name}`}
+    >
       {writable && (
         <>
           <button
-            class="entry-action"
+            class="entry-action tooltip-action"
             type="button"
             aria-label={`Rename ${entry.name}`}
-            title="Rename"
+            data-tooltip="Rename"
             onClick={() => onOperation({ kind: "rename", entry, path })}
           >
             <Pencil size={18} aria-hidden="true" />
           </button>
           <button
-            class="entry-action"
+            class="entry-action tooltip-action"
             type="button"
             aria-label={`Move ${entry.name}`}
-            title="Move to…"
+            data-tooltip="Move to…"
             onClick={() => onOperation({ kind: "move", entry, path })}
           >
             <FolderInput size={18} aria-hidden="true" />
           </button>
         </>
       )}
+      <CopyPathButton
+        value={copyPath}
+        label={`Copy full path for ${entry.name}`}
+        className="entry-action"
+        size={18}
+      />
       {writable && (
         <button
-          class="entry-action entry-action-danger"
+          class="entry-action entry-action-danger tooltip-action"
           type="button"
           aria-label={`Delete ${entry.name}`}
-          title="Delete"
+          data-tooltip="Delete"
           onClick={() => onOperation({ kind: "delete", entry, path })}
         >
           <Trash2 size={18} aria-hidden="true" />
@@ -387,7 +400,7 @@ function MoveDialog({
         csrfToken,
         nextController.signal,
       );
-      onChanged(operation);
+      onChanged(operation, destination);
     } catch (cause) {
       if (isUnauthorized(cause)) onSessionExpired();
       else if (!isAborted(cause)) setError(operationError(cause, "rename"));

@@ -1,6 +1,18 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { FilePenLine, Maximize2, Minimize2, Upload, X } from "lucide-preact";
+import {
+  Code2,
+  Download,
+  ExternalLink,
+  FilePenLine,
+  FolderInput,
+  Maximize2,
+  Minimize2,
+  Pencil,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-preact";
 
 import {
   ApiError,
@@ -580,7 +592,8 @@ function DirectoryBrowser({
       navigation.go({ shareId: share.id, path: route.path }, { replace: true });
       requestAnimationFrame(() => headingRef.current?.focus());
     } else if (
-      completedOperation.kind === "rename" &&
+      (completedOperation.kind === "rename" ||
+        completedOperation.kind === "move") &&
       destinationPath &&
       activePreview.current === completedOperation.path
     ) {
@@ -597,7 +610,7 @@ function DirectoryBrowser({
     setRefreshKey((value) => value + 1);
   };
 
-  const editPreview = () => {
+  const operateOnPreview = (kind: "edit" | "rename" | "move" | "delete") => {
     const previewPath = route.previewPath;
     if (!previewPath) return;
     const name = previewPath.split("/").at(-1) ?? previewPath;
@@ -605,7 +618,7 @@ function DirectoryBrowser({
       (entry) => joinPath(route.path, entry.name) === previewPath,
     );
     setOperation({
-      kind: "edit",
+      kind,
       entry: listedEntry ?? { name, kind: "file" },
       path: previewPath,
     });
@@ -747,7 +760,7 @@ function DirectoryBrowser({
           shareId={share.id}
           writable={writable}
           fullScreen={route.previewMode === "full"}
-          onEdit={editPreview}
+          onOperation={operateOnPreview}
           onClose={closePreview}
           onToggleFullScreen={() =>
             navigation.go({
@@ -891,14 +904,13 @@ function EntryList({
               </span>
             </div>
             <span class="entry-meta">{formatSize(entry.size)}</span>
-            {writable && (
-              <EntryActionButtons
-                entry={entry}
-                path={joinPath(path, entry.name)}
-                writable={writable}
-                onOperation={onOperation}
-              />
-            )}
+            <EntryActionButtons
+              entry={entry}
+              path={joinPath(path, entry.name)}
+              copyPath={`${shareId}/${joinPath(path, entry.name)}`}
+              writable={writable}
+              onOperation={onOperation}
+            />
           </div>
         );
       })}
@@ -912,7 +924,7 @@ interface PreviewPanelProps {
   shareId: string;
   writable: boolean;
   fullScreen: boolean;
-  onEdit: () => void;
+  onOperation: (kind: "edit" | "rename" | "move" | "delete") => void;
   onClose: () => void;
   onToggleFullScreen: () => void;
   onSessionExpired: () => void;
@@ -934,7 +946,7 @@ function PreviewPanel({
   shareId,
   writable,
   fullScreen,
-  onEdit,
+  onOperation,
   onClose,
   onToggleFullScreen,
   onSessionExpired,
@@ -1062,72 +1074,89 @@ function PreviewPanel({
             </p>
           </div>
           <div class="preview-window-actions">
-            <button
-              class="button button-secondary preview-fullscreen-button"
-              type="button"
+            <TooltipButton
+              className="preview-fullscreen-button tooltip-below"
               onClick={onToggleFullScreen}
-              aria-label={
-                fullScreen ? "Restore side preview" : "Expand preview"
-              }
-              title={fullScreen ? "Restore side preview" : "Expand preview"}
+              label={fullScreen ? "Restore side preview" : "Expand preview"}
             >
               {fullScreen ? (
                 <Minimize2 size={18} aria-hidden="true" />
               ) : (
                 <Maximize2 size={18} aria-hidden="true" />
               )}
-              <span>{fullScreen ? "Restore side preview" : "Expand"}</span>
-            </button>
-            <button
-              class="icon-button"
-              type="button"
+            </TooltipButton>
+            <TooltipButton
+              className="tooltip-below tooltip-align-end"
               onClick={onClose}
-              aria-label={`Close preview of ${filename}`}
-              title="Close preview"
+              label={`Close preview of ${filename}`}
             >
               <X size={20} aria-hidden="true" />
-            </button>
+            </TooltipButton>
           </div>
         </header>
 
-        <div class="preview-actions" aria-label="File actions">
+        <div class="preview-actions" role="group" aria-label="File actions">
           <CopyPathButton
             value={`${shareId}/${path}`}
             label={`Copy full path for ${filename}`}
+            className="icon-button tooltip-align-start"
           />
           {writable && (
-            <button
-              class="icon-button"
-              type="button"
-              onClick={onEdit}
-              aria-label={`Edit ${filename}`}
-              title="Edit file"
+            <TooltipButton
+              onClick={() => onOperation("edit")}
+              label={`Edit ${filename}`}
             >
               <FilePenLine size={19} aria-hidden="true" />
-            </button>
+            </TooltipButton>
           )}
-          <a class="button button-secondary" href={downloadUrl(shareId, path)}>
-            Download file
-          </a>
+          {writable && (
+            <>
+              <TooltipButton
+                onClick={() => onOperation("rename")}
+                label={`Rename ${filename}`}
+              >
+                <Pencil size={19} aria-hidden="true" />
+              </TooltipButton>
+              <TooltipButton
+                onClick={() => onOperation("move")}
+                label={`Move ${filename}`}
+              >
+                <FolderInput size={19} aria-hidden="true" />
+              </TooltipButton>
+              <TooltipButton
+                className="icon-button-danger"
+                onClick={() => onOperation("delete")}
+                label={`Delete ${filename}`}
+              >
+                <Trash2 size={19} aria-hidden="true" />
+              </TooltipButton>
+            </>
+          )}
+          <TooltipLink
+            href={downloadUrl(shareId, path)}
+            label={`Download ${filename}`}
+          >
+            <Download size={19} aria-hidden="true" />
+          </TooltipLink>
           {state.status === "ready" &&
             state.document.kind === "html_source" && (
               <>
-                <a
-                  class="button button-secondary"
+                <TooltipLink
                   href={renderedHtmlPreviewUrl(shareId, path)}
                   target="_blank"
                   rel="noopener noreferrer"
+                  label="Open rendered HTML in new tab"
                 >
-                  Open rendered HTML in new tab
-                </a>
-                <a
-                  class="button button-secondary"
+                  <ExternalLink size={19} aria-hidden="true" />
+                </TooltipLink>
+                <TooltipLink
                   href={htmlPreviewUrl(shareId, path)}
                   target="_blank"
                   rel="noopener noreferrer"
+                  label="Open HTML source in new tab"
                 >
-                  Open HTML source in new tab
-                </a>
+                  <Code2 size={19} aria-hidden="true" />
+                </TooltipLink>
               </>
             )}
         </div>
@@ -1604,6 +1633,49 @@ function Button({
     >
       {children}
     </button>
+  );
+}
+
+function TooltipButton({
+  label,
+  className,
+  children,
+  ...props
+}: Omit<JSX.ButtonHTMLAttributes<HTMLButtonElement>, "aria-label"> & {
+  label: string;
+  className?: string;
+}) {
+  return (
+    <button
+      {...props}
+      class={`icon-button tooltip-action${className ? ` ${className}` : ""}`}
+      type={props.type ?? "button"}
+      aria-label={label}
+      data-tooltip={label}
+    >
+      {children}
+    </button>
+  );
+}
+
+function TooltipLink({
+  label,
+  className,
+  children,
+  ...props
+}: Omit<JSX.AnchorHTMLAttributes<HTMLAnchorElement>, "aria-label"> & {
+  label: string;
+  className?: string;
+}) {
+  return (
+    <a
+      {...props}
+      class={`icon-button tooltip-action${className ? ` ${className}` : ""}`}
+      aria-label={label}
+      data-tooltip={label}
+    >
+      {children}
+    </a>
   );
 }
 

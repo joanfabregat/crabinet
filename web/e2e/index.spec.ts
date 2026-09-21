@@ -266,7 +266,7 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   await expect(page.getByText("Expanded preview")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Restore side preview" }),
-  ).toContainText("Restore side preview");
+  ).toHaveAttribute("data-tooltip", "Restore side preview");
   const fullScreenBox = await fullScreenPreview.boundingBox();
   const viewport = page.viewportSize();
   expect(fullScreenBox).not.toBeNull();

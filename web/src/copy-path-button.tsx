@@ -38,10 +38,10 @@ export function CopyPathButton({
   return (
     <>
       <button
-        class={className}
+        class={`${className} tooltip-action`}
         type="button"
         aria-label={label}
-        title={copied ? "Copied" : label}
+        data-tooltip={copied ? "Copied" : label}
         onClick={() => void copy()}
       >
         {copied ? (
