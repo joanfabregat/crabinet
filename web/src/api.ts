@@ -46,6 +46,8 @@ export interface EntryMetadata {
   name: string;
   kind: "directory" | "file";
   size?: number;
+  accessedAtMs?: number;
+  createdAtMs?: number;
   etag: string;
 }
 
@@ -742,11 +744,20 @@ function parseMetadata(
     (value.size !== undefined &&
       (typeof value.size !== "number" ||
         !Number.isSafeInteger(value.size) ||
-        value.size < 0))
+        value.size < 0)) ||
+    !isOptionalTimestamp(value.accessedAtMs) ||
+    !isOptionalTimestamp(value.createdAtMs)
   ) {
     throw invalidResponse();
   }
   return value as unknown as EntryMetadata;
+}
+
+function isOptionalTimestamp(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+  );
 }
 
 function parseTextDocument(

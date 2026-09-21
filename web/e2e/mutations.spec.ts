@@ -24,7 +24,8 @@ test.describe("writable share operations", () => {
       page.getByRole("link", { name: "e2e-note.txt" }),
     ).toBeVisible();
 
-    await entryAction(page, "e2e-note.txt", "Edit").click();
+    await page.getByRole("link", { name: "e2e-note.txt" }).click();
+    await page.getByRole("button", { name: "Edit e2e-note.txt" }).click();
     const editor = page.getByLabel("UTF-8 text content");
     await expect(editor).toBeFocused();
     await editor.fill("Production-backed browser edit\n");
@@ -50,21 +51,27 @@ test.describe("writable share operations", () => {
       page.getByRole("link", { name: "e2e-note.txt" }),
     ).toBeVisible();
 
+    await page.getByRole("link", { name: "e2e-note.txt" }).click();
     await entryAction(page, "e2e-note.txt", "Rename").click();
     const renameDialog = page.getByRole("dialog", {
       name: "Rename e2e-note.txt",
     });
-    await renameDialog.getByLabel("New name").fill("note-renamed.txt");
+    await renameDialog.getByLabel("New name").fill("note-renamed.md");
     await renameDialog.getByRole("button", { name: "Confirm" }).click();
+    await expect(
+      page.getByRole("heading", { name: "note-renamed.md" }),
+    ).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Readable" })).toBeVisible();
+    await expect(page).toHaveURL(/preview=e2e-folder%2Fnote-renamed\.md/);
 
     const originalDestination = await readText(
       page,
       "writable",
       "Projects/example.toml",
     );
-    await entryAction(page, "note-renamed.txt", "Rename").click();
+    await entryAction(page, "note-renamed.md", "Rename").click();
     const targetNameDialog = page.getByRole("dialog", {
-      name: "Rename note-renamed.txt",
+      name: "Rename note-renamed.md",
     });
     await targetNameDialog.getByLabel("New name").fill("example.toml");
     await targetNameDialog.getByRole("button", { name: "Confirm" }).click();
@@ -162,9 +169,11 @@ test.describe("writable share operations", () => {
       competingPage.getByLabel("Shared folders", { exact: true }),
     ).toBeVisible();
 
-    await entryAction(page, "README.md", "Edit").click();
+    await page.getByRole("link", { name: "README.md" }).click();
+    await page.getByRole("button", { name: "Edit README.md" }).click();
     await expect(page.getByLabel("UTF-8 text content")).toBeFocused();
-    await entryAction(competingPage, "README.md", "Edit").click();
+    await competingPage.getByRole("link", { name: "README.md" }).click();
+    await competingPage.getByRole("button", { name: "Edit README.md" }).click();
     await expect(competingPage.getByLabel("UTF-8 text content")).toBeFocused();
 
     const winningText = "Saved by the first browser\n";

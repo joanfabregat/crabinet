@@ -18,7 +18,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   await expect(page.getByRole("alert")).toContainText("Sign-in failed");
 
   await signIn(page, "reader");
-  await expect(page.getByText("Read only", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Read only")).toHaveText("R");
   await expect(
     page.getByRole("region", { name: "File operations" }),
   ).toHaveCount(0);
@@ -106,7 +106,7 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
     .getByRole("link", { name: "Reference library" })
     .click();
   await expect(page).toHaveURL(/\/browse\/read-only$/);
-  await expect(page.getByText("Read only", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Read only")).toHaveText("R");
   await expect(page.getByRole("link", { name: "nested" })).toBeVisible();
 
   await page.getByRole("link", { name: "nested" }).click();
@@ -289,7 +289,9 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
       ["critical", "serious"].includes(impact ?? ""),
     ),
   ).toEqual([]);
-  await page.keyboard.press("Escape");
+  await page
+    .locator(".preview-modal-backdrop")
+    .click({ position: { x: 4, y: 4 } });
   await expect(
     page.getByRole("button", { name: "Expand preview" }),
   ).toBeVisible();

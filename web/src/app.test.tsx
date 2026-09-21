@@ -242,7 +242,7 @@ describe("authentication", () => {
       screen.getByRole("button", { name: "Sign in" }).closest("form")!,
     );
 
-    expect(await screen.findByText("Read only")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Read only")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     await screen.findByRole("heading", { name: "Sign in to Index" });
     expect(logout).toHaveBeenCalledWith("csrf-in-memory");
@@ -294,7 +294,7 @@ describe("authentication", () => {
       screen.queryByRole("heading", { name: "Sign in to Index" }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("Read only")).toBeVisible();
+    expect(await screen.findByLabelText("Read only")).toBeVisible();
   });
 });
 
@@ -337,8 +337,8 @@ describe("directory browser", () => {
     ).toBeVisible();
     expect(screen.getByText("<img src=x onerror=alert(1)>.txt")).toBeVisible();
     expect(document.querySelector("img")).toBeNull();
-    expect(screen.getByText("Read only")).toBeVisible();
-    expect(screen.getByText("Read & write")).toBeVisible();
+    expect(screen.getByLabelText("Read only")).toHaveTextContent("R");
+    expect(screen.getByLabelText("Read and write")).toHaveTextContent("RW");
 
     fireEvent.click(screen.getByRole("link", { name: "Grüße 東京 🚀" }));
     expect(navigation.visits.at(-1)?.route).toEqual({
@@ -581,6 +581,12 @@ describe("writable file operations", () => {
   });
 
   it("renames only after fetching a fresh validator", async () => {
+    const navigation = writableNavigation();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/notes.txt",
+    });
     const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
       shareId,
       path,
@@ -598,29 +604,56 @@ describe("writable file operations", () => {
     );
     const api = fakeApi({
       directory: vi.fn(async () => writablePage),
+      preview: vi.fn(async (_shareId, path) => ({
+        kind: path.endsWith(".md")
+          ? ("markdown_source" as const)
+          : ("text" as const),
+        source: "# Notes",
+        language: path.endsWith(".md") ? "markdown" : undefined,
+        size: 7,
+        truncated: false,
+      })),
       metadata,
       moveEntry,
     });
-    render(<App api={api} navigation={writableNavigation()} />);
+    render(<App api={api} navigation={navigation} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "notes.txt" }),
+    ).toBeVisible();
 
     const noteActions = await screen.findByLabelText("Actions for notes.txt");
     fireEvent.click(
       within(noteActions).getByRole("button", { name: "Rename notes.txt" }),
     );
     fireEvent.input(screen.getByLabelText("New name"), {
-      target: { value: "renamed.txt" },
+      target: { value: "renamed.md" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() =>
       expect(moveEntry).toHaveBeenCalledWith(
         "work",
         "projects/notes.txt",
-        "projects/renamed.txt",
+        "projects/renamed.md",
         'W/"fresh"',
         "csrf-in-memory",
         expect.any(AbortSignal),
       ),
     );
+    await waitFor(() =>
+      expect(navigation.visits.at(-1)).toEqual({
+        route: {
+          shareId: "work",
+          path: "projects",
+          previewPath: "projects/renamed.md",
+        },
+        replace: true,
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "renamed.md" }),
+    ).toBeVisible();
+    expect(await screen.findByRole("tab", { name: "Readable" })).toBeVisible();
   });
 
   it("moves through the touch-friendly folder picker", async () => {
@@ -828,6 +861,16 @@ describe("writable file operations", () => {
       />,
     );
 
+    const rowActions = await screen.findByLabelText("Actions for notes.txt");
+    expect(
+      within(rowActions).queryByRole("button", { name: "Edit notes.txt" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(rowActions).queryByRole("button", {
+        name: "Copy full path for notes.txt",
+      }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "notes.txt" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit notes.txt" }),
     );

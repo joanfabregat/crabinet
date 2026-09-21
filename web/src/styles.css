@@ -66,7 +66,7 @@ a {
   display: flex;
   justify-content: space-between;
   min-height: 4.5rem;
-  padding: 0.75rem max(1rem, calc((100vw - 76rem) / 2));
+  padding: 0.75rem max(1rem, calc((100vw - 100rem) / 2));
 }
 
 .brand {
@@ -235,7 +235,7 @@ select {
 .global-notice,
 .browser-layout {
   margin: 0 auto;
-  max-width: 76rem;
+  max-width: 100rem;
   padding-left: 1rem;
   padding-right: 1rem;
 }
@@ -397,9 +397,23 @@ select {
 }
 
 .tree-access {
-  color: #4f5c53;
+  align-items: center;
+  border: 1px solid #b7c2ba;
+  border-radius: 999px;
+  color: #405047;
+  display: inline-flex;
   font-size: 0.65rem;
   font-weight: 800;
+  height: 1.4rem;
+  justify-content: center;
+  min-width: 1.4rem;
+  padding: 0 0.35rem;
+}
+
+.tree-access.access-read-write {
+  background: #e4f3e8;
+  border-color: #a7cbb0;
+  color: #1f6737;
 }
 
 .tree-status {
@@ -455,6 +469,7 @@ html.preview-fullscreen-open body {
 .preview-modal-backdrop {
   backdrop-filter: blur(6px);
   background: rgb(10 20 15 / 52%);
+  cursor: zoom-out;
   inset: 0;
   position: fixed;
   z-index: 999;
@@ -558,6 +573,38 @@ html.preview-fullscreen-open body {
 
 .preview-actions a {
   text-decoration: none;
+}
+
+.preview-metadata {
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 0.8rem 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  padding: 0.9rem 1.25rem;
+}
+
+.preview-panel.is-fullscreen .preview-metadata {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.preview-metadata div {
+  min-width: 0;
+}
+
+.preview-metadata dt {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.preview-metadata dd {
+  font-size: 0.82rem;
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
 }
 
 .preview-body {
@@ -1145,6 +1192,11 @@ html.preview-fullscreen-open body {
   .preview-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .preview-metadata,
+  .preview-panel.is-fullscreen .preview-metadata {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .preview-panel.is-fullscreen .preview-header {

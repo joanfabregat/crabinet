@@ -265,7 +265,18 @@ pub struct EntryMetadata {
     pub kind: EntryKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+    pub created: Option<SystemTime>,
     pub(crate) file_id: u64,
+}
+
+impl EntryMetadata {
+    fn matches_validator(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.size == other.size
+            && self.modified == other.modified
+            && self.file_id == other.file_id
+    }
 }
 
 /// A newly-created private staging file. Dropping it before publication removes
@@ -297,8 +308,8 @@ impl PendingWrite {
             rustix::fs::RenameFlags::NOREPLACE,
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-        if metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
-            != Ok(expected)
+        if !metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
+            .is_ok_and(|current| current.matches_validator(&expected))
         {
             let _ = self
                 .destination_parent
@@ -315,7 +326,7 @@ impl PendingWrite {
         let replacement = raw_file_metadata(&self.file)?;
         self.file.sync_all().map_err(map_io)?;
         let current = metadata_in_parent(&self.destination_parent, &self.destination_name)?;
-        if current != expected || current.kind != EntryKind::File {
+        if !current.matches_validator(&expected) || current.kind != EntryKind::File {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         rustix::fs::renameat_with(
@@ -328,8 +339,9 @@ impl PendingWrite {
         .map_err(|error| map_io(std::io::Error::from(error)))?;
         let valid_exchange =
             metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
-                == Ok(replacement)
-                && metadata_in_parent_raw(&self.staging, &self.temporary_name) == Ok(expected);
+                .is_ok_and(|current| current.matches_validator(&replacement))
+                && metadata_in_parent_raw(&self.staging, &self.temporary_name)
+                    .is_ok_and(|current| current.matches_validator(&expected));
         if !valid_exchange {
             rustix::fs::renameat_with(
                 &self.staging,
@@ -705,7 +717,7 @@ impl AuthorizedShare<'_> {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         let current = self.metadata(source)?;
-        if current != expected {
+        if !current.matches_validator(&expected) {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         if current.kind == EntryKind::Directory && destination.starts_with(source) {
@@ -723,7 +735,7 @@ impl AuthorizedShare<'_> {
         .map_err(|error| map_io(std::io::Error::from(error)))?;
 
         match metadata_in_parent(&destination_parent, destination_name) {
-            Ok(moved) if moved == expected => {
+            Ok(moved) if moved.matches_validator(&expected) => {
                 sync_directory(&source_parent)?;
                 sync_directory(&destination_parent)
             }
@@ -746,7 +758,7 @@ impl AuthorizedShare<'_> {
     pub fn delete_entry(&self, path: &VirtualPath, expected: EntryMetadata) -> FsResult<()> {
         self.require_write()?;
         let current = self.metadata(path)?;
-        if current != expected {
+        if !current.matches_validator(&expected) {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         let (parent, name) = self.share.open_parent(path)?;
@@ -766,7 +778,11 @@ impl AuthorizedShare<'_> {
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
         let staged = metadata_in_parent_raw(staging, &staged_name);
-        if staged.as_ref().is_err() || staged.as_ref().is_ok_and(|value| *value != expected) {
+        if staged.as_ref().is_err()
+            || staged
+                .as_ref()
+                .is_ok_and(|value| !value.matches_validator(&expected))
+        {
             let rollback = rustix::fs::renameat_with(
                 staging,
                 &staged_name,
@@ -1069,6 +1085,8 @@ fn entry_metadata(metadata: &cap_std::fs::Metadata, kind: EntryKind) -> EntryMet
         kind,
         size: metadata.len(),
         modified: metadata.modified().ok().map(|time| time.into_std()),
+        accessed: metadata.accessed().ok().map(|time| time.into_std()),
+        created: metadata.created().ok().map(|time| time.into_std()),
         file_id: metadata_identity(metadata),
     }
 }
@@ -1550,6 +1568,11 @@ mod tests {
         let source = VirtualPath::parse("hello.txt").expect("path");
         let occupied = VirtualPath::parse("nested/inside.txt").expect("path");
         let expected = authorized.metadata(&source).expect("metadata");
+        let mut timestamp_only_change = expected;
+        timestamp_only_change.accessed = Some(SystemTime::UNIX_EPOCH);
+        timestamp_only_change.created =
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+        assert!(timestamp_only_change.matches_validator(&expected));
         assert_eq!(
             authorized
                 .move_entry(&source, &occupied, expected)

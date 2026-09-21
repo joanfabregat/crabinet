@@ -263,6 +263,16 @@ describe("secure file previews", () => {
         size: 2048,
         truncated: false,
       })),
+      metadata: vi.fn(async () => ({
+        shareId: "docs",
+        path: "photo.png",
+        name: "photo.png",
+        kind: "file" as const,
+        size: 2048,
+        accessedAtMs: 1_700_000_000_000,
+        createdAtMs: 1_690_000_000_000,
+        etag: 'W/"photo"',
+      })),
     });
     render(<App api={api} navigation={navigation} />);
 
@@ -300,8 +310,12 @@ describe("secure file previews", () => {
     ).toHaveTextContent("Restore side preview");
     expect(document.querySelector(".preview-modal-backdrop")).toBeVisible();
     expect(document.documentElement).toHaveClass("preview-fullscreen-open");
+    const details = screen.getByLabelText("File details");
+    expect(details).toHaveTextContent("2.0 kB");
+    expect(details).toHaveTextContent("image/png");
+    expect(details).not.toHaveTextContent("Unavailable");
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.click(document.querySelector(".preview-modal-backdrop")!);
     expect(navigation.visits.at(-1)).toEqual({
       shareId: "docs",
       path: "",
@@ -313,6 +327,15 @@ describe("secure file previews", () => {
         "preview-fullscreen-open",
       ),
     );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(navigation.visits.at(-1)).toEqual({
+      shareId: "docs",
+      path: "",
+      previewPath: "photo.png",
+      previewMode: "side",
+    });
   });
 
   it("aborts stale previews and ignores a late session error from the old file", async () => {

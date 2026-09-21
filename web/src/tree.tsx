@@ -319,8 +319,14 @@ function TreeNode(props: TreeNodeProps) {
           {name}
         </a>
         {level === 0 && (
-          <span class="tree-access">
-            {share.access === "read" ? "Read only" : "Read & write"}
+          <span
+            class={`tree-access access-${share.access}`}
+            aria-label={
+              share.access === "read" ? "Read only" : "Read and write"
+            }
+            title={share.access === "read" ? "Read only" : "Read and write"}
+          >
+            {share.access === "read" ? "R" : "RW"}
           </span>
         )}
         <CopyPathButton
