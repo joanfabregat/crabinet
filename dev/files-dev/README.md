@@ -15,7 +15,7 @@ Vite proxies `/api` and `/health` to the backend on the private `index-dev` Podm
 
 The development environment must use only synthetic shares and its own configuration, session secret, SQLite database, build output, ports, network, and container names. It must never mount production shares, production state, `~/repos` as a share, or `~/scratch`.
 
-Runtime material is intentionally not committed. On the current dev-vm it lives under `/etc/index-dev` and `/data/index-dev`; the checked-in files contain no passwords, password hashes, session keys, cookies, or database state.
+Runtime material is intentionally not committed. On the current dev-vm it lives under `/etc/index-dev` and `/data/services/index-dev`; the checked-in files contain no passwords, password hashes, session keys, cookies, or database state.
 
 Both services use digest-pinned images, read-only root filesystems, dropped capabilities, no-new-privileges, bounded tmpfs mounts, systemd resource ceilings, and link-local metadata denial. The checkout is mounted read-only. Only the isolated Cargo target, reviewed Cargo cache, synthetic shares, and development state are writable.
 
@@ -75,7 +75,7 @@ Create `/etc/index-dev/config.toml` from the repository's `config.example.toml`,
 
 The existing dev-vm installation already has this runtime material. Reinstallation should preserve it unless the preview is intentionally reset.
 
-Initialize `/data/index-dev/shares` from `fixtures/` only for a new or explicitly reset environment. The fixtures cover code, Markdown, hostile-safe HTML, nested tree navigation, and Linux colon-containing names. Do not recopy fixtures during normal restarts because files created through the development UI are disposable but may still be under active review.
+Initialize `/data/services/index-dev/shares` from `fixtures/` only for a new or explicitly reset environment. The fixtures cover code, Markdown, hostile-safe HTML, nested tree navigation, and Linux colon-containing names. Do not recopy fixtures during normal restarts because files created through the development UI are disposable but may still be under active review.
 
 The checked-in systemd units are the application-owned service definitions for the approved current preview. Their installation is an operator action because it changes host state. They mount the watcher scripts and lock hashes directly from this checkout, so this directory remains their source of truth.
 

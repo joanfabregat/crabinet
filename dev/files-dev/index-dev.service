@@ -3,7 +3,7 @@ Description=Index Preact development server
 Wants=network-online.target
 After=network-online.target user@1001.service traefik.service index-dev-backend.service
 Requires=user@1001.service index-dev-backend.service
-RequiresMountsFor=/home/joan/repos/index/web /home/joan/repos/index/.git /home/joan/repos/index/dev/files-dev /data/index-dev/build/node_modules /etc/index-dev
+RequiresMountsFor=/home/joan/repos/index/web /home/joan/repos/index/.git /home/joan/repos/index/dev/files-dev /data/services/index-dev/build/node_modules /etc/index-dev
 
 [Service]
 Type=notify
@@ -43,7 +43,7 @@ ExecStart=/usr/bin/podman run \
   --workdir=/workspace \
   --volume=/home/joan/repos/index/web:/workspace:ro \
   --volume=/home/joan/repos/index/.git:/repo-git:ro \
-  --volume=/data/index-dev/build/node_modules:/workspace/node_modules:ro \
+  --volume=/data/services/index-dev/build/node_modules:/workspace/node_modules:ro \
   --volume=/home/joan/repos/index/dev/files-dev/frontend-start.sh:/usr/local/bin/index-dev-frontend:ro \
   --volume=/home/joan/repos/index/dev/files-dev/package-lock.sha256:/etc/index-dev/package-lock.sha256:ro \
   --publish=127.0.0.1:18081:5173 \

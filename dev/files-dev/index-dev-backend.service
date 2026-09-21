@@ -3,7 +3,7 @@ Description=Index watched Rust development backend
 Wants=network-online.target
 After=network-online.target user@1001.service
 Requires=user@1001.service
-RequiresMountsFor=/home/joan/repos/index /home/joan/repos/index/dev/files-dev /data/index-dev/build/target /etc/index-dev /data/index-dev/state /data/index-dev/shares
+RequiresMountsFor=/home/joan/repos/index /home/joan/repos/index/dev/files-dev /data/services/index-dev/build/target /etc/index-dev /data/services/index-dev/state /data/services/index-dev/shares
 
 [Service]
 Type=notify
@@ -43,13 +43,13 @@ ExecStart=/usr/bin/podman run \
   --tmpfs=/tmp:size=256m,mode=1777 \
   --workdir=/workspace \
   --volume=/home/joan/repos/index:/workspace:ro \
-  --volume=/data/index-dev/build/target:/workspace/target:rw \
+  --volume=/data/services/index-dev/build/target:/workspace/target:rw \
   --volume=/home/joan/.cache/dev-vm-podman/cargo:/cargo-cache:rw \
-  --volume=/data/index-dev/shares/repos:/shares/repos:rw \
-  --volume=/data/index-dev/shares/scratch:/shares/scratch:rw \
+  --volume=/data/services/index-dev/shares/repos:/shares/repos:rw \
+  --volume=/data/services/index-dev/shares/scratch:/shares/scratch:rw \
   --volume=/etc/index-dev/config.toml:/etc/index/config.toml:ro \
   --volume=/etc/index-dev/session.key:/run/secrets/index/session.key:ro \
-  --volume=/data/index-dev/state:/var/lib/index:rw \
+  --volume=/data/services/index-dev/state:/var/lib/index:rw \
   --volume=/home/joan/repos/index/dev/files-dev/backend-watch.sh:/usr/local/bin/index-dev-backend:ro \
   --volume=/home/joan/repos/index/dev/files-dev/Cargo.lock.sha256:/etc/index-dev/Cargo.lock.sha256:ro \
   --publish=127.0.0.1:18082:8080 \
