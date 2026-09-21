@@ -25,7 +25,7 @@ env:
 jobs:
   verify:
     name: Verify release tag
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       checks: read
@@ -63,7 +63,7 @@ jobs:
   frontend:
     name: Build release frontend
     needs: verify
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out tagged source
@@ -100,10 +100,10 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             target: x86_64-unknown-linux-musl
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -192,7 +192,7 @@ jobs:
       fail-fast: true
       matrix:
         arch: [amd64, arm64]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -272,7 +272,7 @@ jobs:
   publish:
     name: Publish release and GHCR manifest
     needs: image
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       attestations: write
