@@ -1,6 +1,6 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { Maximize2, Minimize2, Upload, X } from "lucide-preact";
+import { FilePenLine, Maximize2, Minimize2, Upload, X } from "lucide-preact";
 
 import {
   ApiError,
@@ -13,6 +13,7 @@ import {
   type ApiClient,
   type DirectoryEntry,
   type DirectoryPage,
+  type EntryMetadata,
   type PreviewDocument,
   type Session,
   type Share,
@@ -567,7 +568,10 @@ function DirectoryBrowser({
     requestAnimationFrame(() => previewTriggerRef.current?.focus());
   };
 
-  const changed = (completedOperation: EntryOperation) => {
+  const changed = (
+    completedOperation: EntryOperation,
+    destinationPath?: string,
+  ) => {
     setOperation(undefined);
     if (
       completedOperation.kind === "delete" &&
@@ -575,8 +579,36 @@ function DirectoryBrowser({
     ) {
       navigation.go({ shareId: share.id, path: route.path }, { replace: true });
       requestAnimationFrame(() => headingRef.current?.focus());
+    } else if (
+      completedOperation.kind === "rename" &&
+      destinationPath &&
+      activePreview.current === completedOperation.path
+    ) {
+      navigation.go(
+        {
+          shareId: share.id,
+          path: route.path,
+          previewPath: destinationPath,
+          ...(route.previewMode ? { previewMode: route.previewMode } : {}),
+        },
+        { replace: true },
+      );
     }
     setRefreshKey((value) => value + 1);
+  };
+
+  const editPreview = () => {
+    const previewPath = route.previewPath;
+    if (!previewPath) return;
+    const name = previewPath.split("/").at(-1) ?? previewPath;
+    const listedEntry = page?.entries.find(
+      (entry) => joinPath(route.path, entry.name) === previewPath,
+    );
+    setOperation({
+      kind: "edit",
+      entry: listedEntry ?? { name, kind: "file" },
+      path: previewPath,
+    });
   };
 
   return (
@@ -713,7 +745,9 @@ function DirectoryBrowser({
           api={api}
           path={route.previewPath}
           shareId={share.id}
+          writable={writable}
           fullScreen={route.previewMode === "full"}
+          onEdit={editPreview}
           onClose={closePreview}
           onToggleFullScreen={() =>
             navigation.go({
@@ -857,13 +891,14 @@ function EntryList({
               </span>
             </div>
             <span class="entry-meta">{formatSize(entry.size)}</span>
-            <EntryActionButtons
-              entry={entry}
-              path={joinPath(path, entry.name)}
-              copyPath={`${shareId}/${joinPath(path, entry.name)}`}
-              writable={writable}
-              onOperation={onOperation}
-            />
+            {writable && (
+              <EntryActionButtons
+                entry={entry}
+                path={joinPath(path, entry.name)}
+                writable={writable}
+                onOperation={onOperation}
+              />
+            )}
           </div>
         );
       })}
@@ -875,7 +910,9 @@ interface PreviewPanelProps {
   api: ApiClient;
   path: string;
   shareId: string;
+  writable: boolean;
   fullScreen: boolean;
+  onEdit: () => void;
   onClose: () => void;
   onToggleFullScreen: () => void;
   onSessionExpired: () => void;
@@ -886,16 +923,26 @@ type PreviewState =
   | { status: "ready"; document: PreviewDocument }
   | { status: "error"; error: ApiError };
 
+type PreviewMetadataState =
+  | { status: "loading" }
+  | { status: "ready"; metadata: EntryMetadata }
+  | { status: "unavailable" };
+
 function PreviewPanel({
   api,
   path,
   shareId,
+  writable,
   fullScreen,
+  onEdit,
   onClose,
   onToggleFullScreen,
   onSessionExpired,
 }: PreviewPanelProps) {
   const [state, setState] = useState<PreviewState>({ status: "loading" });
+  const [metadataState, setMetadataState] = useState<PreviewMetadataState>({
+    status: "loading",
+  });
   const [refreshKey, setRefreshKey] = useState(0);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -904,19 +951,35 @@ function PreviewPanel({
   useEffect(() => {
     const controller = new AbortController();
     setState({ status: "loading" });
-    api.preview(shareId, path, controller.signal).then(
-      (document) => {
+    setMetadataState({ status: "loading" });
+    const load = async () => {
+      try {
+        const document = await api.preview(shareId, path, controller.signal);
         if (!controller.signal.aborted) setState({ status: "ready", document });
-      },
-      (cause: unknown) => {
+      } catch (cause) {
         if (controller.signal.aborted || isAborted(cause)) return;
         if (isUnauthorized(cause)) {
           onSessionExpired();
           return;
         }
         setState({ status: "error", error: asApiError(cause) });
-      },
-    );
+      }
+      if (controller.signal.aborted) return;
+      try {
+        const metadata = await api.metadata(shareId, path, controller.signal);
+        if (!controller.signal.aborted) {
+          setMetadataState({ status: "ready", metadata });
+        }
+      } catch (cause) {
+        if (controller.signal.aborted || isAborted(cause)) return;
+        if (isUnauthorized(cause)) {
+          onSessionExpired();
+          return;
+        }
+        setMetadataState({ status: "unavailable" });
+      }
+    };
+    void load();
     return () => controller.abort();
   }, [api, onSessionExpired, path, refreshKey, shareId]);
 
@@ -966,9 +1029,19 @@ function PreviewPanel({
     };
   }, [fullScreen, onToggleFullScreen]);
 
+  const metadata =
+    metadataState.status === "ready" ? metadataState.metadata : undefined;
+  const previewDocument = state.status === "ready" ? state.document : undefined;
+
   return (
     <>
-      {fullScreen && <div class="preview-modal-backdrop" aria-hidden="true" />}
+      {fullScreen && (
+        <div
+          class="preview-modal-backdrop"
+          aria-hidden="true"
+          onClick={onToggleFullScreen}
+        />
+      )}
       <aside
         ref={panelRef}
         class={`preview-panel${fullScreen ? " is-fullscreen" : ""}`}
@@ -1022,6 +1095,17 @@ function PreviewPanel({
             value={`${shareId}/${path}`}
             label={`Copy full path for ${filename}`}
           />
+          {writable && (
+            <button
+              class="icon-button"
+              type="button"
+              onClick={onEdit}
+              aria-label={`Edit ${filename}`}
+              title="Edit file"
+            >
+              <FilePenLine size={19} aria-hidden="true" />
+            </button>
+          )}
           <a class="button button-secondary" href={downloadUrl(shareId, path)}>
             Download file
           </a>
@@ -1047,6 +1131,33 @@ function PreviewPanel({
               </>
             )}
         </div>
+
+        <dl class="preview-metadata" aria-label="File details">
+          <div>
+            <dt>Size</dt>
+            <dd>{formatSize(metadata?.size ?? previewDocument?.size)}</dd>
+          </div>
+          <div>
+            <dt>Type</dt>
+            <dd>{previewTypeLabel(previewDocument, filename)}</dd>
+          </div>
+          <div>
+            <dt>Last opened</dt>
+            <dd>
+              {metadataState.status === "loading"
+                ? "Loading…"
+                : formatTimestamp(metadata?.accessedAtMs)}
+            </dd>
+          </div>
+          <div>
+            <dt>Created</dt>
+            <dd>
+              {metadataState.status === "loading"
+                ? "Loading…"
+                : formatTimestamp(metadata?.createdAtMs)}
+            </dd>
+          </div>
+        </dl>
 
         <div class="preview-body">
           {state.status === "loading" ? (
@@ -1514,6 +1625,51 @@ function formatSize(size: number | undefined): string {
   if (size < 1_000_000) return `${(size / 1_000).toFixed(1)} kB`;
   if (size < 1_000_000_000) return `${(size / 1_000_000).toFixed(1)} MB`;
   return `${(size / 1_000_000_000).toFixed(1)} GB`;
+}
+
+function previewTypeLabel(
+  document: PreviewDocument | undefined,
+  filename: string,
+): string {
+  if (document?.kind === "image") return document.mimeType ?? "Image";
+  if (document?.kind === "markdown_source") return "Markdown";
+  if (document?.kind === "html_source") return "HTML";
+  if (document?.kind === "code") {
+    const language = document.language;
+    if (!language) return "Code";
+    const displayNames: Record<string, string> = {
+      css: "CSS",
+      html: "HTML",
+      javascript: "JavaScript",
+      json: "JSON",
+      jsx: "JSX",
+      markdown: "Markdown",
+      shellscript: "Shell",
+      sql: "SQL",
+      tsx: "TSX",
+      typescript: "TypeScript",
+      yaml: "YAML",
+    };
+    return `${displayNames[language] ?? capitalize(language)} code`;
+  }
+  if (document?.kind === "text") return "Plain text";
+
+  const extension = filename.match(/\.([^.]+)$/)?.[1];
+  return extension ? `${extension.toUpperCase()} file` : "File";
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : value[0]!.toUpperCase() + value.slice(1);
+}
+
+function formatTimestamp(milliseconds: number | undefined): string {
+  if (milliseconds === undefined) return "Unavailable";
+  const date = new Date(milliseconds);
+  if (Number.isNaN(date.valueOf())) return "Unavailable";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 function mergeEntries(

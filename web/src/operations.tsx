@@ -1,12 +1,6 @@
 import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import {
-  FilePenLine,
-  FolderInput,
-  Pencil,
-  Trash2,
-  Upload,
-} from "lucide-preact";
+import { FolderInput, Pencil, Trash2, Upload } from "lucide-preact";
 
 import {
   ApiError,
@@ -16,7 +10,6 @@ import {
 } from "./api";
 import { isValidPathComponent } from "./virtual-path";
 import { FolderPicker } from "./tree";
-import { CopyPathButton } from "./copy-path-button";
 
 export type EntryOperation =
   | { kind: "create-file" }
@@ -70,29 +63,16 @@ export function WriteToolbar({
 export function EntryActionButtons({
   entry,
   path,
-  copyPath,
   writable,
   onOperation,
 }: {
   entry: DirectoryEntry;
   path: string;
-  copyPath: string;
   writable: boolean;
   onOperation: (operation: EntryOperation) => void;
 }) {
   return (
     <div class="entry-actions" aria-label={`Actions for ${entry.name}`}>
-      {writable && entry.kind === "file" && (
-        <button
-          class="entry-action"
-          type="button"
-          aria-label={`Edit ${entry.name}`}
-          title="Edit"
-          onClick={() => onOperation({ kind: "edit", entry, path })}
-        >
-          <FilePenLine size={18} aria-hidden="true" />
-        </button>
-      )}
       {writable && (
         <>
           <button
@@ -115,12 +95,6 @@ export function EntryActionButtons({
           </button>
         </>
       )}
-      <CopyPathButton
-        value={copyPath}
-        label={`Copy full path for ${entry.name}`}
-        className="entry-action"
-        size={18}
-      />
       {writable && (
         <button
           class="entry-action entry-action-danger"
@@ -143,7 +117,7 @@ interface OperationDialogProps {
   directory: string;
   shareId: string;
   onClose: () => void;
-  onChanged: (operation: EntryOperation) => void;
+  onChanged: (operation: EntryOperation, destinationPath?: string) => void;
   onSessionExpired: () => void;
 }
 
@@ -267,7 +241,10 @@ function SimpleOperationDialog({
           );
         }
       }
-      onChanged(operation);
+      onChanged(
+        operation,
+        operation.kind === "rename" ? destination : undefined,
+      );
     } catch (cause) {
       if (isUnauthorized(cause)) {
         onSessionExpired();

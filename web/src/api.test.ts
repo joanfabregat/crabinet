@@ -416,6 +416,17 @@ describe("API client", () => {
           size: 1,
           etag: 'W/"v"',
         }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "b.txt",
+          name: "b.txt",
+          kind: "file",
+          size: 1,
+          accessedAtMs: -1,
+          etag: 'W/"v"',
+        }),
       );
     const api = createApiClient({ fetch });
 
@@ -423,6 +434,9 @@ describe("API client", () => {
       { kind: "invalid-response" },
     );
     await expect(api.metadata("docs", "a.txt")).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+    await expect(api.metadata("docs", "b.txt")).rejects.toMatchObject({
       kind: "invalid-response",
     });
   });

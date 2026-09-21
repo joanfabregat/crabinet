@@ -541,6 +541,10 @@ struct MetadataResponse {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessed_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at_ms: Option<u64>,
     etag: String,
 }
 
@@ -566,6 +570,8 @@ async fn read_metadata(
         name: name.to_owned(),
         kind: kind_name(metadata.kind),
         size: (metadata.kind == EntryKind::File).then_some(metadata.size),
+        accessed_at_ms: system_time_millis(metadata.accessed),
+        created_at_ms: system_time_millis(metadata.created),
         etag: etag.clone(),
     });
     response
@@ -900,6 +906,11 @@ fn update_time_digest(hash: &mut Sha256, time: Option<SystemTime>) {
         }
         None => hash.update([0]),
     }
+}
+
+fn system_time_millis(time: Option<SystemTime>) -> Option<u64> {
+    time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 fn update_time_mac(mac: &mut HmacSha256, time: Option<SystemTime>) {
@@ -1430,6 +1441,11 @@ mod tests {
         assert_eq!(value["size"], 6);
         assert_eq!(value["etag"], header_etag.to_str().unwrap());
         assert!(value.get("modifiedAt").is_none());
+        for timestamp in ["accessedAtMs", "createdAtMs"] {
+            if let Some(timestamp) = value.get(timestamp) {
+                assert!(timestamp.as_u64().is_some());
+            }
+        }
 
         let directory = send(
             &fixture.app,
