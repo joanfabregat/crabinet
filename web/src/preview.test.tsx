@@ -247,7 +247,7 @@ describe("secure file previews", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("opens a full-screen raster preview from validated metadata", async () => {
+  it("opens an expanded modal raster preview from validated metadata", async () => {
     const navigation = new MemoryNavigation({
       shareId: "docs",
       path: "",
@@ -283,21 +283,22 @@ describe("secure file previews", () => {
     expect(
       screen.queryByRole("button", { name: "Zoom in" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Enter full screen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
     expect(navigation.visits.at(-1)).toEqual({
       shareId: "docs",
       path: "",
       previewPath: "photo.png",
       previewMode: "full",
     });
-    const fullScreenPanel = screen.getByRole("complementary", {
+    const fullScreenPanel = screen.getByRole("dialog", {
       name: "photo.png",
     });
     expect(fullScreenPanel).toHaveClass("is-fullscreen");
-    expect(screen.getByText("Full screen preview")).toBeVisible();
+    expect(screen.getByText("Expanded preview")).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Exit full screen" }),
-    ).toHaveTextContent("Exit full screen");
+      screen.getByRole("button", { name: "Restore side preview" }),
+    ).toHaveTextContent("Restore side preview");
+    expect(document.querySelector(".preview-modal-backdrop")).toBeVisible();
     expect(document.documentElement).toHaveClass("preview-fullscreen-open");
 
     fireEvent.keyDown(window, { key: "Escape" });

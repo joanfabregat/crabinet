@@ -80,7 +80,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   ).toBe(false);
 });
 
-test("direct routes, share selection, breadcrumbs, and browser history", async ({
+test("direct routes, tree share navigation, breadcrumbs, and browser history", async ({
   page,
 }) => {
   await page.goto("/browse/writable?path=Projects");
@@ -102,8 +102,9 @@ test("direct routes, share selection, breadcrumbs, and browser history", async (
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
   await page
-    .getByLabel("Shared folder", { exact: true })
-    .selectOption("read-only");
+    .getByLabel("Shared folders", { exact: true })
+    .getByRole("link", { name: "Reference library" })
+    .click();
   await expect(page).toHaveURL(/\/browse\/read-only$/);
   await expect(page.getByText("Read only", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "nested" })).toBeVisible();
@@ -258,21 +259,30 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Zoom out" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Zoom in" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Enter full screen" }).click();
+  await page.getByRole("button", { name: "Expand preview" }).click();
   const fullScreenPreview = page.locator(".preview-panel.is-fullscreen");
   await expect(fullScreenPreview).toBeVisible();
-  await expect(page.getByText("Full screen preview")).toBeVisible();
+  await expect(page.locator(".preview-modal-backdrop")).toBeVisible();
+  await expect(page.getByText("Expanded preview")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Exit full screen" }),
-  ).toContainText("Exit full screen");
+    page.getByRole("button", { name: "Restore side preview" }),
+  ).toContainText("Restore side preview");
   const fullScreenBox = await fullScreenPreview.boundingBox();
   const viewport = page.viewportSize();
   expect(fullScreenBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  expect(fullScreenBox!.x).toBe(0);
-  expect(fullScreenBox!.y).toBe(0);
-  expect(Math.round(fullScreenBox!.width)).toBe(viewport!.width);
-  expect(Math.round(fullScreenBox!.height)).toBe(viewport!.height);
+  expect(fullScreenBox!.x).toBeGreaterThan(0);
+  expect(fullScreenBox!.y).toBeGreaterThan(0);
+  expect(Math.round(fullScreenBox!.width)).toBeLessThan(viewport!.width);
+  expect(Math.round(fullScreenBox!.height)).toBeLessThan(viewport!.height);
+  const backdropStyles = await page
+    .locator(".preview-modal-backdrop")
+    .evaluate((element) => ({
+      background: getComputedStyle(element).backgroundColor,
+      blur: getComputedStyle(element).backdropFilter,
+    }));
+  expect(backdropStyles.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(backdropStyles.blur).toContain("blur");
   results = await new AxeBuilder({ page }).exclude("iframe").analyze();
   expect(
     results.violations.filter(({ impact }) =>
@@ -281,7 +291,7 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toEqual([]);
   await page.keyboard.press("Escape");
   await expect(
-    page.getByRole("button", { name: "Enter full screen" }),
+    page.getByRole("button", { name: "Expand preview" }),
   ).toBeVisible();
   await expect(fullScreenPreview).toHaveCount(0);
 

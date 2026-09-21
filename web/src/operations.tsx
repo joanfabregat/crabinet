@@ -39,7 +39,6 @@ export function WriteToolbar({
   onUpload: (files: File[]) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
-  const [dragging, setDragging] = useState(false);
 
   const choose = (files: FileList | null) => {
     if (files?.length) onUpload(Array.from(files));
@@ -48,47 +47,22 @@ export function WriteToolbar({
 
   return (
     <section class="write-toolbar" aria-label="File operations">
-      <div
-        class={`upload-dropzone${dragging ? " is-dragging" : ""}`}
-        onDragEnter={(event) => {
-          event.preventDefault();
-          setDragging(true);
-        }}
-        onDragOver={(event) => {
-          event.preventDefault();
-          if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-        }}
-        onDragLeave={(event) => {
-          if (
-            !event.currentTarget.contains(event.relatedTarget as Node | null)
-          ) {
-            setDragging(false);
-          }
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          setDragging(false);
-          choose(event.dataTransfer?.files ?? null);
-        }}
+      <button
+        class="button button-secondary upload-picker"
+        type="button"
+        onClick={() => input.current?.click()}
       >
-        <span>Drop files here or</span>
-        <button
-          class="upload-picker"
-          type="button"
-          onClick={() => input.current?.click()}
-        >
-          <Upload size={17} aria-hidden="true" />
-          choose files
-        </button>
-        <input
-          ref={input}
-          class="sr-only"
-          type="file"
-          multiple
-          aria-label="Choose files to upload"
-          onChange={(event) => choose(event.currentTarget.files)}
-        />
-      </div>
+        <Upload size={17} aria-hidden="true" />
+        Upload files
+      </button>
+      <input
+        ref={input}
+        class="sr-only"
+        type="file"
+        multiple
+        aria-label="Choose files to upload"
+        onChange={(event) => choose(event.currentTarget.files)}
+      />
     </section>
   );
 }
