@@ -15,7 +15,7 @@ concurrency:
 jobs:
   extended-backend:
     name: Extended backend verification
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       NIGHTLY_VERSION: nightly-2026-09-01
@@ -41,7 +41,7 @@ jobs:
 
   source:
     name: Source and dependency scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -108,7 +108,7 @@ jobs:
 
   released-image:
     name: Latest released image
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
