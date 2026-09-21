@@ -62,12 +62,13 @@ class MemoryNavigation implements BrowserNavigation {
 }
 
 function dispatchDrag(
-  type: "dragenter" | "drop",
+  type: "dragenter" | "dragover" | "dragleave" | "drop",
   dataTransfer: { types: string[]; files: File[] },
+  target: Document | Element = document,
 ) {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
-  fireEvent(document, event);
+  fireEvent(target, event);
 }
 
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -968,7 +969,11 @@ describe("writable file operations", () => {
     expect(screen.getByTestId("upload-drop-overlay")).toHaveTextContent(
       "Working files / projects",
     );
-    dispatchDrag("drop", { types: ["Files"], files });
+    dispatchDrag(
+      "drop",
+      { types: [], files },
+      screen.getByTestId("upload-drop-overlay"),
+    );
     expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
 
     expect(await screen.findByText("Succeeded")).toBeVisible();

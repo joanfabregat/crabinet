@@ -384,7 +384,6 @@ function DirectoryBrowser({
   const [operation, setOperation] = useState<EntryOperation>();
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
-  const fileDragDepth = useRef(0);
   const loadMoreController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previewTriggerRef = useRef<HTMLAnchorElement>();
@@ -407,30 +406,44 @@ function DirectoryBrowser({
 
   useEffect(() => {
     const resetFileDrag = () => {
-      fileDragDepth.current = 0;
       setFileDragActive(false);
     };
-    const hasFiles = (event: DragEvent) =>
-      Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const hasFiles = (transfer: DataTransfer | null) =>
+      Array.from(transfer?.types ?? []).some(
+        (type) => type === "Files" || type === "application/x-moz-file",
+      ) ||
+      Array.from(transfer?.items ?? []).some((item) => item.kind === "file") ||
+      (transfer?.files.length ?? 0) > 0;
     const dragEnter = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
+      if (!hasFiles(event.dataTransfer)) return;
       event.preventDefault();
-      fileDragDepth.current += 1;
+      event.stopPropagation();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = writable ? "copy" : "none";
+      }
       setFileDragActive(true);
     };
     const dragOver = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
+      if (!hasFiles(event.dataTransfer)) return;
       event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      event.stopPropagation();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = writable ? "copy" : "none";
+      }
+      setFileDragActive(true);
     };
-    const dragLeave = () => {
-      if (fileDragDepth.current === 0) return;
-      fileDragDepth.current -= 1;
-      if (fileDragDepth.current === 0) setFileDragActive(false);
+    const dragLeave = (event: DragEvent) => {
+      const leftViewport =
+        event.clientX <= 0 ||
+        event.clientY <= 0 ||
+        event.clientX >= window.innerWidth ||
+        event.clientY >= window.innerHeight;
+      if (event.relatedTarget === null && leftViewport) resetFileDrag();
     };
     const drop = (event: DragEvent) => {
-      if (!hasFiles(event)) return;
+      if (!hasFiles(event.dataTransfer)) return;
       event.preventDefault();
+      event.stopPropagation();
       const files = Array.from(event.dataTransfer?.files ?? []);
       resetFileDrag();
       if (writable && files.length > 0) {
@@ -438,18 +451,18 @@ function DirectoryBrowser({
       }
     };
 
-    document.addEventListener("dragenter", dragEnter);
-    document.addEventListener("dragover", dragOver);
-    document.addEventListener("dragleave", dragLeave);
-    document.addEventListener("drop", drop);
-    document.addEventListener("dragend", resetFileDrag);
+    window.addEventListener("dragenter", dragEnter, true);
+    window.addEventListener("dragover", dragOver, true);
+    window.addEventListener("dragleave", dragLeave, true);
+    window.addEventListener("drop", drop, true);
+    window.addEventListener("dragend", resetFileDrag, true);
     window.addEventListener("blur", resetFileDrag);
     return () => {
-      document.removeEventListener("dragenter", dragEnter);
-      document.removeEventListener("dragover", dragOver);
-      document.removeEventListener("dragleave", dragLeave);
-      document.removeEventListener("drop", drop);
-      document.removeEventListener("dragend", resetFileDrag);
+      window.removeEventListener("dragenter", dragEnter, true);
+      window.removeEventListener("dragover", dragOver, true);
+      window.removeEventListener("dragleave", dragLeave, true);
+      window.removeEventListener("drop", drop, true);
+      window.removeEventListener("dragend", resetFileDrag, true);
       window.removeEventListener("blur", resetFileDrag);
       resetFileDrag();
     };
