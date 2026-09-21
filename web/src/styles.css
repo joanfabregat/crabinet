@@ -399,7 +399,7 @@ select {
 .tree-access {
   align-items: center;
   border: 1px solid #b7c2ba;
-  border-radius: 999px;
+  border-radius: 0.3rem;
   color: #405047;
   display: inline-flex;
   font-size: 0.65rem;
@@ -904,7 +904,7 @@ html.preview-fullscreen-open body {
   inset: 0;
   justify-content: center;
   padding: 1rem;
-  pointer-events: none;
+  pointer-events: auto;
   position: fixed;
   z-index: 1100;
 }

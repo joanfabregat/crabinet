@@ -275,6 +275,7 @@ test.describe("writable share operations", () => {
       async () => {
         const overlay = page.getByTestId("upload-drop-overlay");
         await expect(overlay).toBeVisible();
+        await expect(overlay).toHaveCSS("pointer-events", "auto");
         await expect(overlay).toContainText("Drop files to upload");
         await expect(overlay).toContainText("Working files");
       },
