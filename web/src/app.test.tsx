@@ -887,11 +887,14 @@ describe("writable file operations", () => {
     expect(
       within(rowActions).queryByRole("button", { name: "Edit notes.txt" }),
     ).not.toBeInTheDocument();
-    expect(
-      within(rowActions).getByRole("button", {
-        name: "Copy full path for notes.txt",
-      }),
-    ).toHaveAttribute("data-tooltip", "Copy full path for notes.txt");
+    const copyPath = within(rowActions).getByRole("button", {
+      name: "Copy full path for notes.txt",
+    });
+    expect(copyPath).toHaveAttribute(
+      "data-tooltip",
+      "Copy full path for notes.txt",
+    );
+    expect(copyPath).toHaveClass("tooltip-align-end");
     expect(
       within(await screen.findByLabelText("Actions for empty")).getByRole(
         "button",
