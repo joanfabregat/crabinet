@@ -580,65 +580,33 @@ html.preview-fullscreen-open body {
 }
 
 .tooltip-action {
-  overflow: visible;
   position: relative;
 }
 
-.tooltip-action::after {
+.app-tooltip {
   background: #17211c;
   border-radius: 0.4rem;
-  bottom: calc(100% + 0.5rem);
   box-shadow: 0 0.35rem 1rem rgb(0 0 0 / 20%);
   color: white;
-  content: attr(data-tooltip);
   font-size: 0.72rem;
   font-weight: 650;
-  left: 50%;
   line-height: 1.25;
-  max-width: 15rem;
+  max-width: min(15rem, calc(100vw - 1rem));
   opacity: 0;
   padding: 0.4rem 0.55rem;
   pointer-events: none;
-  position: absolute;
+  position: fixed;
   text-align: center;
-  transform: translate(-50%, 0.2rem);
-  transition:
-    opacity 120ms ease,
-    transform 120ms ease;
+  transition: opacity 120ms ease;
   visibility: hidden;
   white-space: normal;
   width: max-content;
-  z-index: 1100;
+  z-index: 2000;
 }
 
-.tooltip-action.tooltip-below::after {
-  bottom: auto;
-  top: calc(100% + 0.5rem);
-}
-
-.tooltip-action.tooltip-align-start::after {
-  left: 0;
-  transform: translate(0, 0.2rem);
-}
-
-.tooltip-action.tooltip-align-end::after {
-  left: auto;
-  right: 0;
-  transform: translate(0, 0.2rem);
-}
-
-.tooltip-action:hover::after,
-.tooltip-action:focus-visible::after {
+.app-tooltip.is-visible {
   opacity: 1;
-  transform: translate(-50%, 0);
   visibility: visible;
-}
-
-.tooltip-action.tooltip-align-start:hover::after,
-.tooltip-action.tooltip-align-start:focus-visible::after,
-.tooltip-action.tooltip-align-end:hover::after,
-.tooltip-action.tooltip-align-end:focus-visible::after {
-  transform: translate(0, 0);
 }
 
 .preview-actions a {

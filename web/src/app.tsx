@@ -50,6 +50,7 @@ import {
   type BrowserRoute,
 } from "./navigation";
 import { SafeMarkdown } from "./safe-markdown";
+import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 
 const defaultApi = createApiClient();
@@ -353,6 +354,7 @@ function AuthenticatedShell({
           <p role="status">Opening a shared folder…</p>
         )}
       </main>
+      <TooltipLayer />
     </div>
   );
 }

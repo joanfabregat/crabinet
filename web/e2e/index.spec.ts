@@ -116,6 +116,32 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
 });
 
+test("action tooltips escape clipped panels and remain inside the viewport", async ({
+  page,
+}) => {
+  await openSignedIn(page, "/browse/writable", "writer");
+  const copyPath = page.getByRole("button", {
+    name: "Copy full path for README.md",
+  });
+  await copyPath.hover();
+
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toHaveText("Copy full path for README.md");
+  await expect(tooltip).toBeVisible();
+  expect(
+    await tooltip.evaluate((element) =>
+      Boolean(element.closest(".directory-panel, .share-tree, .preview-panel")),
+    ),
+  ).toBe(false);
+
+  const box = await tooltip.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+});
+
 test("hostile Markdown and HTML remain inert in-panel and in a new tab", async ({
   context,
   page,
