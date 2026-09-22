@@ -135,11 +135,19 @@ test("action tooltips escape clipped panels and remain inside the viewport", asy
   ).toBe(false);
 
   const box = await tooltip.boundingBox();
+  const triggerBox = await copyPath.boundingBox();
   const viewport = page.viewportSize();
   expect(box).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
   expect(viewport).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+  const centeredLeft = triggerBox!.x + (triggerBox!.width - box!.width) / 2;
+  const expectedLeft = Math.min(
+    Math.max(centeredLeft, 8),
+    viewport!.width - box!.width - 8,
+  );
+  expect(box!.x).toBeCloseTo(expectedLeft, 0);
 });
 
 test("hostile Markdown and HTML remain inert in-panel and in a new tab", async ({

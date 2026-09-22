@@ -1101,7 +1101,7 @@ function PreviewPanel({
               )}
             </TooltipButton>
             <TooltipButton
-              className="tooltip-below tooltip-align-end"
+              className="tooltip-below"
               onClick={onClose}
               label={`Close preview of ${filename}`}
             >
@@ -1114,7 +1114,7 @@ function PreviewPanel({
           <CopyPathButton
             value={`${shareId}/${path}`}
             label={`Copy full path for ${filename}`}
-            className="icon-button tooltip-align-start"
+            className="icon-button"
           />
           {writable && (
             <TooltipButton

@@ -83,7 +83,7 @@ export function EntryActionButtons({
       {writable && (
         <>
           <button
-            class="entry-action tooltip-action tooltip-align-end"
+            class="entry-action tooltip-action"
             type="button"
             aria-label={`Rename ${entry.name}`}
             data-tooltip="Rename"
@@ -92,7 +92,7 @@ export function EntryActionButtons({
             <Pencil size={18} aria-hidden="true" />
           </button>
           <button
-            class="entry-action tooltip-action tooltip-align-end"
+            class="entry-action tooltip-action"
             type="button"
             aria-label={`Move ${entry.name}`}
             data-tooltip="Move to…"
@@ -105,12 +105,12 @@ export function EntryActionButtons({
       <CopyPathButton
         value={copyPath}
         label={`Copy full path for ${entry.name}`}
-        className="entry-action tooltip-align-end"
+        className="entry-action"
         size={18}
       />
       {writable && (
         <button
-          class="entry-action entry-action-danger tooltip-action tooltip-align-end"
+          class="entry-action entry-action-danger tooltip-action"
           type="button"
           aria-label={`Delete ${entry.name}`}
           data-tooltip="Delete"

@@ -894,7 +894,6 @@ describe("writable file operations", () => {
       "data-tooltip",
       "Copy full path for notes.txt",
     );
-    expect(copyPath).toHaveClass("tooltip-align-end");
     expect(
       within(await screen.findByLabelText("Actions for empty")).getByRole(
         "button",
