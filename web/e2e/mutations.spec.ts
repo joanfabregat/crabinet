@@ -115,6 +115,30 @@ test.describe("writable share operations", () => {
     const confirmation = deleteDialog.getByRole("checkbox", {
       name: "I understand that example.toml will be permanently deleted",
     });
+    const confirmationText = deleteDialog
+      .locator(".confirmation-check span")
+      .filter({ hasText: "I understand" });
+    const [confirmationBox, confirmationTextBox] = await Promise.all([
+      confirmation.boundingBox(),
+      confirmationText.boundingBox(),
+    ]);
+    expect(confirmationBox).not.toBeNull();
+    expect(confirmationTextBox).not.toBeNull();
+    expect(
+      Math.abs(
+        confirmationBox!.y +
+          confirmationBox!.height / 2 -
+          (confirmationTextBox!.y + confirmationTextBox!.height / 2),
+      ),
+    ).toBeLessThanOrEqual(2);
+    const deleteBackdropStyles = await deleteDialog
+      .locator("xpath=..")
+      .evaluate((element) => ({
+        background: getComputedStyle(element).backgroundColor,
+        blur: getComputedStyle(element).backdropFilter,
+      }));
+    expect(deleteBackdropStyles.background).not.toBe("rgba(0, 0, 0, 0)");
+    expect(deleteBackdropStyles.blur).toContain("blur");
     await expect(
       deleteDialog.getByRole("button", { name: "Delete", exact: true }),
     ).toBeDisabled();

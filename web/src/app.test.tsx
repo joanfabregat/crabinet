@@ -62,7 +62,7 @@ class MemoryNavigation implements BrowserNavigation {
 }
 
 function dispatchDrag(
-  type: "dragenter" | "dragover" | "dragleave" | "drop",
+  type: "dragstart" | "dragenter" | "dragover" | "dragleave" | "drop",
   dataTransfer: { types: string[]; files: File[] },
   target: Document | Element = document,
 ) {
@@ -959,6 +959,15 @@ describe("writable file operations", () => {
       files: [],
     });
     expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
+
+    const internalFile = new File(["internal"], "preview.png", {
+      type: "image/png",
+    });
+    dispatchDrag("dragstart", { types: ["Files"], files: [internalFile] });
+    dispatchDrag("dragenter", { types: ["Files"], files: [internalFile] });
+    dispatchDrag("drop", { types: ["Files"], files: [internalFile] });
+    expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
+    expect(uploadFile).not.toHaveBeenCalled();
 
     const files = [
       new File(["one"], "new.txt", { type: "text/plain" }),

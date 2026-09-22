@@ -306,9 +306,28 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   expect(fullScreenBox).not.toBeNull();
   expect(viewport).not.toBeNull();
   expect(fullScreenBox!.x).toBeGreaterThan(0);
-  expect(fullScreenBox!.y).toBeGreaterThan(0);
+  expect(fullScreenBox!.y).toBeGreaterThanOrEqual(31);
   expect(Math.round(fullScreenBox!.width)).toBeLessThan(viewport!.width);
   expect(Math.round(fullScreenBox!.height)).toBeLessThan(viewport!.height);
+  const scrollBehavior = await fullScreenPreview.evaluate((panel) => {
+    const spacer = document.createElement("div");
+    spacer.style.height = "2000px";
+    spacer.style.flex = "0 0 2000px";
+    panel.append(spacer);
+    panel.scrollTop = 300;
+    const result = {
+      overflowY: getComputedStyle(panel).overflowY,
+      scrollable: panel.scrollHeight > panel.clientHeight,
+      scrolled: panel.scrollTop > 0,
+    };
+    spacer.remove();
+    return result;
+  });
+  expect(scrollBehavior).toEqual({
+    overflowY: "auto",
+    scrollable: true,
+    scrolled: true,
+  });
   const backdropStyles = await page
     .locator(".preview-modal-backdrop")
     .evaluate((element) => ({
