@@ -596,7 +596,6 @@ html.preview-fullscreen-open body {
   pointer-events: none;
   position: fixed;
   text-align: center;
-  transition: opacity 120ms ease;
   visibility: hidden;
   white-space: normal;
   width: max-content;
