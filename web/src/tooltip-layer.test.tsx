@@ -9,11 +9,7 @@ function renderTooltip(label = "Copy full path for Reports") {
   render(
     <>
       <div class="clipping-panel" style="overflow: hidden">
-        <button
-          class="tooltip-action tooltip-align-end"
-          data-tooltip={label}
-          type="button"
-        >
+        <button class="tooltip-action" data-tooltip={label} type="button">
           Copy
         </button>
       </div>

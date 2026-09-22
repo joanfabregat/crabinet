@@ -118,11 +118,6 @@ export function TooltipLayer() {
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
     let left = targetRect.left + (targetRect.width - tooltipRect.width) / 2;
-    if (active.target.classList.contains("tooltip-align-start")) {
-      left = targetRect.left;
-    } else if (active.target.classList.contains("tooltip-align-end")) {
-      left = targetRect.right - tooltipRect.width;
-    }
     left = Math.min(
       Math.max(left, VIEWPORT_MARGIN),
       Math.max(

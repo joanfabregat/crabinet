@@ -459,16 +459,16 @@ html.preview-fullscreen-open body {
   border-radius: 1rem;
   display: flex;
   flex-direction: column;
-  inset-block: clamp(0.75rem, 3vh, 2rem);
+  inset-block: auto;
+  inset-block-start: max(2rem, env(safe-area-inset-top));
   inset-inline: clamp(1rem, 8vw, 10rem);
-  max-height: none;
+  max-height: calc(100dvh - 4rem);
+  overflow: auto;
   position: fixed;
   z-index: 1000;
 }
 
 .preview-modal-backdrop {
-  backdrop-filter: blur(6px);
-  background: rgb(10 20 15 / 52%);
   cursor: zoom-out;
   inset: 0;
   position: fixed;
@@ -487,9 +487,8 @@ html.preview-fullscreen-open body {
 }
 
 .preview-panel.is-fullscreen .preview-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 .preview-panel.is-fullscreen .html-preview {
@@ -597,7 +596,6 @@ html.preview-fullscreen-open body {
   pointer-events: none;
   position: fixed;
   text-align: center;
-  transition: opacity 120ms ease;
   visibility: hidden;
   white-space: normal;
   width: max-content;
@@ -779,6 +777,12 @@ html.preview-fullscreen-open body {
   width: auto;
 }
 
+.image-preview a {
+  cursor: zoom-in;
+  display: inline-block;
+  max-width: 100%;
+}
+
 .image-preview figcaption {
   color: var(--muted);
   font-size: 0.8rem;
@@ -936,9 +940,14 @@ html.preview-fullscreen-open body {
   background: #edf4ef;
 }
 
+.modal-backdrop,
+.preview-modal-backdrop {
+  backdrop-filter: blur(6px);
+  background: rgb(10 20 15 / 52%);
+}
+
 .modal-backdrop {
   align-items: center;
-  background: rgb(10 20 15 / 58%);
   display: flex;
   inset: 0;
   justify-content: center;
@@ -1009,7 +1018,7 @@ html.preview-fullscreen-open body {
 }
 
 .operation-form .confirmation-check {
-  align-items: flex-start;
+  align-items: center;
   display: flex;
   gap: 0.7rem;
   line-height: 1.45;
@@ -1258,10 +1267,8 @@ html.preview-fullscreen-open body {
   }
 
   .preview-panel.is-fullscreen {
-    inset: max(0.5rem, env(safe-area-inset-top))
-      max(0.5rem, env(safe-area-inset-right))
-      max(0.5rem, env(safe-area-inset-bottom))
-      max(0.5rem, env(safe-area-inset-left));
+    inset-inline-end: max(0.5rem, env(safe-area-inset-right));
+    inset-inline-start: max(0.5rem, env(safe-area-inset-left));
   }
 
   .source-code,

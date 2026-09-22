@@ -407,6 +407,7 @@ function DirectoryBrowser({
   }, [route.path, share.id]);
 
   useEffect(() => {
+    let internalDrag = false;
     const resetFileDrag = () => {
       setFileDragActive(false);
     };
@@ -416,7 +417,19 @@ function DirectoryBrowser({
       ) ||
       Array.from(transfer?.items ?? []).some((item) => item.kind === "file") ||
       (transfer?.files.length ?? 0) > 0;
+    const dragStart = () => {
+      internalDrag = true;
+      resetFileDrag();
+    };
     const dragEnter = (event: DragEvent) => {
+      if (internalDrag) {
+        if (hasFiles(event.dataTransfer)) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        }
+        return;
+      }
       if (!hasFiles(event.dataTransfer)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -426,6 +439,14 @@ function DirectoryBrowser({
       setFileDragActive(true);
     };
     const dragOver = (event: DragEvent) => {
+      if (internalDrag) {
+        if (hasFiles(event.dataTransfer)) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        }
+        return;
+      }
       if (!hasFiles(event.dataTransfer)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -443,6 +464,15 @@ function DirectoryBrowser({
       if (event.relatedTarget === null && leftViewport) resetFileDrag();
     };
     const drop = (event: DragEvent) => {
+      if (internalDrag) {
+        if (hasFiles(event.dataTransfer)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        internalDrag = false;
+        resetFileDrag();
+        return;
+      }
       if (!hasFiles(event.dataTransfer)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -453,19 +483,25 @@ function DirectoryBrowser({
       }
     };
 
+    const dragEnd = () => {
+      internalDrag = false;
+      resetFileDrag();
+    };
+    window.addEventListener("dragstart", dragStart, true);
     window.addEventListener("dragenter", dragEnter, true);
     window.addEventListener("dragover", dragOver, true);
     window.addEventListener("dragleave", dragLeave, true);
     window.addEventListener("drop", drop, true);
-    window.addEventListener("dragend", resetFileDrag, true);
-    window.addEventListener("blur", resetFileDrag);
+    window.addEventListener("dragend", dragEnd, true);
+    window.addEventListener("blur", dragEnd);
     return () => {
+      window.removeEventListener("dragstart", dragStart, true);
       window.removeEventListener("dragenter", dragEnter, true);
       window.removeEventListener("dragover", dragOver, true);
       window.removeEventListener("dragleave", dragLeave, true);
       window.removeEventListener("drop", drop, true);
-      window.removeEventListener("dragend", resetFileDrag, true);
-      window.removeEventListener("blur", resetFileDrag);
+      window.removeEventListener("dragend", dragEnd, true);
+      window.removeEventListener("blur", dragEnd);
       resetFileDrag();
     };
   }, [route.path, share.id, writable]);
@@ -1101,7 +1137,7 @@ function PreviewPanel({
               )}
             </TooltipButton>
             <TooltipButton
-              className="tooltip-below tooltip-align-end"
+              className="tooltip-below"
               onClick={onClose}
               label={`Close preview of ${filename}`}
             >
@@ -1114,7 +1150,7 @@ function PreviewPanel({
           <CopyPathButton
             value={`${shareId}/${path}`}
             label={`Copy full path for ${filename}`}
-            className="icon-button tooltip-align-start"
+            className="icon-button"
           />
           {writable && (
             <TooltipButton
@@ -1254,7 +1290,19 @@ function PreviewContent({
   if (document.kind === "image") {
     return (
       <figure class="image-preview">
-        <img src={imageUrl} alt={`Preview of ${filename}`} />
+        <a
+          href={imageUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open ${filename} in a new tab`}
+          draggable={false}
+        >
+          <img
+            src={imageUrl}
+            alt={`Preview of ${filename}`}
+            draggable={false}
+          />
+        </a>
         <figcaption>
           {document.mimeType}
           {document.width && document.height

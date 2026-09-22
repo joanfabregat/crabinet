@@ -135,11 +135,19 @@ test("action tooltips escape clipped panels and remain inside the viewport", asy
   ).toBe(false);
 
   const box = await tooltip.boundingBox();
+  const triggerBox = await copyPath.boundingBox();
   const viewport = page.viewportSize();
   expect(box).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
   expect(viewport).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+  const centeredLeft = triggerBox!.x + (triggerBox!.width - box!.width) / 2;
+  const expectedLeft = Math.min(
+    Math.max(centeredLeft, 8),
+    viewport!.width - box!.width - 8,
+  );
+  expect(box!.x).toBeCloseTo(expectedLeft, 0);
 });
 
 test("hostile Markdown and HTML remain inert in-panel and in a new tab", async ({
@@ -298,9 +306,28 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   expect(fullScreenBox).not.toBeNull();
   expect(viewport).not.toBeNull();
   expect(fullScreenBox!.x).toBeGreaterThan(0);
-  expect(fullScreenBox!.y).toBeGreaterThan(0);
+  expect(fullScreenBox!.y).toBeGreaterThanOrEqual(31);
   expect(Math.round(fullScreenBox!.width)).toBeLessThan(viewport!.width);
   expect(Math.round(fullScreenBox!.height)).toBeLessThan(viewport!.height);
+  const scrollBehavior = await fullScreenPreview.evaluate((panel) => {
+    const spacer = document.createElement("div");
+    spacer.style.height = "2000px";
+    spacer.style.flex = "0 0 2000px";
+    panel.append(spacer);
+    panel.scrollTop = 300;
+    const result = {
+      overflowY: getComputedStyle(panel).overflowY,
+      scrollable: panel.scrollHeight > panel.clientHeight,
+      scrolled: panel.scrollTop > 0,
+    };
+    spacer.remove();
+    return result;
+  });
+  expect(scrollBehavior).toEqual({
+    overflowY: "auto",
+    scrollable: true,
+    scrolled: true,
+  });
   const backdropStyles = await page
     .locator(".preview-modal-backdrop")
     .evaluate((element) => ({

@@ -289,6 +289,17 @@ describe("secure file previews", () => {
       "src",
       "/api/v1/shares/docs/preview/image?path=photo.png",
     );
+    const imageLink = screen.getByRole("link", {
+      name: "Open photo.png in a new tab",
+    });
+    expect(imageLink).toHaveAttribute(
+      "href",
+      "/api/v1/shares/docs/preview/image?path=photo.png",
+    );
+    expect(imageLink).toHaveAttribute("target", "_blank");
+    expect(imageLink).toHaveAttribute("rel", "noopener noreferrer");
+    expect(imageLink).toHaveAttribute("draggable", "false");
+    expect(image).toHaveAttribute("draggable", "false");
     expect(screen.getByText(/800 × 600/)).toBeVisible();
     expect(
       screen.queryByRole("button", { name: "Reset zoom" }),
