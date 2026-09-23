@@ -138,25 +138,25 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ env.RELEASE_TAG }}
         run: |
-          binary="target/${TARGET}/release/index"
+          binary="target/${TARGET}/release/crabinet"
           if ldd "${binary}" 2>&1 | grep -vqiE 'not a dynamic executable|statically linked'; then
             echo "Release executable is dynamically linked" >&2
             ldd "${binary}" || true
             exit 1
           fi
-          package="release/index-linux-${ARCH}"
+          package="release/crabinet-linux-${ARCH}"
           mkdir -p "${package}"
-          install -m 0555 "${binary}" "${package}/index"
+          install -m 0555 "${binary}" "${package}/crabinet"
           install -m 0444 README.md LICENSE config.example.toml "${package}/"
-          "${package}/index" print-config-schema > "${package}/config.schema.json"
-          "${package}/index" --help >/dev/null
-          tar -C release -czf "release/index-${VERSION}-linux-${ARCH}.tar.gz" "index-linux-${ARCH}"
+          "${package}/crabinet" print-config-schema > "${package}/config.schema.json"
+          "${package}/crabinet" --help >/dev/null
+          tar -C release -czf "release/crabinet-${VERSION}-linux-${ARCH}.tar.gz" "crabinet-linux-${ARCH}"
       - name: Generate package SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          path: release/index-linux-${{ matrix.arch }}
+          path: release/crabinet-linux-${{ matrix.arch }}
           format: spdx-json
-          output-file: release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.spdx.json
+          output-file: release/crabinet-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.spdx.json
           syft-version: ${{ env.SYFT_VERSION }}
           upload-artifact: false
           upload-release-assets: false
@@ -166,21 +166,21 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           sha256sum \
-            "index-${RELEASE_TAG}-linux-${ARCH}.tar.gz" \
-            "index-${RELEASE_TAG}-linux-${ARCH}.spdx.json" \
+            "crabinet-${RELEASE_TAG}-linux-${ARCH}.tar.gz" \
+            "crabinet-${RELEASE_TAG}-linux-${ARCH}.spdx.json" \
             > "SHA256SUMS-${ARCH}"
       - name: Attest binary archive
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
+          subject-path: release/crabinet-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
       - name: Upload release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.arch }}
           path: |
-            release/index-linux-${{ matrix.arch }}
-            release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
-            release/index-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.spdx.json
+            release/crabinet-linux-${{ matrix.arch }}
+            release/crabinet-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.tar.gz
+            release/crabinet-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}.spdx.json
             release/SHA256SUMS-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 1
@@ -219,15 +219,15 @@ jobs:
           file: Containerfile
           platforms: linux/${{ matrix.arch }}
           build-args: VERSION=${{ env.RELEASE_TAG }}
-          outputs: type=oci,dest=image-output/index-${{ matrix.arch }}.tar
+          outputs: type=oci,dest=image-output/crabinet-${{ matrix.arch }}.tar
           provenance: mode=max
           sbom: true
       - name: Extract OCI layout for scanning
         env:
           ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p "image-output/index-${ARCH}"
-          tar -xf "image-output/index-${ARCH}.tar" -C "image-output/index-${ARCH}"
+          mkdir -p "image-output/crabinet-${ARCH}"
+          tar -xf "image-output/crabinet-${ARCH}.tar" -C "image-output/crabinet-${ARCH}"
       - name: Scan exact OCI archive
         id: scan
         continue-on-error: true
@@ -235,7 +235,7 @@ jobs:
         with:
           version: ${{ env.TRIVY_VERSION }}
           scan-type: image
-          input: image-output/index-${{ matrix.arch }}
+          input: image-output/crabinet-${{ matrix.arch }}
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
@@ -255,7 +255,7 @@ jobs:
       - name: Generate image SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          file: image-output/index-${{ matrix.arch }}.tar
+          file: image-output/crabinet-${{ matrix.arch }}.tar
           format: spdx-json
           output-file: image-output/image-${{ env.RELEASE_TAG }}-${{ matrix.arch }}.spdx.json
           syft-version: ${{ env.SYFT_VERSION }}
@@ -322,7 +322,7 @@ jobs:
               --override-os linux \
               --override-arch "${arch}" \
               --dest-creds "${GITHUB_ACTOR}:${GH_TOKEN}" \
-              "oci-archive:images/index-${arch}.tar" \
+              "oci-archive:images/crabinet-${arch}.tar" \
               "docker://${IMAGE}:${RELEASE_TAG}-${arch}"
           done
           tags=("${IMAGE}:${RELEASE_TAG}")
@@ -362,10 +362,10 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --generate-notes \
-            --title "Index ${RELEASE_TAG}" \
+            --title "Crabinet ${RELEASE_TAG}" \
             "${release_flags[@]}" \
-            publish/index-*.tar.gz \
-            publish/index-*.spdx.json \
+            publish/crabinet-*.tar.gz \
+            publish/crabinet-*.spdx.json \
             images/image-*.spdx.json \
             publish/SHA256SUMS \
             publish/IMAGE-DIGESTS

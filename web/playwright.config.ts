@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
-const port = Number.parseInt(process.env.INDEX_E2E_PORT ?? "4173", 10);
-const baseURL = process.env.INDEX_E2E_BASE_URL ?? `http://localhost:${port}`;
+const port = Number.parseInt(process.env.CRABINET_E2E_PORT ?? "4173", 10);
+const baseURL = process.env.CRABINET_E2E_BASE_URL ?? `http://localhost:${port}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -26,11 +26,11 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "retain-on-failure",
   },
-  webServer: process.env.INDEX_E2E_BASE_URL
+  webServer: process.env.CRABINET_E2E_BASE_URL
     ? undefined
     : {
         command: "sh ./e2e/run-server.sh",
-        env: { INDEX_E2E_PORT: String(port) },
+        env: { CRABINET_E2E_PORT: String(port) },
         url: `${baseURL}/health/ready`,
         reuseExistingServer: false,
         timeout: 120_000,

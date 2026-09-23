@@ -376,7 +376,7 @@ describe("API client", () => {
       const path =
         body?.destination ??
         body?.path ??
-        new URL(url, "https://index.test").searchParams.get("path")!;
+        new URL(url, "https://crabinet.test").searchParams.get("path")!;
       return Response.json({ shareId: "work", path, outcome: "success" });
     });
     const api = createApiClient({ fetch });

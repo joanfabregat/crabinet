@@ -17,7 +17,7 @@ import { CopyPathButton } from "./copy-path-button";
 import { directoryUrl, type BrowserNavigation } from "./navigation";
 import { isValidVirtualPath } from "./virtual-path";
 
-const dragType = "application/x-index-entry";
+const dragType = "application/x-crabinet-entry";
 
 interface DraggedEntry {
   shareId: string;

@@ -1,6 +1,6 @@
 # Security policy
 
-Security is a primary design constraint for Index. This policy covers the application, release artifacts, container image, build workflows, and documentation in this repository.
+Security is a primary design constraint for Crabinet. This policy covers the application, release artifacts, container image, build workflows, and documentation in this repository.
 
 ## Supported versions
 
@@ -14,7 +14,7 @@ Before 1.0, only the latest published release and the current `main` branch rece
 
 ## Private reporting
 
-Use [GitHub private vulnerability reporting](https://github.com/joanfabregat/index/security/advisories/new) for suspected vulnerabilities. Include the affected version or commit, deployment assumptions, reproduction steps, impact, and any suggested mitigation. Use placeholder credentials and synthetic files whenever possible.
+Use [GitHub private vulnerability reporting](https://github.com/joanfabregat/crabinet/security/advisories/new) for suspected vulnerabilities. Include the affected version or commit, deployment assumptions, reproduction steps, impact, and any suggested mitigation. Use placeholder credentials and synthetic files whenever possible.
 
 Do not open a public issue, discussion, or pull request for an unpatched vulnerability. Never paste active passwords, session cookies, CSRF tokens, session-secret contents, private share data, signing material, or infrastructure credentials into a report. If a real credential was exposed, revoke or rotate it immediately and report only that rotation occurred.
 
@@ -28,8 +28,8 @@ Security releases may invalidate sessions, restrict previously accepted configur
 
 ## Deployment boundary
 
-Index assumes a trusted Linux host, trusted immutable configuration, correctly permissioned mounts, a private backend connection, and an HTTPS reverse proxy that preserves `Host`. The process is not a sandbox for malicious native filesystem content. Operators remain responsible for host access control, TLS, backups, malware scanning if required, proxy rate limits, and ensuring only one Index process writes a share.
+Crabinet assumes a trusted Linux host, trusted immutable configuration, correctly permissioned mounts, a private backend connection, and an HTTPS reverse proxy that preserves `Host`. The process is not a sandbox for malicious native filesystem content. Operators remain responsible for host access control, TLS, backups, malware scanning if required, proxy rate limits, and ensuring only one Crabinet process writes a share.
 
-The [threat model](docs/threat-model.md) and [filesystem security notes](docs/filesystem-security.md) define the intended boundary. Reports that demonstrate a violation of those documented invariants are in scope. Vulnerabilities in a supported direct dependency or pinned CI action that materially affect Index are also in scope.
+The [threat model](docs/threat-model.md) and [filesystem security notes](docs/filesystem-security.md) define the intended boundary. Reports that demonstrate a violation of those documented invariants are in scope. Vulnerabilities in a supported direct dependency or pinned CI action that materially affect Crabinet are also in scope.
 
 Load testing that harms shared infrastructure, social engineering, denial of service against public services, and accessing data that is not yours are prohibited. Reproduce locally against synthetic data.

@@ -36,7 +36,7 @@ An anonymous or expired session returns `401`. `csrfToken` is held in memory and
 ```json
 {
   "shareId": "docs",
-  "path": "projects/index",
+  "path": "projects/crabinet",
   "entries": [
     { "name": "src", "kind": "directory", "modifiedAt": "2026-09-16T18:30:00Z" },
     { "name": "README.md", "kind": "file", "size": 2048, "modifiedAt": "2026-09-16T18:30:00Z" }

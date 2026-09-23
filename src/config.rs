@@ -22,10 +22,10 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
-    #[error("invalid TOML in configuration file{location}; consult `index print-config-schema`")]
+    #[error("invalid TOML in configuration file{location}; consult `crabinet print-config-schema`")]
     TomlSyntax { location: String },
     #[error(
-        "configuration does not match the version 1 schema{location}; consult `index print-config-schema`"
+        "configuration does not match the version 1 schema{location}; consult `crabinet print-config-schema`"
     )]
     Schema { location: String },
     #[error("unsupported configuration version {0}; this binary supports only version 1")]
@@ -92,7 +92,7 @@ struct RawServerConfig {
 struct RawUser {
     #[schemars(length(min = 1, max = 64))]
     username: String,
-    /// An Argon2id PHC string produced by `index hash-password`.
+    /// An Argon2id PHC string produced by `crabinet hash-password`.
     password_hash: String,
     /// Disabled users cannot log in and their existing sessions are rejected.
     #[serde(default)]
@@ -829,7 +829,7 @@ mod tests {
                 r#"version = 1
 [server]
 listen = "127.0.0.1:8080"
-database_path = "index.sqlite3"
+database_path = "crabinet.sqlite3"
 session_secret_file = "session.key"
 max_upload_size = "10 MiB"
 max_preview_size = "1 MiB"

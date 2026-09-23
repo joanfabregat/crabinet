@@ -39,7 +39,7 @@ permission = "read"
 #[test]
 fn check_config_accepts_global_config_after_subcommand() {
     let (_temp, path) = write_config(1, "127.0.0.1:8080");
-    let output = Command::new(env!("CARGO_BIN_EXE_index"))
+    let output = Command::new(env!("CARGO_BIN_EXE_crabinet"))
         .args(["check-config", "--config"])
         .arg(path)
         .output()
@@ -55,8 +55,8 @@ fn check_config_accepts_global_config_after_subcommand() {
 #[test]
 fn command_line_config_takes_precedence_over_environment() {
     let (_temp, path) = write_config(1, "127.0.0.1:8080");
-    let output = Command::new(env!("CARGO_BIN_EXE_index"))
-        .env("INDEX_CONFIG", "/definitely/absent.toml")
+    let output = Command::new(env!("CARGO_BIN_EXE_crabinet"))
+        .env("CRABINET_CONFIG", "/definitely/absent.toml")
         .args(["check-config", "--config"])
         .arg(path)
         .output()
@@ -70,8 +70,8 @@ fn command_line_config_takes_precedence_over_environment() {
 
 #[test]
 fn schema_command_does_not_require_a_configuration_file() {
-    let output = Command::new(env!("CARGO_BIN_EXE_index"))
-        .env_remove("INDEX_CONFIG")
+    let output = Command::new(env!("CARGO_BIN_EXE_crabinet"))
+        .env_remove("CRABINET_CONFIG")
         .arg("print-config-schema")
         .output()
         .unwrap();
@@ -85,7 +85,7 @@ fn invalid_config_is_rejected_before_the_listener_is_opened() {
     let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reserved.local_addr().unwrap().to_string();
     let (_temp, path) = write_config(2, &address);
-    let output = Command::new(env!("CARGO_BIN_EXE_index"))
+    let output = Command::new(env!("CARGO_BIN_EXE_crabinet"))
         .arg("--config")
         .arg(path)
         .output()

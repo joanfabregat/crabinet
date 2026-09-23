@@ -23,17 +23,22 @@ function gitRevision(gitDirectory: string | undefined): string | null {
 }
 
 export default defineConfig(({ command }) => {
-  const backendTarget = process.env.INDEX_DEV_BACKEND_URL;
-  const publicHost = process.env.INDEX_DEV_PUBLIC_HOST;
+  const backendTarget =
+    process.env.CRABINET_DEV_BACKEND_URL ?? process.env.INDEX_DEV_BACKEND_URL;
+  const publicHost =
+    process.env.CRABINET_DEV_PUBLIC_HOST ?? process.env.INDEX_DEV_PUBLIC_HOST;
   const routedDevelopment = command === "serve" && backendTarget && publicHost;
-  const revision = gitRevision(process.env.INDEX_DEV_GIT_DIR);
+  const revision = gitRevision(
+    process.env.CRABINET_DEV_GIT_DIR ?? process.env.INDEX_DEV_GIT_DIR,
+  );
 
   return {
     plugins: [preact()],
     define: {
-      __INDEX_DEV_REVISION__: JSON.stringify(revision),
+      __CRABINET_DEV_REVISION__: JSON.stringify(revision),
     },
-    cacheDir: process.env.INDEX_VITE_CACHE_DIR,
+    cacheDir:
+      process.env.CRABINET_VITE_CACHE_DIR ?? process.env.INDEX_VITE_CACHE_DIR,
     server: routedDevelopment
       ? {
           host: "0.0.0.0",

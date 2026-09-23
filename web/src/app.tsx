@@ -54,7 +54,7 @@ import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 
 const defaultApi = createApiClient();
-declare const __INDEX_DEV_REVISION__: string | null;
+declare const __CRABINET_DEV_REVISION__: string | null;
 
 type AuthState =
   | { status: "loading" }
@@ -152,11 +152,9 @@ export function App({
 function AppHeader({ children }: { children?: preact.ComponentChildren }) {
   return (
     <header class="app-header">
-      <a class="brand" href="/" aria-label="Index home">
-        <span class="brand-mark" aria-hidden="true">
-          I
-        </span>
-        <span>Index</span>
+      <a class="brand" href="/" aria-label="Crabinet home">
+        <img class="brand-mark" src="/crabinet.svg" alt="" />
+        <span>Crabinet</span>
       </a>
       {children}
     </header>
@@ -182,7 +180,7 @@ function SessionErrorScreen({ onRetry }: { onRetry: () => void }) {
       <AppHeader />
       <main class="centered-panel">
         <div class="empty-state" role="alert">
-          <h1>Index is unavailable</h1>
+          <h1>Crabinet is unavailable</h1>
           <p>Check your connection and try again.</p>
           <Button onClick={onRetry}>Try again</Button>
         </div>
@@ -231,7 +229,7 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
       <main class="login-layout">
         <section class="login-card" aria-labelledby="login-title">
           <p class="eyebrow">Private workspace</p>
-          <h1 id="login-title">Sign in to Index</h1>
+          <h1 id="login-title">Sign in to Crabinet</h1>
           <p class="muted">
             Browse the folders that have been shared with you.
           </p>
@@ -326,7 +324,7 @@ function AuthenticatedShell({
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
           Development preview · revision{" "}
-          {__INDEX_DEV_REVISION__ ?? "working tree"} · live HMR
+          {__CRABINET_DEV_REVISION__ ?? "working tree"} · live HMR
         </div>
       )}
       {logoutError && (

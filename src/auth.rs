@@ -36,7 +36,7 @@ use crate::{
 
 type HmacSha256 = Hmac<Sha256>;
 
-const SESSION_COOKIE: &str = "index_session";
+const SESSION_COOKIE: &str = "crabinet_session";
 const TOKEN_BYTES: usize = 32;
 const SESSION_SCHEMA_VERSION: i64 = 1;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
@@ -868,7 +868,7 @@ fn session_cookie_header(token: &str, max_age: i64) -> HeaderValue {
 
 fn clear_session_cookie() -> HeaderValue {
     HeaderValue::from_static(
-        "index_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict",
+        "crabinet_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict",
     )
 }
 
@@ -1818,7 +1818,7 @@ mod tests {
         headers.insert(
             header::COOKIE,
             HeaderValue::from_static(
-                "index_session=0000000000000000000000000000000000000000000000000000000000000000; index_session=1111111111111111111111111111111111111111111111111111111111111111",
+                "crabinet_session=0000000000000000000000000000000000000000000000000000000000000000; crabinet_session=1111111111111111111111111111111111111111111111111111111111111111",
             ),
         );
         assert_eq!(session_cookie(&headers), None);

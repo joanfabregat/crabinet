@@ -14,4 +14,4 @@ pub mod mutations;
 pub mod password;
 pub mod preview;
 
-pub const APP_NAME: &str = "index";
+pub const APP_NAME: &str = "crabinet";

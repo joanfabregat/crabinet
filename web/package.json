@@ -1,5 +1,5 @@
 {
-  "name": "@joanfabregat/index-web",
+  "name": "@joanfabregat/crabinet-web",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "screenshot:readme": "INDEX_UPDATE_README_SCREENSHOT=1 playwright test e2e/readme-screenshot.spec.ts --project=desktop-chromium",
+    "screenshot:readme": "CRABINET_UPDATE_README_SCREENSHOT=1 playwright test e2e/readme-screenshot.spec.ts --project=desktop-chromium",
     "typecheck": "tsc -b"
   },
   "dependencies": {

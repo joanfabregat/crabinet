@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for improving Index. Security-sensitive changes need evidence: a clear invariant, focused tests, and an explanation of failure behavior. Start with the [architecture decisions](docs/architecture-decisions.md), [threat model](docs/threat-model.md), [filesystem security design](docs/filesystem-security.md), and the current API notes under `docs/`.
+Thank you for improving Crabinet. Security-sensitive changes need evidence: a clear invariant, focused tests, and an explanation of failure behavior. Start with the [architecture decisions](docs/architecture-decisions.md), [threat model](docs/threat-model.md), [filesystem security design](docs/filesystem-security.md), and the current API notes under `docs/`.
 
 ## Repository layout
 
@@ -72,7 +72,7 @@ MIT-compatible distribution is enforced for direct/transitive Rust dependencies 
 
 ## Configuration and documentation
 
-Configuration is strict and versioned. New fields need safe defaults or an explicit format-version decision, validation at startup, redacted errors, an annotated example, documentation, invalid fixtures, and schema coverage. `config.schema.json` must remain semantically equal to `index print-config-schema`; Rust tests enforce this.
+Configuration is strict and versioned. New fields need safe defaults or an explicit format-version decision, validation at startup, redacted errors, an annotated example, documentation, invalid fixtures, and schema coverage. `config.schema.json` must remain semantically equal to `crabinet print-config-schema`; Rust tests enforce this.
 
 Examples must not contain real secrets or usable credentials. Commands should be copyable and specify whether they are development-only. Update the README and security documents when a change alters deployment assumptions, resource sizing, backup semantics, preview behavior, or a trust boundary.
 

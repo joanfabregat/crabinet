@@ -1,12 +1,12 @@
-# Index configuration format. This file is loaded once at process startup.
-# Restart Index after every change; configuration is never hot-reloaded.
+# Crabinet configuration format. This file is loaded once at process startup.
+# Restart Crabinet after every change; configuration is never hot-reloaded.
 version = 1
 
 [server]
 # An explicit IP address and port. Hostnames are intentionally not accepted.
 listen = "127.0.0.1:8080"
 # Relative paths are resolved against this configuration file's directory.
-database_path = "data/index.sqlite3"
+database_path = "data/crabinet.sqlite3"
 # Create this separately with at least 32 random bytes and restrict its permissions.
 session_secret_file = "secrets/session.key"
 # Sizes are positive integers with an explicit binary unit: B, KiB, MiB, or GiB.
@@ -23,7 +23,7 @@ login_attempts_per_minute = 5
 max_sessions_per_user = 16
 max_sessions_total = 4096
 
-# Generate a hash with `index hash-password`. Never put a clear-text password here.
+# Generate a hash with `crabinet hash-password`. Never put a clear-text password here.
 [[users]]
 username = "alice"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
@@ -36,7 +36,7 @@ disabled = true
 id = "documents"
 # Names are display-only and can be changed without breaking URLs.
 name = "Documents"
-path = "/srv/index/documents"
+path = "/srv/crabinet/documents"
 # This overrides write grants, which become read-only at runtime.
 read_only = false
 

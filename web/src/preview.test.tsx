@@ -113,7 +113,7 @@ describe("secure file previews", () => {
     const sourceRegion = await screen.findByLabelText("File source");
     expect(sourceRegion).toHaveTextContent(source);
     expect(sourceRegion).toHaveClass("source-code-wrap");
-    expect(document.querySelector("img")).toBeNull();
+    expect(document.querySelector("main img")).toBeNull();
     expect(document.querySelector("script")).toBeNull();
     expect(storageSpy).not.toHaveBeenCalled();
 
@@ -152,7 +152,9 @@ describe("secure file previews", () => {
     expect(screen.getByTestId("markdown-document")).toHaveTextContent(
       "top.location",
     );
-    expect(document.querySelector("script, img, form")).toBeNull();
+    expect(
+      document.querySelector("main script, main img, main form"),
+    ).toBeNull();
     expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
 
     fireEvent.keyDown(readable, { key: "ArrowRight" });
@@ -394,7 +396,7 @@ describe("secure file previews", () => {
 
     await waitFor(() =>
       expect(
-        screen.queryByRole("heading", { name: "Sign in to Index" }),
+        screen.queryByRole("heading", { name: "Sign in to Crabinet" }),
       ).not.toBeInTheDocument(),
     );
     expect(screen.getByText("new file")).toBeVisible();

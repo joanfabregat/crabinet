@@ -1,4 +1,4 @@
-# Welcome to Index
+# Welcome to Crabinet
 
 This deterministic fixture demonstrates the safe Markdown reader.
 

@@ -14,23 +14,25 @@ describe("browser navigation", () => {
     expect(href).toBe(
       "/browse/%C3%A9quipe%2Fa?path=Designs%2F%E6%9D%B1%E4%BA%AC+%F0%9F%9A%80",
     );
-    expect(routeFromUrl(new URL(href, "https://index.test"))).toEqual({
+    expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
       shareId: "équipe/a",
       path: "Designs/東京 🚀",
     });
   });
 
   it("falls back safely for unrelated or malformed routes", () => {
-    expect(routeFromUrl(new URL("https://index.test/api/v1/session"))).toEqual({
+    expect(
+      routeFromUrl(new URL("https://crabinet.test/api/v1/session")),
+    ).toEqual({
       shareId: null,
       path: "",
     });
-    expect(routeFromUrl(new URL("https://index.test/browse/%E0%A4%A"))).toEqual(
-      {
-        shareId: null,
-        path: "",
-      },
-    );
+    expect(
+      routeFromUrl(new URL("https://crabinet.test/browse/%E0%A4%A")),
+    ).toEqual({
+      shareId: null,
+      path: "",
+    });
   });
 
   it.each([
@@ -46,7 +48,7 @@ describe("browser navigation", () => {
     "trailing ",
     "Cafe\u0301",
   ])("falls back to the share root for ambiguous deep-link path %j", (path) => {
-    const url = new URL("https://index.test/browse/docs");
+    const url = new URL("https://crabinet.test/browse/docs");
     url.searchParams.set("path", path);
     expect(routeFromUrl(url)).toEqual({ shareId: "docs", path: "" });
     expect(directoryUrl("docs", path)).toBe("/browse/docs");
@@ -63,7 +65,7 @@ describe("browser navigation", () => {
     expect(href).toBe(
       "/browse/docs?path=projects&preview=projects%2FREADME.md",
     );
-    expect(routeFromUrl(new URL(href, "https://index.test"))).toEqual({
+    expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
       shareId: "docs",
       path: "projects",
       previewPath: "projects/README.md",
@@ -75,7 +77,7 @@ describe("browser navigation", () => {
     expect(href).toBe(
       "/browse/docs?path=projects&preview=projects%2Fapp.rs&view=full",
     );
-    expect(routeFromUrl(new URL(href, "https://index.test"))).toEqual({
+    expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
       shareId: "docs",
       path: "projects",
       previewPath: "projects/app.rs",
@@ -84,7 +86,7 @@ describe("browser navigation", () => {
   });
 
   it("ignores an ambiguous preview path while keeping the directory route", () => {
-    const url = new URL("https://index.test/browse/docs?path=projects");
+    const url = new URL("https://crabinet.test/browse/docs?path=projects");
     url.searchParams.set("preview", "../secret");
     expect(routeFromUrl(url)).toEqual({ shareId: "docs", path: "projects" });
     expect(previewRouteUrl("docs", "projects", "../secret")).toBe(

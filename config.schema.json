@@ -144,7 +144,7 @@
           "default": false
         },
         "password_hash": {
-          "description": "An Argon2id PHC string produced by `index hash-password`.",
+          "description": "An Argon2id PHC string produced by `crabinet hash-password`.",
           "type": "string"
         },
         "username": { "type": "string", "maxLength": 64, "minLength": 1 }

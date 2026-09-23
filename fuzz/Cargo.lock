@@ -620,7 +620,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "index"
+name = "crabinet"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -653,10 +653,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "index-fuzz"
+name = "crabinet-fuzz"
 version = "0.0.0"
 dependencies = [
- "index",
+ "crabinet",
  "libfuzzer-sys",
 ]
 

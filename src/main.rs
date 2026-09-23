@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use index::{
+use crabinet::{
     app::{AppState, router},
     auth::AuthService,
     browse::{BrowseLimits, BrowseState, ConfiguredShare},
@@ -17,13 +17,13 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = index::APP_NAME, version, about)]
+#[command(name = crabinet::APP_NAME, version, about)]
 struct Cli {
-    /// Immutable TOML configuration file. INDEX_CONFIG is the only environment override.
+    /// Immutable TOML configuration file. CRABINET_CONFIG is the only environment override.
     #[arg(
         long,
         global = true,
-        env = "INDEX_CONFIG",
+        env = "CRABINET_CONFIG",
         default_value = "config.toml"
     )]
     config: PathBuf,
@@ -43,7 +43,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "index=info".into()))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "crabinet=info".into()))
         .json()
         .init();
 

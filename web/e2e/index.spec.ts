@@ -9,7 +9,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Sign in to Index" }),
+    page.getByRole("heading", { name: "Sign in to Crabinet" }),
   ).toBeVisible();
 
   await page.getByLabel("Username").fill("reader");
@@ -31,7 +31,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 
   const cookies = await context.cookies();
   const sessionCookie = cookies.find(
-    (cookie) => cookie.name === "index_session",
+    (cookie) => cookie.name === "crabinet_session",
   );
   expect(sessionCookie).toMatchObject({
     httpOnly: true,
@@ -73,10 +73,12 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(
-    page.getByRole("heading", { name: "Sign in to Index" }),
+    page.getByRole("heading", { name: "Sign in to Crabinet" }),
   ).toBeVisible();
   expect(
-    (await context.cookies()).some((cookie) => cookie.name === "index_session"),
+    (await context.cookies()).some(
+      (cookie) => cookie.name === "crabinet_session",
+    ),
   ).toBe(false);
 });
 
@@ -273,7 +275,7 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
 }) => {
   await page.goto("/");
 
-  const homeLink = page.getByRole("link", { name: "Index home" });
+  const homeLink = page.getByRole("link", { name: "Crabinet home" });
   await homeLink.focus();
   await expect(homeLink).toBeFocused();
   await page.keyboard.press("Tab");
@@ -377,11 +379,13 @@ test("connection failure can recover and an expired session returns to login", a
     });
   });
   await page.goto("/");
-  await expect(page.getByRole("alert")).toContainText("Index is unavailable");
+  await expect(page.getByRole("alert")).toContainText(
+    "Crabinet is unavailable",
+  );
   await page.unroute("**/api/v1/session");
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(
-    page.getByRole("heading", { name: "Sign in to Index" }),
+    page.getByRole("heading", { name: "Sign in to Crabinet" }),
   ).toBeVisible();
 
   await signIn(page, "reader");

@@ -80,14 +80,9 @@ a {
 }
 
 .brand-mark {
-  align-items: center;
-  background: var(--accent);
   border-radius: 0.65rem;
-  color: white;
-  display: inline-flex;
-  font-family: Georgia, serif;
+  display: block;
   height: 2.25rem;
-  justify-content: center;
   width: 2.25rem;
 }
 

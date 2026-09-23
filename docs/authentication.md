@@ -1,10 +1,10 @@
 # Authentication and sessions
 
-Index authenticates configuration-defined users with Argon2id v19 and keeps opaque sessions in SQLite. Clear-text passwords, PHC strings, raw session identifiers, and CSRF tokens are never logged or stored in the database.
+Crabinet authenticates configuration-defined users with Argon2id v19 and keeps opaque sessions in SQLite. Clear-text passwords, PHC strings, raw session identifiers, and CSRF tokens are never logged or stored in the database.
 
 ## Password verification and memory
 
-`index hash-password` generates `m=65536,t=3,p=1` hashes: one verifier allocates about 64 MiB. Configuration validation accepts a deliberately bounded range (`m=19456..262144`, `t=2..10`, `p=1..16`) and rejects unknown algorithms, malformed hashes, missing salt/output, and parameters outside it. An unknown or disabled username performs verification against a fixed Argon2id hash before returning the same `401` body used for an incorrect password.
+`crabinet hash-password` generates `m=65536,t=3,p=1` hashes: one verifier allocates about 64 MiB. Configuration validation accepts a deliberately bounded range (`m=19456..262144`, `t=2..10`, `p=1..16`) and rejects unknown algorithms, malformed hashes, missing salt/output, and parameters outside it. An unknown or disabled username performs verification against a fixed Argon2id hash before returning the same `401` body used for an incorrect password.
 
 `server.auth_max_concurrent` is a semaphore limit, not a throughput target. Keep the default of one in memory-constrained pods. The upper memory bound attributable to password verification is approximately `auth_max_concurrent × largest configured m`, plus allocator and process overhead. Benchmark the statically linked release artifact under the pod's actual memory limit before increasing the value.
 
@@ -28,7 +28,7 @@ The login limiter keys attempts by a fixed-size SHA-256 digest of the trimmed, A
 - Every authenticated request checks the user against the immutable in-memory configuration. Removed or disabled users therefore lose access after restart even if SQLite still contains a row.
 - The CSRF token is a domain-separated keyed digest of the raw session identifier. It is bound to that session, returned by the session APIs, and never placed in browser storage by the frontend.
 
-On Unix, Index creates a missing SQLite database as mode `0600`. It does not change permissions on a pre-existing operator-managed database; deployments should provision that file with an appropriately restrictive owner and mode.
+On Unix, Crabinet creates a missing SQLite database as mode `0600`. It does not change permissions on a pre-existing operator-managed database; deployments should provision that file with an appropriately restrictive owner and mode.
 
 ## State-changing requests
 

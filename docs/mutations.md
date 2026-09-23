@@ -25,7 +25,7 @@ No destination is visible until its complete staged file has been flushed and sy
 
 Atomic rename requires staging and destination directories to be on the same filesystem. A writable share's staging directory is therefore inside its root. Writes into a nested mount on a different device are rejected with the stable `cross_device` audit reason rather than copied or published non-atomically.
 
-A writable share must be owned by one Index process or pod at a time. Multiple replicas pointing at the same writable directory are not supported because each process owns the private staging namespace and its recovery. Read-only shares create no staging directory and may use separate read-only replicas.
+A writable share must be owned by one Crabinet process or pod at a time. Multiple replicas pointing at the same writable directory are not supported because each process owns the private staging namespace and its recovery. Read-only shares create no staging directory and may use separate read-only replicas.
 
 Multipart files are all staged before publication, so a parsing or request-limit failure publishes none of them. Publication is intentionally not a multi-file transaction: the `207` response reports `created`, `replaced`, `conflict`, `quota_exceeded`, or `error` for each file. A later file failing does not roll back earlier successful files.
 

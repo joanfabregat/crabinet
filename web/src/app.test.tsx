@@ -171,7 +171,7 @@ describe("authentication", () => {
 
     rejectSession!(new ApiError("unauthorized", "anonymous", { status: 401 }));
     expect(
-      await screen.findByRole("heading", { name: "Sign in to Index" }),
+      await screen.findByRole("heading", { name: "Sign in to Crabinet" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Username")).toHaveAttribute(
       "autocomplete",
@@ -198,7 +198,7 @@ describe("authentication", () => {
     const storageSpy = vi.spyOn(Storage.prototype, "setItem");
 
     render(<App api={api} navigation={new MemoryNavigation()} />);
-    await screen.findByRole("heading", { name: "Sign in to Index" });
+    await screen.findByRole("heading", { name: "Sign in to Crabinet" });
     fireEvent.input(screen.getByLabelText("Username"), {
       target: { value: "joan" },
     });
@@ -232,7 +232,7 @@ describe("authentication", () => {
     });
 
     render(<App api={api} navigation={new MemoryNavigation()} />);
-    await screen.findByRole("heading", { name: "Sign in to Index" });
+    await screen.findByRole("heading", { name: "Sign in to Crabinet" });
     fireEvent.input(screen.getByLabelText("Username"), {
       target: { value: "joan" },
     });
@@ -245,7 +245,7 @@ describe("authentication", () => {
 
     expect(await screen.findByLabelText("Read only")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-    await screen.findByRole("heading", { name: "Sign in to Index" });
+    await screen.findByRole("heading", { name: "Sign in to Crabinet" });
     expect(logout).toHaveBeenCalledWith("csrf-in-memory");
   });
 
@@ -266,7 +266,7 @@ describe("authentication", () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByRole("heading", { name: "Sign in to Index" }),
+      screen.getByRole("heading", { name: "Sign in to Crabinet" }),
     ).toBeInTheDocument();
   });
 
@@ -286,13 +286,13 @@ describe("authentication", () => {
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Index is unavailable",
+      "Crabinet is unavailable",
     );
     expect(
       screen.queryByText(/internal connection detail/i),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Sign in to Index" }),
+      screen.queryByRole("heading", { name: "Sign in to Crabinet" }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByLabelText("Read only")).toBeVisible();
@@ -337,7 +337,7 @@ describe("directory browser", () => {
       await screen.findByRole("link", { name: "Grüße 東京 🚀" }),
     ).toBeVisible();
     expect(screen.getByText("<img src=x onerror=alert(1)>.txt")).toBeVisible();
-    expect(document.querySelector("img")).toBeNull();
+    expect(document.querySelector("main img")).toBeNull();
     expect(screen.getByLabelText("Read only")).toHaveTextContent("R");
     expect(screen.getByLabelText("Read and write")).toHaveTextContent("RW");
 
@@ -403,7 +403,7 @@ describe("directory browser", () => {
   it("supports direct navigation, breadcrumbs, and restored history", async () => {
     const navigation = new MemoryNavigation({
       shareId: "work",
-      path: "projects/Index",
+      path: "projects/Crabinet",
     });
     const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
       shareId,
@@ -414,12 +414,12 @@ describe("directory browser", () => {
 
     render(<App api={fakeApi({ directory })} navigation={navigation} />);
     expect(
-      await screen.findByRole("heading", { name: "Index" }),
+      await screen.findByRole("heading", { name: "Crabinet" }),
     ).toBeInTheDocument();
     await waitFor(() =>
       expect(directory).toHaveBeenCalledWith(
         "work",
-        "projects/Index",
+        "projects/Crabinet",
         undefined,
         expect.any(AbortSignal),
       ),
@@ -429,11 +429,11 @@ describe("directory browser", () => {
     expect(await screen.findByText("restored.txt")).toBeVisible();
     expect(navigation.visits.at(-1)?.route.path).toBe("projects");
 
-    navigation.restore({ shareId: "work", path: "projects/Index" });
+    navigation.restore({ shareId: "work", path: "projects/Crabinet" });
     await waitFor(() =>
       expect(directory).toHaveBeenLastCalledWith(
         "work",
-        "projects/Index",
+        "projects/Crabinet",
         undefined,
         expect.any(AbortSignal),
       ),
@@ -955,7 +955,7 @@ describe("writable file operations", () => {
     await screen.findByRole("button", { name: "Upload files" });
     await screen.findByRole("link", { name: "notes.txt" });
     dispatchDrag("dragenter", {
-      types: ["application/x-index-entry"],
+      types: ["application/x-crabinet-entry"],
       files: [],
     });
     expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();

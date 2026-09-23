@@ -1,6 +1,6 @@
 use std::{fs, os::unix::fs::symlink, path::Path};
 
-use index::config::Config;
+use crabinet::config::Config;
 
 const HASH: &str = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";
 
@@ -78,7 +78,7 @@ fn annotated_example_loads_after_deployment_paths_are_prepared() {
     fs::create_dir(temp.path().join("secrets")).unwrap();
     fs::write(temp.path().join("secrets/session.key"), [3_u8; 32]).unwrap();
     let rendered = include_str!("../config.example.toml")
-        .replace("/srv/index/documents", root.to_str().unwrap());
+        .replace("/srv/crabinet/documents", root.to_str().unwrap());
     let path = temp.path().join("config.toml");
     fs::write(&path, rendered).unwrap();
     Config::load(path).unwrap();
