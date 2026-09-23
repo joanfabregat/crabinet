@@ -3,15 +3,15 @@
   <rect width="64" height="64" rx="15" fill="#175c41"/>
   <g fill="none" stroke="#ff9270" stroke-linecap="round" stroke-linejoin="round" stroke-width="4">
     <path d="M20 42 13 48m7-14-9-3m33 11 7 6m-7-14 9-3"/>
-    <path d="M25 26v-6m14 6v-6"/>
+    <path d="M25 28v-5m14 5v-5"/>
   </g>
   <g fill="#ff9270">
     <path d="M14 31c-5 0-8-4-8-8l5 2 4-5 3 7-4 4Zm36 0c5 0 8-4 8-8l-5 2-4-5-3 7 4 4Z"/>
     <path d="M17 34a8 8 0 0 1 8-8h5l3 4h6a8 8 0 0 1 8 8v5a12 12 0 0 1-12 12h-6a12 12 0 0 1-12-12v-9Z"/>
   </g>
   <g fill="#fffaf3">
-    <circle cx="25" cy="20" r="3"/>
-    <circle cx="39" cy="20" r="3"/>
+    <circle cx="25" cy="23" r="3"/>
+    <circle cx="39" cy="23" r="3"/>
   </g>
   <path d="M24 37h16" stroke="#175c41" stroke-linecap="round" stroke-width="3"/>
 </svg>

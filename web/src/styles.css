@@ -417,6 +417,10 @@ select {
   padding: 0.35rem 0.5rem 0.35rem 2rem;
 }
 
+.tree-empty {
+  padding-left: calc(2rem + var(--tree-level) * 0.85rem);
+}
+
 .tree-status button {
   color: var(--accent);
   text-decoration: underline;

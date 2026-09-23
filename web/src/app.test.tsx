@@ -300,6 +300,34 @@ describe("authentication", () => {
 });
 
 describe("directory browser", () => {
+  it("opens sidebar folders and explains when there are no subfolders", async () => {
+    const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      entries:
+        path === ""
+          ? [{ name: "Photos", kind: "directory" }]
+          : [{ name: "portrait.jpg", kind: "file" }],
+    }));
+    const navigation = new MemoryNavigation();
+    render(<App api={fakeApi({ directory })} navigation={navigation} />);
+
+    const sidebar = within(
+      await screen.findByRole("complementary", { name: "Shared folders" }),
+    );
+    fireEvent.click(sidebar.getByRole("link", { name: "Reference" }));
+    const photos = await sidebar.findByRole("link", { name: "Photos" });
+    fireEvent.click(photos);
+
+    expect(navigation.visits.at(-1)?.route).toEqual({
+      shareId: "read-only",
+      path: "Photos",
+    });
+    expect(photos).toHaveAttribute("aria-current", "page");
+    expect(await sidebar.findByText("No subfolders")).toBeVisible();
+    expect(directory).toHaveBeenCalledWith("read-only", "Photos", undefined);
+  });
+
   it("uses labelled landmarks and keyboard-native controls", async () => {
     render(<App api={fakeApi()} navigation={new MemoryNavigation()} />);
 

@@ -181,6 +181,13 @@ export function ShareTree({
     });
   };
 
+  const expand = (shareId: string, path: string) => {
+    const nodeKey = key(shareId, path);
+    setExpanded((current) =>
+      current.has(nodeKey) ? current : new Set(current).add(nodeKey),
+    );
+  };
+
   const drop = (
     event: DragEvent,
     destinationShare: Share,
@@ -235,6 +242,7 @@ export function ShareTree({
               activePath={activePath}
               navigation={navigation}
               onToggle={toggle}
+              onExpand={expand}
               onLoadMore={load}
               onDrop={drop}
             />
@@ -256,6 +264,7 @@ interface TreeNodeProps {
   activePath: string;
   navigation: BrowserNavigation;
   onToggle: (shareId: string, path: string) => void;
+  onExpand: (shareId: string, path: string) => void;
   onLoadMore: (shareId: string, path: string, cursor?: string) => Promise<void>;
   onDrop: (event: DragEvent, share: Share, path: string) => void;
 }
@@ -272,6 +281,7 @@ function TreeNode(props: TreeNodeProps) {
     activePath,
     navigation,
     onToggle,
+    onExpand,
     onLoadMore,
     onDrop,
   } = props;
@@ -313,6 +323,7 @@ function TreeNode(props: TreeNodeProps) {
           aria-current={selected ? "page" : undefined}
           onClick={(event) => {
             event.preventDefault();
+            onExpand(share.id, path);
             navigation.go({ shareId: share.id, path });
           }}
         >
@@ -373,6 +384,18 @@ function TreeNode(props: TreeNodeProps) {
               </button>
             </li>
           )}
+          {nodeState?.page &&
+            !nodeState.loading &&
+            !nodeState.error &&
+            !nodeState.page.nextCursor &&
+            childDirectories.length === 0 && (
+              <li
+                class="tree-status tree-empty"
+                style={{ "--tree-level": level }}
+              >
+                No subfolders
+              </li>
+            )}
         </ul>
       )}
     </li>
