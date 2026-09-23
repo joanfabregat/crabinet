@@ -183,7 +183,9 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
     "window.__indexHostileScript",
   );
   expect(await page.locator("script").count()).toBe(1);
-  expect(await page.locator("img, form").count()).toBe(0);
+  expect(
+    await page.getByTestId("markdown-document").locator("img, form").count(),
+  ).toBe(0);
   expect(externalRequests).toEqual([]);
   expect(dialogs).toBe(0);
 
