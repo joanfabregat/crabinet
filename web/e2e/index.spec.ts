@@ -103,16 +103,16 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
-  await page
-    .getByLabel("Shared folders", { exact: true })
-    .getByRole("link", { name: "Reference library" })
-    .click();
+  const sidebar = page.getByLabel("Shared folders", { exact: true });
+  await sidebar.getByRole("link", { name: "Reference library" }).click();
   await expect(page).toHaveURL(/\/browse\/read-only$/);
   await expect(page.getByLabel("Read only")).toHaveText("R");
-  await expect(page.getByRole("link", { name: "nested" })).toBeVisible();
+  const nested = sidebar.getByRole("link", { name: "nested" });
+  await expect(nested).toBeVisible();
 
-  await page.getByRole("link", { name: "nested" }).click();
+  await nested.click();
   await expect(page).toHaveURL(/path=nested/);
+  await expect(sidebar.getByText("No subfolders")).toBeVisible();
   await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
