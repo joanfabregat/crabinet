@@ -11,6 +11,7 @@ pub mod filesystem;
 #[doc(hidden)]
 pub mod fuzzing;
 pub mod mutations;
+pub mod oidc;
 pub mod password;
 pub mod preview;
 

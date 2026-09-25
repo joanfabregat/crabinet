@@ -15,10 +15,12 @@ max_sessions_total = 32
 
 [[users]]
 username = "reader"
+email = "reader@example.com"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$JS5QJkiyX+RuGn/gARkXpw$RW4nZLJO5e7NxpP2r7QvKpOyZsZQ/5VUbqspd7HCTvA"
 
 [[users]]
 username = "writer"
+email = "writer@example.com"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$JS5QJkiyX+RuGn/gARkXpw$RW4nZLJO5e7NxpP2r7QvKpOyZsZQ/5VUbqspd7HCTvA"
 
 [[shares]]

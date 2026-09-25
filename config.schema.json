@@ -3,11 +3,23 @@
   "title": "RawConfig",
   "type": "object",
   "properties": {
-    "server": { "$ref": "#/$defs/RawServerConfig" },
-    "shares": { "type": "array", "items": { "$ref": "#/$defs/RawShare" } },
+    "auth": {
+      "$ref": "#/$defs/RawAuthConfig"
+    },
+    "server": {
+      "$ref": "#/$defs/RawServerConfig"
+    },
+    "shares": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RawShare"
+      }
+    },
     "users": {
       "type": "array",
-      "items": { "$ref": "#/$defs/RawUser" },
+      "items": {
+        "$ref": "#/$defs/RawUser"
+      },
       "minItems": 1
     },
     "version": {
@@ -19,17 +31,83 @@
     }
   },
   "additionalProperties": false,
-  "required": ["version", "server"],
+  "required": [
+    "version",
+    "server"
+  ],
   "$defs": {
-    "Permission": { "type": "string", "enum": ["read", "write"] },
+    "Permission": {
+      "type": "string",
+      "enum": [
+        "read",
+        "write"
+      ]
+    },
+    "RawAuthConfig": {
+      "type": "object",
+      "properties": {
+        "oidc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawOidcConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oidc_enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "password_enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
     "RawGrant": {
       "type": "object",
       "properties": {
-        "permission": { "$ref": "#/$defs/Permission" },
-        "user": { "type": "string", "maxLength": 64, "minLength": 1 }
+        "permission": {
+          "$ref": "#/$defs/Permission"
+        },
+        "user": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        }
       },
       "additionalProperties": false,
-      "required": ["user", "permission"]
+      "required": [
+        "user",
+        "permission"
+      ]
+    },
+    "RawOidcConfig": {
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret_file": {
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "redirect_uri": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "issuer",
+        "client_id",
+        "client_secret_file",
+        "redirect_uri"
+      ]
     },
     "RawServerConfig": {
       "type": "object",
@@ -104,12 +182,23 @@
         }
       },
       "additionalProperties": false,
-      "required": ["listen", "database_path", "session_secret_file", "max_upload_size", "max_preview_size"]
+      "required": [
+        "listen",
+        "database_path",
+        "session_secret_file",
+        "max_upload_size",
+        "max_preview_size"
+      ]
     },
     "RawShare": {
       "type": "object",
       "properties": {
-        "grants": { "type": "array", "items": { "$ref": "#/$defs/RawGrant" } },
+        "grants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RawGrant"
+          }
+        },
         "id": {
           "description": "Stable identifier used in URLs and grants.",
           "type": "string",
@@ -133,7 +222,11 @@
         }
       },
       "additionalProperties": false,
-      "required": ["id", "name", "path"]
+      "required": [
+        "id",
+        "name",
+        "path"
+      ]
     },
     "RawUser": {
       "type": "object",
@@ -143,14 +236,30 @@
           "type": "boolean",
           "default": false
         },
+        "email": {
+          "description": "Email returned as a verified claim by the configured OIDC provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "password_hash": {
           "description": "An Argon2id PHC string produced by `crabinet hash-password`.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "username": { "type": "string", "maxLength": 64, "minLength": 1 }
+        "username": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        }
       },
       "additionalProperties": false,
-      "required": ["username", "password_hash"]
+      "required": [
+        "username"
+      ]
     }
   }
 }

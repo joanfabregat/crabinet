@@ -23,6 +23,7 @@ import {
   imagePreviewUrl,
   renderedHtmlPreviewUrl,
   type ApiClient,
+  type AuthMethods,
   type DirectoryEntry,
   type DirectoryPage,
   type EntryMetadata,
@@ -54,22 +55,25 @@ import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 
 const defaultApi = createApiClient();
+const defaultOidcRedirect = (url: string) => window.location.assign(url);
 declare const __CRABINET_DEV_REVISION__: string | null;
 
 type AuthState =
   | { status: "loading" }
   | { status: "error" }
-  | { status: "guest"; reason?: "expired" }
+  | { status: "guest"; reason?: "expired" | "signed_out" }
   | { status: "authenticated"; session: Session };
 
 export interface AppProps {
   api?: ApiClient;
   navigation?: BrowserNavigation;
+  onOidcRedirect?: (url: string) => void;
 }
 
 export function App({
   api = defaultApi,
   navigation = browserNavigation,
+  onOidcRedirect = defaultOidcRedirect,
 }: AppProps) {
   const [auth, setAuth] = useState<AuthState>({ status: "loading" });
   const [route, setRoute] = useState<BrowserRoute>(() => navigation.current());
@@ -78,7 +82,10 @@ export function App({
     () => setAuth({ status: "guest", reason: "expired" }),
     [],
   );
-  const handleSignedOut = useCallback(() => setAuth({ status: "guest" }), []);
+  const handleSignedOut = useCallback(
+    () => setAuth({ status: "guest", reason: "signed_out" }),
+    [],
+  );
 
   useEffect(() => navigation.subscribe(setRoute), [navigation]);
 
@@ -129,6 +136,7 @@ export function App({
     return (
       <LoginScreen
         api={api}
+        onOidcRedirect={onOidcRedirect}
         reason={auth.reason}
         onAuthenticated={(session) =>
           setAuth({ status: "authenticated", session })
@@ -191,13 +199,43 @@ function SessionErrorScreen({ onRetry }: { onRetry: () => void }) {
 
 interface LoginScreenProps {
   api: ApiClient;
-  reason?: "expired";
+  onOidcRedirect: (url: string) => void;
+  reason?: "expired" | "signed_out";
   onAuthenticated: (session: Session) => void;
 }
 
-function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
+function LoginScreen({
+  api,
+  onOidcRedirect,
+  reason,
+  onAuthenticated,
+}: LoginScreenProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
+  const [methods, setMethods] = useState<AuthMethods>();
+  const [methodsError, setMethodsError] = useState(false);
+  const oidcError = new URLSearchParams(window.location.search).get(
+    "oidc_error",
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api.authMethods(controller.signal).then(
+      (available) => {
+        setMethods(available);
+        if (
+          available.oidcEnabled &&
+          !available.passwordEnabled &&
+          !oidcError &&
+          reason !== "signed_out"
+        ) {
+          onOidcRedirect("/api/v1/auth/oidc/start");
+        }
+      },
+      () => setMethodsError(true),
+    );
+    return () => controller.abort();
+  }, [api, onOidcRedirect, oidcError, reason]);
 
   const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -238,31 +276,69 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
               Your session expired. Sign in again to continue.
             </Notice>
           )}
+          {reason === "signed_out" && (
+            <Notice tone="warning">You have signed out of Crabinet.</Notice>
+          )}
           {error && <Notice tone="danger">{error}</Notice>}
-          <form class="login-form" onSubmit={submit}>
-            <label for="username">Username</label>
-            <input
-              id="username"
-              name="username"
-              type="text"
-              autocomplete="username"
-              autocapitalize="none"
-              required
-              disabled={pending}
-            />
-            <label for="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              autocomplete="current-password"
-              required
-              disabled={pending}
-            />
-            <Button type="submit" busy={pending}>
-              {pending ? "Signing in…" : "Sign in"}
-            </Button>
-          </form>
+          {oidcError === "unrecognized" && (
+            <Notice tone="danger">
+              This identity is not authorized for Crabinet. Contact an
+              administrator if you need access.
+            </Notice>
+          )}
+          {oidcError === "provider_logout_unavailable" && (
+            <Notice tone="warning">
+              Crabinet ended this sign-in attempt, but the identity provider
+              does not offer sign-out here. Sign out at the provider before
+              trying another account.
+            </Notice>
+          )}
+          {oidcError === "unrecognized" && (
+            <a href="/api/v1/auth/oidc/disconnect">Disconnect</a>
+          )}
+          {methodsError && (
+            <Notice tone="danger">
+              Sign-in options could not be loaded. Refresh to try again.
+            </Notice>
+          )}
+          {methods?.oidcEnabled &&
+            (methods.passwordEnabled ||
+              oidcError ||
+              reason === "signed_out") && (
+              <a class="google-signin" href="/api/v1/auth/oidc/start">
+                <img src="/google-g.png" width="20" height="20" alt="" />
+                <span>Sign in with Google</span>
+              </a>
+            )}
+          {methods?.oidcEnabled && methods.passwordEnabled && (
+            <p class="login-divider">or sign in with a password</p>
+          )}
+          {methods?.passwordEnabled && (
+            <form class="login-form" onSubmit={submit}>
+              <label for="username">Email or username</label>
+              <input
+                id="username"
+                name="username"
+                type="text"
+                autocomplete="username"
+                autocapitalize="none"
+                required
+                disabled={pending}
+              />
+              <label for="password">Password</label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+                disabled={pending}
+              />
+              <Button type="submit" busy={pending}>
+                {pending ? "Signing in…" : "Sign in"}
+              </Button>
+            </form>
+          )}
         </section>
       </main>
     </div>

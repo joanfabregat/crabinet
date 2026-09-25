@@ -23,9 +23,24 @@ login_attempts_per_minute = 5
 max_sessions_per_user = 16
 max_sessions_total = 4096
 
+[auth]
+# Password sign-in remains enabled by default. Enable OIDC to show both methods.
+# Set password_enabled = false to send anonymous visitors directly to the provider.
+password_enabled = true
+oidc_enabled = false
+
+# When oidc_enabled = true, uncomment and configure this section. Register the
+# redirect_uri exactly with the provider and store the client secret outside shares.
+# [auth.oidc]
+# issuer = "https://identity.example.com"
+# client_id = "crabinet"
+# client_secret_file = "secrets/oidc-client-secret"
+# redirect_uri = "https://files.example.com/api/v1/auth/oidc/callback"
+
 # Generate a hash with `crabinet hash-password`. Never put a clear-text password here.
 [[users]]
 username = "alice"
+email = "alice@example.com"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
 # The example account is intentionally disabled. Replace the hash, then opt in by
 # changing this to false; disabled users cannot log in or reuse existing sessions.

@@ -19,12 +19,14 @@ cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 getrandom = "0.4.3"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hmac = "0.13.0"
 mime_guess = "2.0.5"
 rust-embed = { version = "8.12.0", features = ["include-exclude"] }
 rustix = { version = "1.1.5", features = ["fs"] }
 rpassword = "7.5.4"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 schemars = { version = "1.2.2", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -39,8 +41,10 @@ toml = "1.1.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 unicode-normalization = "0.1.25"
+url = "2.5.8"
 
 [dev-dependencies]
+aws-lc-rs = "1.18.1"
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 

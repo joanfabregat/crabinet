@@ -26,6 +26,11 @@ export interface LoginCredentials {
   password: string;
 }
 
+export interface AuthMethods {
+  passwordEnabled: boolean;
+  oidcEnabled: boolean;
+}
+
 export interface DirectoryEntry {
   name: string;
   kind: "directory" | "file";
@@ -145,6 +150,7 @@ export class ApiError extends Error {
 
 export interface ApiClient {
   session(signal?: AbortSignal): Promise<Session>;
+  authMethods(signal?: AbortSignal): Promise<AuthMethods>;
   login(credentials: LoginCredentials, signal?: AbortSignal): Promise<Session>;
   logout(csrfToken: string, signal?: AbortSignal): Promise<void>;
   directory(
@@ -294,6 +300,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   return {
     session: async (signal) =>
       parseSession(await request<unknown>("/api/v1/session", { signal }, true)),
+    authMethods: (signal) =>
+      request<AuthMethods>("/api/v1/auth/methods", { signal }, true),
     login: async (credentials, signal) =>
       parseSession(
         await request<unknown>("/api/v1/auth/login", {

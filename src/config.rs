@@ -42,10 +42,45 @@ struct RawConfig {
     version: u32,
     server: RawServerConfig,
     #[serde(default)]
+    auth: RawAuthConfig,
+    #[serde(default)]
     #[schemars(length(min = 1))]
     users: Vec<RawUser>,
     #[serde(default)]
     shares: Vec<RawShare>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawAuthConfig {
+    #[serde(default = "default_true")]
+    password_enabled: bool,
+    #[serde(default)]
+    oidc_enabled: bool,
+    oidc: Option<RawOidcConfig>,
+}
+
+impl Default for RawAuthConfig {
+    fn default() -> Self {
+        Self {
+            password_enabled: true,
+            oidc_enabled: false,
+            oidc: None,
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawOidcConfig {
+    issuer: String,
+    client_id: String,
+    client_secret_file: PathBuf,
+    redirect_uri: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -93,7 +128,9 @@ struct RawUser {
     #[schemars(length(min = 1, max = 64))]
     username: String,
     /// An Argon2id PHC string produced by `crabinet hash-password`.
-    password_hash: String,
+    password_hash: Option<String>,
+    /// Email returned as a verified claim by the configured OIDC provider.
+    email: Option<String>,
     /// Disabled users cannot log in and their existing sessions are rejected.
     #[serde(default)]
     disabled: bool,
@@ -135,9 +172,47 @@ pub enum Permission {
 pub struct Config {
     source: PathBuf,
     server: ServerConfig,
+    auth: AuthConfig,
     users: Vec<User>,
     shares: Vec<Share>,
     session_secret: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct AuthConfig {
+    password_enabled: bool,
+    oidc: Option<OidcConfig>,
+}
+
+#[derive(Clone)]
+pub struct OidcConfig {
+    issuer: String,
+    client_id: String,
+    client_secret: String,
+    client_secret_file: PathBuf,
+    redirect_uri: String,
+}
+
+impl fmt::Debug for OidcConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthConfig")
+            .field("password_enabled", &self.password_enabled)
+            .field("oidc", &self.oidc)
+            .finish()
+    }
 }
 
 impl fmt::Debug for Config {
@@ -146,6 +221,7 @@ impl fmt::Debug for Config {
             .debug_struct("Config")
             .field("source", &self.source)
             .field("server", &self.server)
+            .field("auth", &self.auth)
             .field("users", &self.users)
             .field("shares", &self.shares)
             .field("session_secret", &"[REDACTED]")
@@ -171,7 +247,8 @@ pub struct ServerConfig {
 #[derive(Clone)]
 pub struct User {
     username: String,
-    password_hash: String,
+    password_hash: Option<String>,
+    email: Option<String>,
     disabled: bool,
 }
 
@@ -181,6 +258,7 @@ impl fmt::Debug for User {
             .debug_struct("User")
             .field("username", &self.username)
             .field("password_hash", &"[REDACTED]")
+            .field("email", &self.email)
             .finish()
     }
 }
@@ -279,7 +357,36 @@ impl Config {
         let session_secret_file = resolve_path(base, &raw.server.session_secret_file);
         let (session_secret_file, session_secret) = read_session_secret(&session_secret_file)?;
 
+        if !raw.auth.password_enabled && !raw.auth.oidc_enabled {
+            return Err(ConfigError::Validation(
+                "both password and OIDC sign-in are disabled".into(),
+            ));
+        }
+        if raw.auth.oidc_enabled != raw.auth.oidc.is_some() {
+            return Err(ConfigError::Validation(
+                "auth.oidc is required exactly when OIDC sign-in is enabled".into(),
+            ));
+        }
+        let oidc = raw.auth.oidc.map(|value| {
+            validate_https_url(&value.issuer, "auth.oidc.issuer")?;
+            let redirect_uri = validate_https_url(&value.redirect_uri, "auth.oidc.redirect_uri")?;
+            if redirect_uri.path() != "/api/v1/auth/oidc/callback" || redirect_uri.query().is_some() {
+                return Err(ConfigError::Validation("auth.oidc.redirect_uri must use /api/v1/auth/oidc/callback without a query".into()));
+            }
+            if value.client_id.is_empty() || value.client_id.len() > 256 {
+                return Err(ConfigError::Validation("auth.oidc.client_id must contain 1 to 256 bytes".into()));
+            }
+            let secret_path = resolve_path(base, &value.client_secret_file);
+            let (client_secret_file, bytes) = read_secret_file(&secret_path, "auth.oidc.client_secret_file", 1, 4096)?;
+            let client_secret = String::from_utf8(bytes).map_err(|_| ConfigError::Validation("auth.oidc.client_secret_file must contain UTF-8".into()))?;
+            if client_secret.trim().is_empty() || client_secret.contains(['\n', '\r']) {
+                return Err(ConfigError::Validation("auth.oidc.client_secret_file contains an invalid secret".into()));
+            }
+            Ok(OidcConfig { issuer: value.issuer, client_id: value.client_id, client_secret, client_secret_file, redirect_uri: redirect_uri.to_string() })
+        }).transpose()?;
+
         let mut usernames = HashSet::new();
+        let mut emails = HashSet::new();
         let mut users = Vec::with_capacity(raw.users.len());
         if raw.users.is_empty() {
             return Err(ConfigError::Validation(
@@ -294,17 +401,74 @@ impl Config {
                     user.username
                 )));
             }
-            validate_password_hash(&user.password_hash).map_err(|reason| {
-                ConfigError::Validation(format!(
-                    "password_hash for user {:?} {reason}",
+            if let Some(hash) = &user.password_hash {
+                validate_password_hash(hash).map_err(|reason| {
+                    ConfigError::Validation(format!(
+                        "password_hash for user {:?} {reason}",
+                        user.username
+                    ))
+                })?;
+            }
+            let email = user
+                .email
+                .map(|email| {
+                    let normalized = email.to_ascii_lowercase();
+                    if email.trim() != email
+                        || email.len() > 254
+                        || !email.is_ascii()
+                        || !email.contains('@')
+                        || email.contains(char::is_whitespace)
+                        || email.contains(['<', '>', ','])
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "invalid email for user {:?}",
+                            user.username
+                        )));
+                    }
+                    if !emails.insert(normalized.clone()) {
+                        return Err(ConfigError::Validation(format!(
+                            "duplicate email for user {:?}",
+                            user.username
+                        )));
+                    }
+                    Ok(normalized)
+                })
+                .transpose()?;
+            if !(user.disabled
+                || raw.auth.password_enabled && user.password_hash.is_some()
+                || oidc.is_some() && email.is_some())
+            {
+                return Err(ConfigError::Validation(format!(
+                    "enabled user {:?} has no usable sign-in method",
                     user.username
-                ))
-            })?;
+                )));
+            }
             users.push(User {
                 username: user.username,
                 password_hash: user.password_hash,
+                email,
                 disabled: user.disabled,
             });
+        }
+        if users.iter().any(|user| !user.disabled) {
+            if raw.auth.password_enabled
+                && !users
+                    .iter()
+                    .any(|user| !user.disabled && user.password_hash.is_some())
+            {
+                return Err(ConfigError::Validation(
+                    "password sign-in is enabled but no enabled user has a password".into(),
+                ));
+            }
+            if oidc.is_some()
+                && !users
+                    .iter()
+                    .any(|user| !user.disabled && user.email.is_some())
+            {
+                return Err(ConfigError::Validation(
+                    "OIDC sign-in is enabled but no enabled user has an email".into(),
+                ));
+            }
         }
 
         let mut share_ids = HashSet::new();
@@ -351,10 +515,16 @@ impl Config {
             &source,
             &database_path,
             &session_secret_file,
+            oidc.as_ref()
+                .map(|value| value.client_secret_file.as_path()),
         )?;
 
         Ok(Self {
             source,
+            auth: AuthConfig {
+                password_enabled: raw.auth.password_enabled,
+                oidc,
+            },
             server: ServerConfig {
                 listen,
                 database_path,
@@ -380,6 +550,10 @@ impl Config {
 
     pub fn server(&self) -> &ServerConfig {
         &self.server
+    }
+
+    pub fn auth(&self) -> &AuthConfig {
+        &self.auth
     }
 
     pub fn users(&self) -> &[User] {
@@ -450,12 +624,51 @@ impl User {
         &self.username
     }
 
-    pub fn password_hash(&self) -> &str {
-        &self.password_hash
+    pub fn password_hash(&self) -> Option<&str> {
+        self.password_hash.as_deref()
+    }
+
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
     }
 
     pub fn disabled(&self) -> bool {
         self.disabled
+    }
+}
+
+impl AuthConfig {
+    pub fn password_enabled(&self) -> bool {
+        self.password_enabled
+    }
+    pub fn oidc(&self) -> Option<&OidcConfig> {
+        self.oidc.as_ref()
+    }
+}
+
+impl OidcConfig {
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+    pub fn client_secret(&self) -> &str {
+        &self.client_secret
+    }
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            issuer: "https://id.example.com".into(),
+            client_id: "crabinet".into(),
+            client_secret: "test-secret".into(),
+            client_secret_file: PathBuf::from("test-secret"),
+            redirect_uri: "https://files.example.com/api/v1/auth/oidc/callback".into(),
+        }
     }
 }
 
@@ -691,36 +904,64 @@ fn validate_database_path(path: &Path) -> Result<PathBuf, ConfigError> {
 }
 
 fn read_session_secret(path: &Path) -> Result<(PathBuf, Vec<u8>), ConfigError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| {
-        ConfigError::Validation("server.session_secret_file is missing or unreadable".into())
-    })?;
+    read_secret_file(
+        path,
+        "server.session_secret_file",
+        MIN_SESSION_SECRET_BYTES,
+        MAX_SESSION_SECRET_BYTES,
+    )
+}
+
+fn read_secret_file(
+    path: &Path,
+    field: &str,
+    minimum: usize,
+    maximum: usize,
+) -> Result<(PathBuf, Vec<u8>), ConfigError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ConfigError::Validation(format!("{field} is missing or unreadable")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(ConfigError::Validation(
-            "server.session_secret_file must be a regular file, not a symbolic link".into(),
-        ));
+        return Err(ConfigError::Validation(format!(
+            "{field} must be a regular file, not a symbolic link"
+        )));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
         if metadata.permissions().mode() & 0o022 != 0 {
-            return Err(ConfigError::Validation(
-                "server.session_secret_file must not be writable by group or other users".into(),
-            ));
+            return Err(ConfigError::Validation(format!(
+                "{field} must not be writable by group or other users"
+            )));
         }
     }
-    let secret = fs::read(path).map_err(|_| {
-        ConfigError::Validation("server.session_secret_file is missing or unreadable".into())
-    })?;
-    if !(MIN_SESSION_SECRET_BYTES..=MAX_SESSION_SECRET_BYTES).contains(&secret.len()) {
+    let secret = fs::read(path)
+        .map_err(|_| ConfigError::Validation(format!("{field} is missing or unreadable")))?;
+    if !(minimum..=maximum).contains(&secret.len()) {
         return Err(ConfigError::Validation(format!(
-            "server.session_secret_file must contain {MIN_SESSION_SECRET_BYTES} to {MAX_SESSION_SECRET_BYTES} bytes"
+            "{field} must contain {minimum} to {maximum} bytes"
         )));
     }
-    let canonical = fs::canonicalize(path).map_err(|_| {
-        ConfigError::Validation("server.session_secret_file cannot be canonicalized".into())
-    })?;
+    let canonical = fs::canonicalize(path)
+        .map_err(|_| ConfigError::Validation(format!("{field} cannot be canonicalized")))?;
     Ok((canonical, secret))
+}
+
+fn validate_https_url(value: &str, field: &str) -> Result<url::Url, ConfigError> {
+    let parsed = url::Url::parse(value)
+        .map_err(|_| ConfigError::Validation(format!("{field} must be an HTTPS URL")))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+        || parsed.query().is_some()
+    {
+        return Err(ConfigError::Validation(format!(
+            "{field} must be an HTTPS URL without credentials, query, or fragment"
+        )));
+    }
+    Ok(parsed)
 }
 
 fn validate_share_root(id: &str, configured: &Path) -> Result<PathBuf, ConfigError> {
@@ -774,6 +1015,7 @@ fn reject_sensitive_paths_inside_shares(
     config: &Path,
     database: &Path,
     secret: &Path,
+    oidc_secret: Option<&Path>,
 ) -> Result<(), ConfigError> {
     for share in shares {
         for (label, path) in [
@@ -787,6 +1029,12 @@ fn reject_sensitive_paths_inside_shares(
                     share.id
                 )));
             }
+        }
+        if oidc_secret.is_some_and(|path| path.starts_with(&share.root)) {
+            return Err(ConfigError::Validation(format!(
+                "OIDC client secret must not be located inside share {:?}",
+                share.id
+            )));
         }
     }
     Ok(())
@@ -882,6 +1130,76 @@ permission = "write"
         );
         assert_eq!(config.shares()[0].permission_for("bob"), None);
         assert!(!format!("{config:?}").contains(HASH));
+    }
+
+    #[test]
+    fn rejects_impossible_authentication_settings() {
+        let tree = TestTree::new();
+        let both_disabled = tree.valid_text().replace(
+            "[server]",
+            "[auth]\npassword_enabled = false\noidc_enabled = false\n[server]",
+        );
+        assert!(
+            tree.load(&both_disabled)
+                .unwrap_err()
+                .to_string()
+                .contains("both password and OIDC")
+        );
+
+        let missing_oidc = tree.valid_text().replace(
+            "[server]",
+            "[auth]\npassword_enabled = false\noidc_enabled = true\n[server]",
+        );
+        assert!(
+            tree.load(&missing_oidc)
+                .unwrap_err()
+                .to_string()
+                .contains("auth.oidc is required")
+        );
+    }
+
+    #[test]
+    fn oidc_only_accepts_email_user_without_password() {
+        let tree = TestTree::new();
+        let secret = tree.root.parent().unwrap().join("oidc.secret");
+        fs::write(&secret, "example-client-secret").unwrap();
+        let settings = format!(
+            "[auth]\npassword_enabled = false\noidc_enabled = true\n[auth.oidc]\nissuer = \"https://id.example.com\"\nclient_id = \"crabinet\"\nclient_secret_file = {:?}\nredirect_uri = \"https://files.example.com/api/v1/auth/oidc/callback\"\n",
+            secret
+        );
+        let text = tree
+            .valid_text()
+            .replace("[server]", &format!("{settings}[server]"))
+            .replace(
+                &format!("password_hash = \"{HASH}\""),
+                "email = \"alice@example.com\"",
+            );
+        let config = tree.load(&text).unwrap();
+        assert!(!config.auth().password_enabled());
+        assert!(config.auth().oidc().is_some());
+        assert_eq!(config.users()[0].email(), Some("alice@example.com"));
+        assert_eq!(config.users()[0].password_hash(), None);
+    }
+
+    #[test]
+    fn duplicate_email_bindings_are_rejected_case_insensitively() {
+        let tree = TestTree::new();
+        let extra = format!(
+            "[[users]]\nusername = \"bob\"\nemail = \"ALICE@example.com\"\npassword_hash = \"{HASH}\"\n\n"
+        );
+        let text = tree
+            .valid_text()
+            .replace(
+                &format!("password_hash = \"{HASH}\""),
+                &format!("password_hash = \"{HASH}\"\nemail = \"alice@example.com\""),
+            )
+            .replace("[[shares]]", &format!("{extra}[[shares]]"));
+        assert!(
+            tree.load(&text)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate email")
+        );
     }
 
     #[test]

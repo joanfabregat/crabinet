@@ -74,6 +74,9 @@ function dispatchDrag(
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     session: overrides.session ?? vi.fn(async () => session),
+    authMethods:
+      overrides.authMethods ??
+      vi.fn(async () => ({ passwordEnabled: true, oidcEnabled: false })),
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
     directory: overrides.directory ?? vi.fn(async () => emptyPage),
@@ -155,6 +158,89 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 describe("authentication", () => {
+  it("redirects guests in OIDC-only mode and keeps password sign-in in mixed mode", async () => {
+    const redirect = vi.fn();
+    const sessionRequest = vi
+      .fn()
+      .mockRejectedValue(new ApiError("unauthorized", "anonymous"));
+    const oidcOnly = fakeApi({
+      session: sessionRequest,
+      authMethods: vi.fn(async () => ({
+        passwordEnabled: false,
+        oidcEnabled: true,
+      })),
+    });
+    const first = render(
+      <App
+        api={oidcOnly}
+        onOidcRedirect={redirect}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+    await waitFor(() =>
+      expect(redirect).toHaveBeenCalledWith("/api/v1/auth/oidc/start"),
+    );
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+    first.unmount();
+
+    const mixed = fakeApi({
+      session: sessionRequest,
+      authMethods: vi.fn(async () => ({
+        passwordEnabled: true,
+        oidcEnabled: true,
+      })),
+    });
+    render(
+      <App
+        api={mixed}
+        onOidcRedirect={redirect}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+    expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+    const googleLink = screen.getByRole("link", {
+      name: "Sign in with Google",
+    });
+    expect(googleLink).toHaveAttribute("href", "/api/v1/auth/oidc/start");
+    expect(googleLink.querySelector("img")).toHaveAttribute(
+      "src",
+      "/google-g.png",
+    );
+  });
+
+  it("keeps the unrecognized identity page visible with a Disconnect link", async () => {
+    window.history.replaceState(null, "", "/?oidc_error=unrecognized");
+    try {
+      const redirect = vi.fn();
+      const api = fakeApi({
+        session: vi
+          .fn()
+          .mockRejectedValue(new ApiError("unauthorized", "anonymous")),
+        authMethods: vi.fn(async () => ({
+          passwordEnabled: false,
+          oidcEnabled: true,
+        })),
+      });
+      render(
+        <App
+          api={api}
+          onOidcRedirect={redirect}
+          navigation={new MemoryNavigation()}
+        />,
+      );
+      expect(
+        await screen.findByText(/identity is not authorized/),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Disconnect" })).toHaveAttribute(
+        "href",
+        "/api/v1/auth/oidc/disconnect",
+      );
+      expect(redirect).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
   it("shows a loading state and then an accessible login form for an anonymous session", async () => {
     let rejectSession: ((error: ApiError) => void) | undefined;
     const api = fakeApi({
@@ -173,11 +259,11 @@ describe("authentication", () => {
     expect(
       await screen.findByRole("heading", { name: "Sign in to Crabinet" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Username")).toHaveAttribute(
+    expect(await screen.findByLabelText("Email or username")).toHaveAttribute(
       "autocomplete",
       "username",
     );
-    expect(screen.getByLabelText("Password")).toHaveAttribute(
+    expect(await screen.findByLabelText("Password")).toHaveAttribute(
       "autocomplete",
       "current-password",
     );
@@ -199,7 +285,8 @@ describe("authentication", () => {
 
     render(<App api={api} navigation={new MemoryNavigation()} />);
     await screen.findByRole("heading", { name: "Sign in to Crabinet" });
-    fireEvent.input(screen.getByLabelText("Username"), {
+    await screen.findByLabelText("Password");
+    fireEvent.input(screen.getByLabelText("Email or username"), {
       target: { value: "joan" },
     });
     fireEvent.input(screen.getByLabelText("Password"), {
@@ -233,7 +320,8 @@ describe("authentication", () => {
 
     render(<App api={api} navigation={new MemoryNavigation()} />);
     await screen.findByRole("heading", { name: "Sign in to Crabinet" });
-    fireEvent.input(screen.getByLabelText("Username"), {
+    await screen.findByLabelText("Password");
+    fireEvent.input(screen.getByLabelText("Email or username"), {
       target: { value: "joan" },
     });
     fireEvent.input(screen.getByLabelText("Password"), {

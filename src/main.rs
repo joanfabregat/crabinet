@@ -9,6 +9,7 @@ use crabinet::{
     config::Config,
     filesystem::{GlobalPolicy, ShareFs, ShareId},
     mutations::MutationState,
+    oidc::OidcService,
     password::hash_confirmed,
     preview::PreviewPolicy,
 };
@@ -82,14 +83,26 @@ async fn main() -> Result<()> {
     let browse = browse_state(&config).context("cannot initialize configured shares")?;
     let listen = config.server().listen();
     let auth = AuthService::from_config(&config).context("cannot initialize authentication")?;
+    let oidc = if let Some(settings) = config.auth().oidc() {
+        Some(
+            OidcService::discover(settings.clone())
+                .await
+                .map_err(anyhow::Error::msg)
+                .context("cannot initialize OIDC provider")?,
+        )
+    } else {
+        None
+    };
     let listener = TcpListener::bind(listen).await?;
-    let app = router(
-        AppState::new(true)
-            .with_browse(browse)
-            .with_preview_policy(preview_policy)
-            .with_mutations(mutation_state)
-            .with_auth_service(auth),
-    );
+    let mut state = AppState::new(true)
+        .with_browse(browse)
+        .with_preview_policy(preview_policy)
+        .with_mutations(mutation_state)
+        .with_auth_service(auth);
+    if let Some(oidc) = oidc {
+        state = state.with_oidc_service(oidc);
+    }
+    let app = router(state);
 
     tracing::info!(%listen, config = %config.source().display(), "server listening");
     axum::serve(
