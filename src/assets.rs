@@ -11,6 +11,7 @@ use rust_embed::RustEmbed;
 #[include = "*.html"]
 #[include = "assets/*"]
 #[include = "crabinet.svg"]
+#[include = "google-g.png"]
 struct WebAssets;
 
 const INDEX: &str = "index.html";
@@ -21,7 +22,9 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
     }
 
     let requested = uri.path().trim_start_matches('/');
-    let is_asset = requested.starts_with("assets/") || requested == "crabinet.svg";
+    let is_asset = requested.starts_with("assets/")
+        || requested == "crabinet.svg"
+        || requested == "google-g.png";
     let path = if requested.is_empty() {
         INDEX
     } else {
@@ -80,5 +83,16 @@ mod tests {
     #[test]
     fn crabinet_icon_is_embedded() {
         assert!(WebAssets::get("crabinet.svg").is_some());
+    }
+
+    #[tokio::test]
+    async fn google_icon_is_served_as_png() {
+        let response = serve(OriginalUri("/google-g.png".parse().unwrap())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 }
