@@ -147,7 +147,7 @@ jobs:
           package="release/crabinet-linux-${ARCH}"
           mkdir -p "${package}"
           install -m 0555 "${binary}" "${package}/crabinet"
-          install -m 0444 README.md LICENSE config.example.toml "${package}/"
+          install -m 0444 README.md LICENSE LICENSE-CCADB config.example.toml "${package}/"
           "${package}/crabinet" print-config-schema > "${package}/config.schema.json"
           "${package}/crabinet" --help >/dev/null
           tar -C release -czf "release/crabinet-${VERSION}-linux-${ARCH}.tar.gz" "crabinet-linux-${ARCH}"

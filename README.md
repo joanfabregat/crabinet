@@ -107,7 +107,7 @@ The `.index-staging` name remains reserved so existing writable shares can be us
 
 ## Rootless Podman pod
 
-The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. The image is `scratch`-based, runs without root, and contains only `/crabinet`; it has no shell or package manager.
+The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. The image is `scratch`-based, runs without root, and contains the executable and the bundled CA data license; it has no shell or package manager.
 
 The following rootless example maps the invoking host user into the pod, keeps the container root filesystem read-only, drops capabilities, and mounts state separately. Adjust SELinux labels for your host. Use `:ro` for every share that does not need writes.
 
