@@ -5,7 +5,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/preact";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
@@ -99,7 +99,43 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   };
 }
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe("secure file previews", () => {
+  it("reloads the open preview when its directory reports a file change", async () => {
+    class TestEventSource extends EventTarget {
+      static instance: TestEventSource;
+      readyState = 1;
+
+      constructor() {
+        super();
+        TestEventSource.instance = this;
+      }
+
+      close() {}
+    }
+    vi.stubGlobal("EventSource", TestEventSource);
+    const preview = vi
+      .fn()
+      .mockResolvedValueOnce(previewDocument("before save"))
+      .mockResolvedValue(previewDocument("after save"));
+    const api = fakeApi({ preview });
+
+    render(<App api={api} navigation={new MemoryNavigation()} />);
+    fireEvent.click(await screen.findByRole("link", { name: "code.rs" }));
+    expect(await screen.findByLabelText("File source")).toHaveTextContent(
+      "before save",
+    );
+
+    TestEventSource.instance.dispatchEvent(new Event("invalidate"));
+    await waitFor(() =>
+      expect(screen.getByLabelText("File source")).toHaveTextContent(
+        "after save",
+      ),
+    );
+    expect(preview).toHaveBeenCalledTimes(2);
+  });
+
   it("renders hostile code as text, supports wrapping, and never writes storage", async () => {
     const source =
       '<img src=x onerror="alert(1)"><script>localStorage.pwned=1</script>';
@@ -197,7 +233,7 @@ describe("secure file previews", () => {
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame).toHaveAttribute(
       "src",
-      "/api/v1/shares/docs/preview/html/rendered?path=demo.html",
+      "/api/v1/shares/docs/preview/html/rendered?path=demo.html&v=0-0",
     );
     expect(frame.getAttribute("sandbox")?.split(/\s+/).filter(Boolean)).toEqual(
       [],
@@ -208,7 +244,7 @@ describe("secure file previews", () => {
     fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
     expect(frame).toHaveAttribute(
       "src",
-      "/api/v1/shares/docs/preview/html?path=demo.html",
+      "/api/v1/shares/docs/preview/html?path=demo.html&v=0-0",
     );
     const renderedNewTab = within(panel).getByRole("link", {
       name: "Open rendered HTML in new tab",
@@ -292,14 +328,14 @@ describe("secure file previews", () => {
     });
     expect(image).toHaveAttribute(
       "src",
-      "/api/v1/shares/docs/preview/image?path=photo.png",
+      "/api/v1/shares/docs/preview/image?path=photo.png&v=0-0",
     );
     const imageLink = screen.getByRole("link", {
       name: "Open photo.png in a new tab",
     });
     expect(imageLink).toHaveAttribute(
       "href",
-      "/api/v1/shares/docs/preview/image?path=photo.png",
+      "/api/v1/shares/docs/preview/image?path=photo.png&v=0-0",
     );
     expect(imageLink).toHaveAttribute("target", "_blank");
     expect(imageLink).toHaveAttribute("rel", "noopener noreferrer");

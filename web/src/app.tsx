@@ -883,6 +883,7 @@ function DirectoryBrowser({
           api={api}
           path={route.previewPath}
           shareId={share.id}
+          revision={refreshKey}
           writable={writable}
           fullScreen={route.previewMode === "full"}
           onOperation={operateOnPreview}
@@ -1047,6 +1048,7 @@ interface PreviewPanelProps {
   api: ApiClient;
   path: string;
   shareId: string;
+  revision: number;
   writable: boolean;
   fullScreen: boolean;
   onOperation: (kind: "edit" | "rename" | "move" | "delete") => void;
@@ -1069,6 +1071,7 @@ function PreviewPanel({
   api,
   path,
   shareId,
+  revision,
   writable,
   fullScreen,
   onOperation,
@@ -1118,7 +1121,7 @@ function PreviewPanel({
     };
     void load();
     return () => controller.abort();
-  }, [api, onSessionExpired, path, refreshKey, shareId]);
+  }, [api, onSessionExpired, path, refreshKey, revision, shareId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => titleRef.current?.focus(), 0);
@@ -1169,6 +1172,7 @@ function PreviewPanel({
   const metadata =
     metadataState.status === "ready" ? metadataState.metadata : undefined;
   const previewDocument = state.status === "ready" ? state.document : undefined;
+  const assetRevision = `${revision}-${refreshKey}`;
 
   return (
     <>
@@ -1326,9 +1330,9 @@ function PreviewPanel({
           ) : (
             <PreviewContent
               document={state.document}
-              htmlSourceUrl={htmlPreviewUrl(shareId, path)}
-              htmlRenderedUrl={renderedHtmlPreviewUrl(shareId, path)}
-              imageUrl={imagePreviewUrl(shareId, path)}
+              htmlSourceUrl={`${htmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
+              htmlRenderedUrl={`${renderedHtmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
+              imageUrl={`${imagePreviewUrl(shareId, path)}&v=${assetRevision}`}
               filename={filename}
             />
           )}
