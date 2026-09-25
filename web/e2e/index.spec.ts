@@ -203,7 +203,7 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   await expect(frame).toHaveAttribute("sandbox", "");
   await expect(frame).toHaveAttribute(
     "src",
-    "/api/v1/shares/read-only/preview/html/rendered?path=hostile.html",
+    "/api/v1/shares/read-only/preview/html/rendered?path=hostile.html&v=0-0",
   );
   await expect(frame.contentFrame().locator("body")).toContainText("Sign out");
   expect(await page.evaluate(() => localStorage.getItem("hostile"))).toBeNull();
@@ -235,7 +235,7 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   const sourceFrame = page.getByTitle("Inert HTML source for hostile.html");
   await expect(sourceFrame).toHaveAttribute(
     "src",
-    "/api/v1/shares/read-only/preview/html?path=hostile.html",
+    "/api/v1/shares/read-only/preview/html?path=hostile.html&v=0-0",
   );
   await expect(sourceFrame.contentFrame().locator("body")).toContainText(
     "window.__indexHostileHtml",
