@@ -80,6 +80,9 @@ function previewDocument(
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     session: overrides.session ?? vi.fn(async () => session),
+    authMethods:
+      overrides.authMethods ??
+      vi.fn(async () => ({ passwordEnabled: true, oidcEnabled: false })),
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
     directory: overrides.directory ?? vi.fn(async () => files),

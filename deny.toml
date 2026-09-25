@@ -19,6 +19,7 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
+exceptions = [{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" }]
 
 [bans]
 multiple-versions = "warn"

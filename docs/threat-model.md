@@ -2,7 +2,7 @@
 
 ## Scope
 
-Crabinet is an authenticated file browser for explicitly mounted filesystem roots. Operators define users, Argon2id password hashes, shares, and per-share grants in an immutable TOML file. The application serves one embedded browser client, stores sessions and audit records in SQLite, and reads or modifies mounted files only through authenticated API operations.
+Crabinet is an authenticated file browser for explicitly mounted filesystem roots. Operators define users, enabled sign-in methods, optional Argon2id password hashes and verified-email OIDC bindings, shares, and per-share grants in an immutable TOML file. The application serves one embedded browser client, stores sessions and audit records in SQLite, and reads or modifies mounted files only through authenticated API operations.
 
 This model covers the application, its OCI image, its configuration and secret mounts, and the browser security boundary. TLS termination, host filesystem administration, container-engine security, backup storage, and the reverse proxy are operator-controlled dependencies.
 

@@ -32,6 +32,70 @@ sed \
   -e 's|session_absolute_timeout_seconds = 300|session_absolute_timeout_seconds = 28800|g' \
   "$fixtures/config.toml.in" > "$state_dir/config.toml"
 
+if [ -d /run/crabinet-oidc ]; then
+  joan_permission=$(cat /run/crabinet-oidc/joan-permission)
+  kelly_permission=$(cat /run/crabinet-oidc/kelly-permission)
+  case "$joan_permission:$kelly_permission" in
+    read:read|read:write|write:read|write:write) ;;
+    *) echo 'Invalid development OIDC permissions.' >&2; exit 1 ;;
+  esac
+  awk -v joan_permission="$joan_permission" -v kelly_permission="$kelly_permission" '
+    function grant(user, permission) {
+      print ""
+      print "[[shares.grants]]"
+      print "user = \"" user "\""
+      print "permission = \"" permission "\""
+    }
+    function add_grants() {
+      if (share == "read-only") {
+        grant("joan", "read")
+        grant("kelly", "read")
+      } else if (share == "writable") {
+        grant("joan", joan_permission)
+        grant("kelly", kelly_permission)
+      }
+    }
+    BEGIN {
+      if ((getline joan_email < "/run/crabinet-oidc/joan-email") <= 0 ||
+          (getline kelly_email < "/run/crabinet-oidc/kelly-email") <= 0 ||
+          joan_email !~ /^[[:alnum:]._%+-]+@[[:alnum:].-]+$/ ||
+          kelly_email !~ /^[[:alnum:]._%+-]+@[[:alnum:].-]+$/) exit 1
+    }
+    $0 == "[[shares]]" {
+      add_grants()
+      if (!users_added) {
+        print ""
+        print "[[users]]"
+        print "username = \"joan\""
+        print "email = \"" joan_email "\""
+        print ""
+        print "[[users]]"
+        print "username = \"kelly\""
+        print "email = \"" kelly_email "\""
+        users_added = 1
+      }
+      share = ""
+    }
+    $0 == "id = \"read-only\"" { share = "read-only" }
+    $0 == "id = \"writable\"" { share = "writable" }
+    { print }
+    END { add_grants() }
+  ' "$state_dir/config.toml" > "$state_dir/oidc-config.toml"
+  mv "$state_dir/oidc-config.toml" "$state_dir/config.toml"
+  cat >> "$state_dir/config.toml" <<EOF
+
+[auth]
+password_enabled = true
+oidc_enabled = true
+
+[auth.oidc]
+issuer = "https://accounts.google.com"
+client_id = "$(cat /run/crabinet-oidc/client-id)"
+client_secret_file = "/run/crabinet-oidc/client-secret"
+redirect_uri = "https://files-dev.jf.ffwip.com/api/v1/auth/oidc/callback"
+EOF
+fi
+
 export RUST_LOG=crabinet=debug
 binary=$repo_root/target/debug/crabinet
 "$binary" --config "$state_dir/config.toml" &

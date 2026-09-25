@@ -17,6 +17,17 @@ test -x "$repo_root/web/node_modules/.bin/vite" || {
 unit_base="crabinet-preview-$(id -u)-${BASHPID}-${RANDOM}"
 container_name="$unit_base"
 image='docker.io/library/node:24-bookworm-slim@sha256:713cfbf4a0ac19f40e1bb9919893e126b74a5c8cf5d0623c9f89515c8f74c6fa'
+oidc_dir=/home/joan/.local/state/crabinet-preview/oidc
+oidc_mount=()
+if [ -d "$oidc_dir" ]; then
+  for file in client-id client-secret joan-email kelly-email joan-permission kelly-permission; do
+    test -s "$oidc_dir/$file" || {
+      echo "Incomplete development OIDC credentials: missing $file." >&2
+      exit 1
+    }
+  done
+  oidc_mount=(--volume="$oidc_dir:/run/crabinet-oidc:ro,rprivate")
+fi
 
 cleanup() {
   trap - EXIT INT TERM HUP
@@ -59,6 +70,7 @@ sudo systemd-run --quiet --wait --pipe --collect \
     --hostname=sandbox \
     --stop-timeout=10 \
     --volume="$repo_root:/workspace:ro,rprivate" \
+    "${oidc_mount[@]}" \
     --workdir=/workspace \
     --publish=127.0.0.1:18081:5173 \
     --env=HOME=/tmp \

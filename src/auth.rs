@@ -113,6 +113,7 @@ pub struct AuthService {
 
 struct AuthInner {
     users: HashMap<String, UserRecord>,
+    password_enabled: bool,
     shares: Vec<ShareRecord>,
     store: SessionStore,
     token_key: Vec<u8>,
@@ -127,7 +128,8 @@ struct AuthInner {
 
 #[derive(Clone)]
 struct UserRecord {
-    password_hash: String,
+    password_hash: Option<String>,
+    email: Option<String>,
     disabled: bool,
 }
 
@@ -248,6 +250,13 @@ struct NewSession {
 }
 
 impl AuthService {
+    pub(crate) fn password_enabled(&self) -> bool {
+        self.inner.password_enabled
+    }
+
+    pub(crate) fn absolute_timeout_seconds(&self) -> i64 {
+        self.inner.absolute_timeout_seconds
+    }
     pub fn from_config(config: &Config) -> Result<Self, AuthInitError> {
         let users = config
             .users()
@@ -256,7 +265,8 @@ impl AuthService {
                 (
                     user.username().to_owned(),
                     UserRecord {
-                        password_hash: user.password_hash().to_owned(),
+                        password_hash: user.password_hash().map(str::to_owned),
+                        email: user.email().map(str::to_owned),
                         disabled: user.disabled(),
                     },
                 )
@@ -283,6 +293,7 @@ impl AuthService {
         let server = config.server();
         Ok(Self::new(
             users,
+            config.auth().password_enabled(),
             shares,
             SessionStore::open(server.database_path())?,
             config.session_secret().to_vec(),
@@ -299,6 +310,7 @@ impl AuthService {
     #[allow(clippy::too_many_arguments)]
     fn new(
         users: HashMap<String, UserRecord>,
+        password_enabled: bool,
         shares: Vec<ShareRecord>,
         store: SessionStore,
         token_key: Vec<u8>,
@@ -313,6 +325,7 @@ impl AuthService {
         Self {
             inner: Arc::new(AuthInner {
                 users,
+                password_enabled,
                 shares,
                 store,
                 token_key,
@@ -337,9 +350,21 @@ impl AuthService {
         source: Option<IpAddr>,
         old_cookie: Option<&str>,
     ) -> Result<NewSession, AppError> {
+        let candidate = if is_plausible_username(username) {
+            self.inner.users.get_key_value(username)
+        } else if username.len() <= 254 && username.is_ascii() && username.contains('@') {
+            self.inner.users.iter().find(|(_, user)| {
+                user.email
+                    .as_deref()
+                    .is_some_and(|email| email.eq_ignore_ascii_case(username))
+            })
+        } else {
+            None
+        };
+        let account = candidate.map_or(username, |(name, _)| name.as_str());
         let now = self.inner.clock.now();
         let rate_key = RateLimitKey {
-            account: normalized_identifier_digest(username),
+            account: normalized_identifier_digest(account),
             source,
         };
         if !self
@@ -355,14 +380,15 @@ impl AuthService {
         if password.len() > MAX_PASSWORD_BYTES {
             return Err(AppError::AuthenticationFailed);
         }
-        let candidate = if is_plausible_username(username) {
-            self.inner.users.get(username)
-        } else {
-            None
-        };
-        let usable = candidate.is_some_and(|user| !user.disabled);
+        let usable = self.inner.password_enabled
+            && candidate.is_some_and(|(_, user)| !user.disabled && user.password_hash.is_some());
         let hash = if usable {
-            candidate.expect("checked above").password_hash.clone()
+            candidate
+                .expect("checked above")
+                .1
+                .password_hash
+                .clone()
+                .expect("checked above")
         } else {
             DUMMY_PASSWORD_HASH.to_owned()
         };
@@ -381,12 +407,54 @@ impl AuthService {
             return Err(AppError::AuthenticationFailed);
         }
 
+        let session = self
+            .issue_session(
+                account,
+                old_cookie.and_then(|token| self.session_key(token)),
+            )
+            .await?;
+        self.inner
+            .rate_limit
+            .lock()
+            .map_err(|_| AppError::Internal)?
+            .clear(&rate_key);
+        Ok(session)
+    }
+
+    pub(crate) async fn login_oidc(
+        &self,
+        email: &str,
+        old_cookie: Option<&str>,
+    ) -> Result<(String, String, String), AppError> {
+        let email = email.to_ascii_lowercase();
+        let Some((username, _)) = self
+            .inner
+            .users
+            .iter()
+            .find(|(_, user)| !user.disabled && user.email.as_deref() == Some(email.as_str()))
+        else {
+            return Err(AppError::AuthenticationFailed);
+        };
+        let session = self
+            .issue_session(
+                username,
+                old_cookie.and_then(|token| self.session_key(token)),
+            )
+            .await?;
+        Ok((session.username, session.cookie_token, session.csrf_token))
+    }
+
+    async fn issue_session(
+        &self,
+        username: &str,
+        old_key: Option<Vec<u8>>,
+    ) -> Result<NewSession, AppError> {
+        let now = self.inner.clock.now();
         let mut session_token = [0_u8; TOKEN_BYTES];
         random_fill(&mut session_token).map_err(|_| AuthError::Random)?;
         let cookie_token = encode_hex(&session_token);
         let csrf_token_text = encode_hex(&self.digest(b"csrf-token\0", &session_token));
         let session_key = self.digest(b"session\0", &session_token);
-        let old_key = old_cookie.and_then(|token| self.session_key(token));
         let expires_at = now.saturating_add(self.inner.absolute_timeout_seconds);
         self.inner
             .store
@@ -401,12 +469,6 @@ impl AuthService {
                 max_sessions_total: self.inner.max_sessions_total,
             })
             .await?;
-        self.inner
-            .rate_limit
-            .lock()
-            .map_err(|_| AppError::Internal)?
-            .clear(&rate_key);
-
         Ok(NewSession {
             cookie_token,
             csrf_token: csrf_token_text,
@@ -872,7 +934,7 @@ fn clear_session_cookie() -> HeaderValue {
     )
 }
 
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     let mut found = None;
     for header_value in headers.get_all(header::COOKIE) {
         let Ok(cookies) = header_value.to_str() else {
@@ -1025,21 +1087,24 @@ mod tests {
             (
                 "Alice".to_owned(),
                 UserRecord {
-                    password_hash,
+                    password_hash: Some(password_hash),
+                    email: None,
                     disabled: false,
                 },
             ),
             (
                 "disabled".to_owned(),
                 UserRecord {
-                    password_hash: disabled_hash,
+                    password_hash: Some(disabled_hash),
+                    email: None,
                     disabled: true,
                 },
             ),
             (
                 "Bob".to_owned(),
                 UserRecord {
-                    password_hash: bob_hash,
+                    password_hash: Some(bob_hash),
+                    email: None,
                     disabled: false,
                 },
             ),
@@ -1064,6 +1129,7 @@ mod tests {
         let clock = Arc::new(TestClock::new(1_000_000));
         let service = AuthService::new(
             users,
+            true,
             shares,
             store,
             vec![0x5a; 32],
@@ -1410,6 +1476,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oidc_email_mapping_issues_only_enabled_local_user_sessions() {
+        let mut test = test_auth(1, 5);
+        let inner = Arc::get_mut(&mut test.service.inner).unwrap();
+        inner.users.get_mut("Alice").unwrap().email = Some("alice@example.com".into());
+        inner.users.get_mut("disabled").unwrap().email = Some("disabled@example.com".into());
+        inner.password_enabled = false;
+        assert!(matches!(
+            test.service
+                .login("Alice", "a very long unicode password 🙂", None, None)
+                .await,
+            Err(AppError::AuthenticationFailed)
+        ));
+        assert!(matches!(
+            test.service.login_oidc("unknown@example.com", None).await,
+            Err(AppError::AuthenticationFailed)
+        ));
+        assert!(matches!(
+            test.service.login_oidc("disabled@example.com", None).await,
+            Err(AppError::AuthenticationFailed)
+        ));
+        let (username, cookie, _) = test
+            .service
+            .login_oidc("ALICE@example.com", None)
+            .await
+            .unwrap();
+        assert_eq!(username, "Alice");
+        let session = test
+            .service
+            .authenticate(&headers_with_cookie(&format!("{SESSION_COOKIE}={cookie}")))
+            .await
+            .unwrap();
+        assert_eq!(session.principal.username(), "Alice");
+    }
+
+    #[tokio::test]
+    async fn password_login_accepts_username_or_configured_email() {
+        let mut test = test_auth(1, 5);
+        let inner = Arc::get_mut(&mut test.service.inner).unwrap();
+        inner.users.get_mut("Alice").unwrap().email = Some("alice@example.com".into());
+        let by_email = test
+            .service
+            .login(
+                "ALICE@example.com",
+                "a very long unicode password 🙂",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_email.username, "Alice");
+        assert!(matches!(
+            test.service
+                .login("alice@example.com", "wrong password", None, None)
+                .await,
+            Err(AppError::AuthenticationFailed)
+        ));
+        let by_username = test
+            .service
+            .login("Alice", "a very long unicode password 🙂", None, None)
+            .await
+            .unwrap();
+        assert_eq!(by_username.username, "Alice");
+    }
+
+    #[tokio::test]
     async fn database_stores_only_a_keyed_session_digest() {
         let auth = test_auth(1, 5);
         let session = auth
@@ -1581,6 +1712,7 @@ mod tests {
             .unwrap();
         let removed = AuthService::new(
             HashMap::new(),
+            true,
             Vec::new(),
             auth.service.inner.store.clone(),
             vec![0x5a; 32],
@@ -1606,10 +1738,12 @@ mod tests {
             HashMap::from([(
                 "Alice".to_owned(),
                 UserRecord {
-                    password_hash: test_hash("a very long unicode password 🙂"),
+                    password_hash: Some(test_hash("a very long unicode password 🙂")),
+                    email: None,
                     disabled: true,
                 },
             )]),
+            true,
             Vec::new(),
             auth.service.inner.store.clone(),
             vec![0x5a; 32],

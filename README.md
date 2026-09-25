@@ -8,7 +8,7 @@ Crabinet is a security-focused, low-memory file browser for a small server or Po
 
 ## What it provides
 
-- Multiple local users with Argon2id password hashes and configuration-defined per-share `read` or `write` grants.
+- Multiple local users with password and/or OpenID Connect sign-in, verified-email account mapping, and configuration-defined per-share `read` or `write` grants.
 - Capability-scoped filesystem access: configured roots are opened once, request paths stay relative, and symlinks, hard-link aliases, special files, ambiguous paths, and traversal are rejected.
 - A lazy share/folder tree, touch-friendly folder picker, file-type icons, copyable virtual paths, folder-first browsing, metadata, conditional and ranged downloads, create/rename/move/delete operations, UTF-8 text editing, and streaming multipart uploads.
 - Bounded syntax-highlighted code and text previews, safe Markdown rendering without raw HTML, signature-validated raster image previews, and rendered/source HTML tabs with isolated new-tab views. Rendered HTML is protected by a deny-by-default response CSP and, in-panel, an additional empty iframe sandbox, so uploaded scripts, forms, navigation, and network requests cannot run.
@@ -17,11 +17,11 @@ Crabinet is a security-focused, low-memory file browser for a small server or Po
 - A single statically linked Linux binary for `amd64` and `arm64`, plus a `scratch`-based non-root OCI image published to GHCR.
 - CI-enforced Rust and frontend tests, dependency policy, Semgrep, Trivy, weekly scans, SBOMs, checksums, and build-provenance attestations.
 
-Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem links, expose special files, recursively delete directories, move entries between shares, edit binary files, hot-reload configuration, use an external identity provider, or support multiple processes writing the same share. It is not an object-store frontend, collaborative editor, antivirus scanner, or substitute for host backups and filesystem permissions.
+Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem links, expose special files, recursively delete directories, move entries between shares, edit binary files, hot-reload configuration, or support multiple processes writing the same share. It is not an object-store frontend, collaborative editor, antivirus scanner, or substitute for host backups and filesystem permissions.
 
 ## Architecture
 
-The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores only runtime session state. One immutable TOML file defines users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
+The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores only runtime session state. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
 
 Start with the [threat model](docs/threat-model.md), [architecture decisions](docs/architecture-decisions.md), and [filesystem invariants](docs/filesystem-security.md) before changing a security boundary. The HTTP behavior used by the frontend is documented in [browse](docs/browse-api.md), [mutation](docs/mutations.md), [preview](docs/previews.md), and [frontend contract](docs/frontend-api-contract.md) notes; these describe the current first-party API, not a stable third-party compatibility promise.
 
@@ -79,8 +79,13 @@ max_upload_size = "100 MiB"
 max_preview_size = "2 MiB"
 auth_max_concurrent = 1
 
+[auth]
+password_enabled = true
+oidc_enabled = false
+
 [[users]]
 username = "alice"
+email = "alice@example.com"
 password_hash = "$argon2id$v=19$m=65536,t=3,p=1$REPLACE_WITH_A_REAL_SALT$REPLACE_WITH_A_REAL_HASH"
 
 [[shares]]
@@ -94,7 +99,7 @@ user = "alice"
 permission = "write"
 ```
 
-Generate hashes only with `crabinet hash-password`; clear-text passwords are never accepted in arguments or environment variables. Keep the session secret out of TOML and every share. Crabinet reads configuration and secrets once, validates all roots before listening, rejects unknown fields, and never hot-reloads. Restart after every policy, user, hash, secret, grant, or limit change. Rotating the session secret invalidates all sessions; changing a password hash or disabling/removing a user takes effect after restart.
+Generate hashes only with `crabinet hash-password`; clear-text passwords are never accepted in arguments or environment variables. To enable OpenID Connect, set `auth.oidc_enabled = true`, configure `[auth.oidc]`, and register the exact callback URL with the provider as described in [the configuration guide](docs/configuration.md). Setting `auth.password_enabled = false` redirects anonymous visitors to the provider; Crabinet rejects a configuration with both methods disabled. Keep the session secret and OIDC client secret out of TOML and every share. Crabinet reads configuration and secrets once, validates all roots before listening, rejects unknown fields, and never hot-reloads. Restart after every policy, user, hash, secret, grant, or limit change. Rotating the session secret invalidates all sessions; changing a password hash or disabling/removing a user takes effect after restart.
 
 A share grant is absent-by-default. `permission = "read"` cannot mutate. `permission = "write"` can mutate unless the share's `read_only = true`, which always wins. The OS user must still have matching host permissions. Each writable share receives a private mode-`0700` `.index-staging` directory for atomic uploads and bounded crash recovery; Crabinet never scans the complete share at startup. Writable shares must be mounted into only one Crabinet process; read-only shares create no staging state and may be served by separate read-only replicas.
 
@@ -102,7 +107,7 @@ The `.index-staging` name remains reserved so existing writable shares can be us
 
 ## Rootless Podman pod
 
-The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. The image is `scratch`-based, runs without root, and contains only `/crabinet`; it has no shell or package manager.
+The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. The image is `scratch`-based, runs without root, and contains the executable and the bundled CA data license; it has no shell or package manager.
 
 The following rootless example maps the invoking host user into the pod, keeps the container root filesystem read-only, drops capabilities, and mounts state separately. Adjust SELinux labels for your host. Use `:ro` for every share that does not need writes.
 
