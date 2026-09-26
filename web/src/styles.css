@@ -1315,6 +1315,24 @@ html.preview-fullscreen-open body {
 }
 
 @media (max-width: 40rem) {
+  .app-header {
+    gap: 0.5rem;
+  }
+
+  .brand span {
+    display: none;
+  }
+
+  .account-actions {
+    gap: 0.5rem;
+  }
+
+  .account-actions .button {
+    font-size: 0.875rem;
+    padding: 0.5rem 0.6rem;
+    white-space: nowrap;
+  }
+
   .account-name {
     display: none;
   }
