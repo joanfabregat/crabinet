@@ -31,6 +31,26 @@ describe("API client", () => {
     expect(init).toMatchObject({ credentials: "same-origin" });
   });
 
+  it("requests a directory without hidden entries when the preference is off", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json({ shareId: "docs", path: "", entries: [] }),
+      );
+
+    await createApiClient({ fetch }).directory(
+      "docs",
+      "",
+      undefined,
+      undefined,
+      false,
+    );
+
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/v1/shares/docs/directory?path=&limit=100&showHidden=false",
+    );
+  });
+
   it("sends authentication mutations once and includes CSRF only on logout", async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()

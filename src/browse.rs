@@ -386,6 +386,8 @@ struct DirectoryQuery {
     path: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
+    #[serde(rename = "showHidden")]
+    show_hidden: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -424,6 +426,9 @@ async fn list_directory(
     let mut entries = authorized
         .list_bounded(&path, browse.limits.max_directory_entries)
         .map_err(map_fs_error)?;
+    if query.show_hidden == Some(false) {
+        entries.retain(|entry| !entry.name.as_str().starts_with('.'));
+    }
     entries.sort_by(|left, right| {
         entry_kind_order(left.kind)
             .cmp(&entry_kind_order(right.kind))
@@ -1276,6 +1281,62 @@ mod tests {
         assert_eq!(second["entries"][0]["name"], "invalid.txt");
         assert_eq!(second["entries"][1]["name"], "page.html");
         assert!(second.get("nextCursor").is_none());
+    }
+
+    #[tokio::test]
+    async fn hidden_entries_are_filtered_before_pagination_but_remain_accessible() {
+        let fixture = fixture(BrowseLimits::default());
+        fs::create_dir(fixture._root.path().join(".private")).expect("hidden directory fixture");
+        fs::write(fixture._root.path().join(".secret.txt"), b"hidden")
+            .expect("hidden file fixture");
+
+        let unfiltered = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/directory?path=&limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json(unfiltered).await["entries"][0]["name"], ".private");
+
+        let filtered = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/directory?path=&limit=2&showHidden=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let first = json(filtered).await;
+        assert_eq!(first["entries"][0]["name"], "a-directory");
+        assert_eq!(first["entries"][1]["name"], "a.txt");
+        let cursor = first["nextCursor"].as_str().expect("next cursor");
+
+        let next = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get(format!(
+                "/api/v1/shares/documents/directory?path=&limit=2&showHidden=false&cursor={cursor}"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        let next = json(next).await;
+        assert_eq!(next["entries"][0]["name"], "invalid.txt");
+        assert_eq!(next["entries"][1]["name"], "page.html");
+        assert!(next.get("nextCursor").is_none());
+
+        let preview = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/preview?path=.secret.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
     }
 
     #[tokio::test]
