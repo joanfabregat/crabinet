@@ -374,14 +374,10 @@ select {
   box-shadow: var(--shadow);
   min-width: 0;
   overflow: hidden;
-  position: sticky;
-  top: 1rem;
 }
 
 .tree-scroll,
 .folder-picker {
-  max-height: min(70vh, 42rem);
-  overflow: auto;
   padding: 0.55rem;
 }
 
@@ -522,6 +518,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 0.65rem;
   max-height: min(45vh, 24rem);
+  overflow: auto;
 }
 
 .move-destination {
