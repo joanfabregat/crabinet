@@ -79,6 +79,8 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       vi.fn(async () => ({ passwordEnabled: true, oidcEnabled: false })),
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
+    updateDefaultFolder:
+      overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
     directory: overrides.directory ?? vi.fn(async () => emptyPage),
     preview:
       overrides.preview ??
@@ -388,6 +390,63 @@ describe("authentication", () => {
 });
 
 describe("directory browser", () => {
+  it("opens the saved start folder only when entering through the app home", async () => {
+    const account = {
+      ...session,
+      defaultFolder: { shareId: "work", path: "projects" },
+    };
+    const api = fakeApi({ session: vi.fn(async () => account) });
+    const home = new MemoryNavigation({ shareId: null, path: "" });
+    const first = render(<App api={api} navigation={home} />);
+
+    await waitFor(() =>
+      expect(home.visits).toEqual([
+        {
+          route: { shareId: "work", path: "projects" },
+          replace: true,
+        },
+      ]),
+    );
+    first.unmount();
+
+    const direct = new MemoryNavigation({ shareId: "read-only", path: "" });
+    render(<App api={api} navigation={direct} />);
+    await screen.findByRole("heading", { name: "Reference", level: 1 });
+    expect(direct.visits).toEqual([]);
+  });
+
+  it("saves the current folder as the account start folder from Settings", async () => {
+    const updateDefaultFolder = vi.fn<ApiClient["updateDefaultFolder"]>(
+      async (folder) => folder,
+    );
+    const navigation = new MemoryNavigation({
+      shareId: "work",
+      path: "projects",
+    });
+    render(
+      <App api={fakeApi({ updateDefaultFolder })} navigation={navigation} />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("region", { name: "Settings" })).toHaveTextContent(
+      "First shared folder",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Use current folder" }));
+    await waitFor(() =>
+      expect(updateDefaultFolder).toHaveBeenCalledWith(
+        { shareId: "work", path: "projects" },
+        "csrf-in-memory",
+      ),
+    );
+    expect(screen.getByRole("region", { name: "Settings" })).toHaveTextContent(
+      "Working files / projects",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    await waitFor(() =>
+      expect(updateDefaultFolder).toHaveBeenCalledWith(null, "csrf-in-memory"),
+    );
+  });
+
   it("places a per-user hidden-file toggle above the list and persists it", async () => {
     const entries = [
       { name: ".private", kind: "directory" as const },

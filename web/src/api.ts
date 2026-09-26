@@ -17,8 +17,14 @@ export interface Share {
 export interface Session {
   user: User;
   shares: Share[];
+  defaultFolder?: DefaultFolder | null;
   /** An opaque CSRF value held in memory only. This is not the session ID. */
   csrfToken: string;
+}
+
+export interface DefaultFolder {
+  shareId: string;
+  path: string;
 }
 
 export interface LoginCredentials {
@@ -153,6 +159,10 @@ export interface ApiClient {
   authMethods(signal?: AbortSignal): Promise<AuthMethods>;
   login(credentials: LoginCredentials, signal?: AbortSignal): Promise<Session>;
   logout(csrfToken: string, signal?: AbortSignal): Promise<void>;
+  updateDefaultFolder(
+    folder: DefaultFolder | null,
+    csrfToken: string,
+  ): Promise<DefaultFolder | null>;
   directory(
     shareId: string,
     path: string,
@@ -318,6 +328,27 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         signal,
         headers: { "X-CSRF-Token": csrfToken },
       }),
+    updateDefaultFolder: async (folder, csrfToken) => {
+      if (folder && !isValidVirtualPath(folder.path)) {
+        throw new ApiError("invalid-request", "The virtual path is invalid");
+      }
+      const result = await request<unknown>("/api/v1/preferences", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({ defaultFolder: folder }),
+      });
+      if (
+        !isRecord(result) ||
+        !("defaultFolder" in result) ||
+        !isOptionalDefaultFolder(result.defaultFolder)
+      ) {
+        throw invalidResponse();
+      }
+      return result.defaultFolder as DefaultFolder | null;
+    },
     directory: async (shareId, path, cursor, signal, showHidden = true) => {
       if (!isValidVirtualPath(path)) {
         throw new ApiError("invalid-request", "The virtual path is invalid");
@@ -711,11 +742,23 @@ function parseSession(value: unknown): Session {
     typeof value.user.displayName !== "string" ||
     typeof value.csrfToken !== "string" ||
     !Array.isArray(value.shares) ||
-    !value.shares.every(isShare)
+    !value.shares.every(isShare) ||
+    !isOptionalDefaultFolder(value.defaultFolder)
   ) {
     throw invalidResponse();
   }
   return value as unknown as Session;
+}
+
+function isOptionalDefaultFolder(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    (isRecord(value) &&
+      typeof value.shareId === "string" &&
+      typeof value.path === "string" &&
+      isValidVirtualPath(value.path))
+  );
 }
 
 function parseDirectoryPage(

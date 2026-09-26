@@ -10,7 +10,7 @@ use rust_embed::RustEmbed;
 #[folder = "web/dist/"]
 #[include = "*.html"]
 #[include = "assets/*"]
-#[include = "crabinet.svg"]
+#[include = "crabinet.png"]
 #[include = "google-g.png"]
 struct WebAssets;
 
@@ -23,7 +23,7 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
 
     let requested = uri.path().trim_start_matches('/');
     let is_asset = requested.starts_with("assets/")
-        || requested == "crabinet.svg"
+        || requested == "crabinet.png"
         || requested == "google-g.png";
     let path = if requested.is_empty() {
         INDEX
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn crabinet_icon_is_embedded() {
-        assert!(WebAssets::get("crabinet.svg").is_some());
+        assert!(WebAssets::get("crabinet.png").is_some());
     }
 
     #[tokio::test]

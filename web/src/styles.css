@@ -285,6 +285,41 @@ select {
   font-size: 0.875rem;
 }
 
+.settings-panel {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-content {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  justify-content: space-between;
+  margin: 0 auto;
+  max-width: 100rem;
+  padding: 1rem;
+}
+
+.settings-content h2 {
+  font-size: 1rem;
+  margin: 0 0 0.2rem;
+}
+
+.settings-content p {
+  margin: 0;
+}
+
+.settings-content .muted {
+  font-size: 0.85rem;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .global-notice,
 .browser-layout {
   margin: 0 auto;

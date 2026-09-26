@@ -1,5 +1,7 @@
 # Crabinet
 
+<img src="web/public/crabinet.png" alt="Crabinet logo: a crab on a filing cabinet" width="128">
+
 Crabinet is a security-focused, low-memory file browser for a small server or Podman pod. It provides configuration-defined users, per-share read or write grants, normal filesystem-backed storage, drag-and-drop uploads, file operations, and bounded previews from one self-contained Rust executable with an embedded Preact interface.
 
 > **Maturity:** pre-1.0. The security model and configuration format are deliberate, but operators should validate resource limits and backup procedures in their own environment before exposing Crabinet to untrusted users.
@@ -13,7 +15,7 @@ Crabinet is a security-focused, low-memory file browser for a small server or Po
 - A lazy share/folder tree, touch-friendly folder picker, file-type icons, copyable virtual paths, folder-first browsing, metadata, conditional and ranged downloads, create/rename/move/delete operations, UTF-8 text editing, and streaming multipart uploads.
 - Bounded syntax-highlighted code and text previews, safe Markdown rendering without raw HTML, signature-validated raster image previews, and rendered/source HTML tabs with isolated new-tab views. Rendered HTML is protected by a deny-by-default response CSP and, in-panel, an additional empty iframe sandbox, so uploaded scripts, forms, navigation, and network requests cannot run.
 - Event-driven refreshes for the open directory through a bounded authenticated server-sent-events stream backed by a non-recursive kernel watch; Crabinet does not scan the share to detect changes.
-- Opaque server-side sessions in SQLite, session-bound CSRF protection, same-origin enforcement, bounded login attempts, and `Secure; HttpOnly; SameSite=Strict` cookies.
+- Opaque server-side sessions and per-user start-folder preferences in SQLite, session-bound CSRF protection, same-origin enforcement, bounded login attempts, and `Secure; HttpOnly; SameSite=Strict` cookies.
 - A single statically linked Linux binary for `amd64` and `arm64`, plus a `scratch`-based non-root OCI image published to GHCR.
 - CI-enforced Rust and frontend tests, dependency policy, Semgrep, Trivy, weekly scans, SBOMs, checksums, and build-provenance attestations.
 
@@ -21,7 +23,9 @@ Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem l
 
 ## Architecture
 
-The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores only runtime session state. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
+The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores runtime sessions and each user's chosen start folder. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
+
+Signed-in users can open **Settings** and choose **Use current folder** to make the open directory their start folder across devices. **Reset** returns to the first shared folder. Direct folder links continue to open their specified destination. The Show hidden files preference remains local to each browser.
 
 Start with the [threat model](docs/threat-model.md), [architecture decisions](docs/architecture-decisions.md), and [filesystem invariants](docs/filesystem-security.md) before changing a security boundary. The HTTP behavior used by the frontend is documented in [browse](docs/browse-api.md), [mutation](docs/mutations.md), [preview](docs/previews.md), and [frontend contract](docs/frontend-api-contract.md) notes; these describe the current first-party API, not a stable third-party compatibility promise.
 
@@ -181,6 +185,8 @@ Restore while Crabinet is stopped. Restore configuration, secret, SQLite state, 
 4. Check both health endpoints, login, each grant class, a representative preview, and a small write on a disposable path.
 
 For rollback, stop the new process before starting the old one. Restore the pre-upgrade SQLite/config snapshot if release notes describe a state or schema change. Never run old and new versions concurrently against a writable share or the same SQLite database.
+
+The start-folder feature migrates the SQLite schema from version 1 to 2 at startup. A version 1 binary cannot open a migrated database; restore its matching pre-upgrade SQLite snapshot before rolling back.
 
 ## Troubleshooting and logs
 

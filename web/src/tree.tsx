@@ -382,7 +382,9 @@ function TreeNode(props: TreeNodeProps) {
               />
             );
           })}
-          {nodeState?.loading && <li class="tree-status">Loading…</li>}
+          {nodeState?.loading && !nodeState.page && (
+            <li class="tree-status">Loading…</li>
+          )}
           {nodeState?.error && (
             <li class="tree-status">
               <button
