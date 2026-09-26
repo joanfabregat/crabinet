@@ -388,6 +388,85 @@ describe("authentication", () => {
 });
 
 describe("directory browser", () => {
+  it("places a per-user hidden-file toggle above the list and persists it", async () => {
+    const entries = [
+      { name: ".private", kind: "directory" as const },
+      { name: "public", kind: "directory" as const },
+      { name: ".secret.txt", kind: "file" as const },
+      { name: "notes.txt", kind: "file" as const },
+    ];
+    const directory = vi.fn<ApiClient["directory"]>(
+      async (shareId, path, _cursor, _signal, showHidden = true) => ({
+        shareId,
+        path,
+        entries:
+          path === ""
+            ? entries.filter(
+                (entry) => showHidden || !entry.name.startsWith("."),
+              )
+            : [],
+      }),
+    );
+    const api = fakeApi({ directory });
+    const navigation = new MemoryNavigation();
+    const first = render(<App api={api} navigation={navigation} />);
+
+    const toggle = await screen.findByRole("checkbox", {
+      name: "Show hidden files",
+    });
+    expect(toggle).toBeChecked();
+    expect(
+      await screen.findByRole("link", { name: ".secret.txt" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Reference" }));
+    expect(
+      await within(
+        screen.getByRole("complementary", { name: "Shared folders" }),
+      ).findByRole("link", { name: ".private" }),
+    ).toBeVisible();
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull(),
+    );
+    expect(screen.queryByRole("link", { name: ".private" })).toBeNull();
+    expect(directory).toHaveBeenCalledWith(
+      "read-only",
+      "",
+      undefined,
+      expect.any(AbortSignal),
+      false,
+    );
+    expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
+      "false",
+    );
+
+    first.unmount();
+    render(<App api={api} navigation={new MemoryNavigation()} />);
+    expect(
+      await screen.findByRole("checkbox", { name: "Show hidden files" }),
+    ).not.toBeChecked();
+    await screen.findByRole("link", { name: "notes.txt" });
+    expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull();
+  });
+
+  it("aligns the hidden-file toggle before the upload action", async () => {
+    const navigation = new MemoryNavigation({ shareId: "work", path: "" });
+    render(<App api={fakeApi()} navigation={navigation} />);
+
+    const toolbar = (
+      await screen.findByRole("checkbox", {
+        name: "Show hidden files",
+      })
+    ).closest(".directory-toolbar");
+    expect(toolbar?.firstElementChild).toHaveTextContent("Show hidden files");
+    expect(
+      within(toolbar as HTMLElement).getByRole("button", {
+        name: "Upload files",
+      }),
+    ).toBeVisible();
+  });
+
   it("opens sidebar folders and explains when there are no subfolders", async () => {
     const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
       shareId,
@@ -413,7 +492,13 @@ describe("directory browser", () => {
     });
     expect(photos).toHaveAttribute("aria-current", "page");
     expect(await sidebar.findByText("No subfolders")).toBeVisible();
-    expect(directory).toHaveBeenCalledWith("read-only", "Photos", undefined);
+    expect(directory).toHaveBeenCalledWith(
+      "read-only",
+      "Photos",
+      undefined,
+      undefined,
+      true,
+    );
   });
 
   it("uses labelled landmarks and keyboard-native controls", async () => {
@@ -513,6 +598,7 @@ describe("directory browser", () => {
       "",
       "page-2",
       expect.any(AbortSignal),
+      true,
     );
   });
 
@@ -538,6 +624,7 @@ describe("directory browser", () => {
         "projects/Crabinet",
         undefined,
         expect.any(AbortSignal),
+        true,
       ),
     );
 
@@ -552,6 +639,7 @@ describe("directory browser", () => {
         "projects/Crabinet",
         undefined,
         expect.any(AbortSignal),
+        true,
       ),
     );
   });

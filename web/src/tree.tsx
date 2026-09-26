@@ -4,7 +4,7 @@ import {
   FilePlus2,
   FolderPlus,
 } from "lucide-preact";
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import {
   type ApiClient,
@@ -39,8 +39,14 @@ function joinPath(parent: string, child: string) {
   return parent ? `${parent}/${child}` : child;
 }
 
-function directories(page?: DirectoryPage) {
-  return page?.entries.filter((entry) => entry.kind === "directory") ?? [];
+function directories(page?: DirectoryPage, showHidden = true) {
+  return (
+    page?.entries.filter(
+      (entry) =>
+        entry.kind === "directory" &&
+        (showHidden || !entry.name.startsWith(".")),
+    ) ?? []
+  );
 }
 
 function mergePage(current: DirectoryPage | undefined, next: DirectoryPage) {
@@ -97,6 +103,7 @@ interface ShareTreeProps {
   api: ApiClient;
   shares: Share[];
   revision: number;
+  showHidden: boolean;
   activeShareId: string;
   activePath: string;
   navigation: BrowserNavigation;
@@ -114,6 +121,7 @@ export function ShareTree({
   api,
   shares,
   revision,
+  showHidden,
   activeShareId,
   activePath,
   navigation,
@@ -124,6 +132,8 @@ export function ShareTree({
 }: ShareTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [state, setState] = useState<Record<string, TreeState>>({});
+  const showHiddenRef = useRef(showHidden);
+  showHiddenRef.current = showHidden;
   const activeShare = shares.find((share) => share.id === activeShareId);
 
   const load = useCallback(
@@ -134,7 +144,14 @@ export function ShareTree({
         [nodeKey]: { ...current[nodeKey], loading: true, error: false },
       }));
       try {
-        const page = await api.directory(shareId, path, cursor);
+        const page = await api.directory(
+          shareId,
+          path,
+          cursor,
+          undefined,
+          showHidden,
+        );
+        if (showHiddenRef.current !== showHidden) return;
         setState((current) => ({
           ...current,
           [nodeKey]: {
@@ -142,6 +159,7 @@ export function ShareTree({
           },
         }));
       } catch (error) {
+        if (showHiddenRef.current !== showHidden) return;
         if (
           typeof error === "object" &&
           error !== null &&
@@ -157,7 +175,7 @@ export function ShareTree({
         }
       }
     },
-    [api, onSessionExpired],
+    [api, onSessionExpired, showHidden],
   );
 
   useEffect(() => {
@@ -233,6 +251,7 @@ export function ShareTree({
             <TreeNode
               key={share.id}
               apiState={state}
+              showHidden={showHidden}
               expanded={expanded}
               level={0}
               name={share.name}
@@ -255,6 +274,7 @@ export function ShareTree({
 
 interface TreeNodeProps {
   apiState: Record<string, TreeState>;
+  showHidden: boolean;
   expanded: Set<string>;
   level: number;
   name: string;
@@ -272,6 +292,7 @@ interface TreeNodeProps {
 function TreeNode(props: TreeNodeProps) {
   const {
     apiState,
+    showHidden,
     expanded,
     level,
     name,
@@ -289,7 +310,7 @@ function TreeNode(props: TreeNodeProps) {
   const open = expanded.has(nodeKey);
   const nodeState = apiState[nodeKey];
   const selected = activeShareId === share.id && activePath === path;
-  const childDirectories = directories(nodeState?.page);
+  const childDirectories = directories(nodeState?.page, showHidden);
 
   return (
     <li class="tree-item">

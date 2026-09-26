@@ -58,6 +58,20 @@ const defaultApi = createApiClient();
 const defaultOidcRedirect = (url: string) => window.location.assign(url);
 declare const __CRABINET_DEV_REVISION__: string | null;
 
+function hiddenFilesPreferenceKey(userId: string): string {
+  return `crabinet.showHiddenFiles.${userId}`;
+}
+
+function readShowHiddenFiles(userId: string): boolean {
+  try {
+    return (
+      window.localStorage.getItem(hiddenFilesPreferenceKey(userId)) !== "false"
+    );
+  } catch {
+    return true;
+  }
+}
+
 type AuthState =
   | { status: "loading" }
   | { status: "error" }
@@ -422,6 +436,7 @@ function AuthenticatedShell({
             route={route}
             share={selectedShare}
             shares={session.shares}
+            userId={session.user.id}
             onSessionExpired={onSessionExpired}
           />
         ) : (
@@ -440,6 +455,7 @@ interface DirectoryBrowserProps {
   route: BrowserRoute;
   share: Share;
   shares: Share[];
+  userId: string;
   onSessionExpired: () => void;
 }
 
@@ -450,6 +466,7 @@ function DirectoryBrowser({
   route,
   share,
   shares,
+  userId,
   onSessionExpired,
 }: DirectoryBrowserProps) {
   const [page, setPage] = useState<DirectoryPage>();
@@ -457,6 +474,9 @@ function DirectoryBrowser({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiError>();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
+    readShowHiddenFiles(userId),
+  );
   const [operation, setOperation] = useState<EntryOperation>();
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
@@ -468,6 +488,33 @@ function DirectoryBrowser({
   const activePreview = useRef(route.previewPath);
   activePreview.current = route.previewPath;
   const writable = share.access === "read-write";
+  const visibleEntries =
+    page?.entries.filter(
+      (entry) => showHiddenFiles || !entry.name.startsWith("."),
+    ) ?? [];
+
+  useEffect(() => {
+    const key = hiddenFilesPreferenceKey(userId);
+    const syncPreference = (event: StorageEvent) => {
+      if (event.key === key || event.key === null) {
+        setShowHiddenFiles(readShowHiddenFiles(userId));
+      }
+    };
+    window.addEventListener("storage", syncPreference);
+    return () => window.removeEventListener("storage", syncPreference);
+  }, [userId]);
+
+  const updateShowHiddenFiles = (value: boolean) => {
+    setShowHiddenFiles(value);
+    try {
+      window.localStorage.setItem(
+        hiddenFilesPreferenceKey(userId),
+        String(value),
+      );
+    } catch {
+      // The display preference still works for this tab if storage is blocked.
+    }
+  };
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
@@ -590,30 +637,47 @@ function DirectoryBrowser({
     setPage(undefined);
     setError(undefined);
 
-    api.directory(share.id, route.path, undefined, controller.signal).then(
-      (result) => {
-        setPage(result);
-        setLoading(false);
-        if (shouldFocusHeading) {
-          requestAnimationFrame(() => headingRef.current?.focus());
-        }
-      },
-      (cause: unknown) => {
-        if (isAborted(cause)) return;
-        if (isUnauthorized(cause)) {
-          onSessionExpired();
-          return;
-        }
-        setError(asApiError(cause));
-        setLoading(false);
-      },
-    );
+    api
+      .directory(
+        share.id,
+        route.path,
+        undefined,
+        controller.signal,
+        showHiddenFiles,
+      )
+      .then(
+        (result) => {
+          if (controller.signal.aborted) return;
+          setPage(result);
+          setLoading(false);
+          if (shouldFocusHeading) {
+            requestAnimationFrame(() => headingRef.current?.focus());
+          }
+        },
+        (cause: unknown) => {
+          if (controller.signal.aborted) return;
+          if (isAborted(cause)) return;
+          if (isUnauthorized(cause)) {
+            onSessionExpired();
+            return;
+          }
+          setError(asApiError(cause));
+          setLoading(false);
+        },
+      );
 
     return () => {
       controller.abort();
       loadMoreController.current?.abort();
     };
-  }, [api, onSessionExpired, refreshKey, route.path, share.id]);
+  }, [
+    api,
+    onSessionExpired,
+    refreshKey,
+    route.path,
+    share.id,
+    showHiddenFiles,
+  ]);
 
   useEffect(() => {
     if (typeof EventSource === "undefined") return;
@@ -673,7 +737,9 @@ function DirectoryBrowser({
         route.path,
         page.nextCursor,
         controller.signal,
+        showHiddenFiles,
       );
+      if (controller.signal.aborted) return;
       setPage((current) =>
         current
           ? {
@@ -757,6 +823,7 @@ function DirectoryBrowser({
         api={api}
         shares={shares}
         revision={refreshKey}
+        showHidden={showHiddenFiles}
         activeShareId={share.id}
         activePath={route.path}
         navigation={navigation}
@@ -815,19 +882,31 @@ function DirectoryBrowser({
           />
         </div>
 
-        {writable && (
-          <WriteToolbar
-            onUpload={(files) =>
-              setUploadSelection({ id: crypto.randomUUID(), files })
-            }
-          />
-        )}
+        <div class="directory-toolbar">
+          <label class="hidden-files-toggle">
+            <input
+              type="checkbox"
+              checked={showHiddenFiles}
+              onChange={(event) =>
+                updateShowHiddenFiles(event.currentTarget.checked)
+              }
+            />
+            Show hidden files
+          </label>
+          {writable && (
+            <WriteToolbar
+              onUpload={(files) =>
+                setUploadSelection({ id: crypto.randomUUID(), files })
+              }
+            />
+          )}
+        </div>
 
         <div class="sr-only" role="status" aria-live="polite">
           {loading
             ? "Loading folder"
             : page
-              ? `${page.entries.length} items loaded`
+              ? `${visibleEntries.length} items loaded`
               : "Folder unavailable"}
         </div>
 
@@ -841,15 +920,23 @@ function DirectoryBrowser({
             navigation={navigation}
             retry={() => setRefreshKey((value) => value + 1)}
           />
-        ) : page && page.entries.length === 0 ? (
+        ) : page && visibleEntries.length === 0 ? (
           <EmptyState
-            title="This folder is empty"
-            detail="There are no files or folders here."
+            title={
+              showHiddenFiles
+                ? "This folder is empty"
+                : "No visible files or folders"
+            }
+            detail={
+              showHiddenFiles
+                ? "There are no files or folders here."
+                : "Turn on Show hidden files to include dotfiles and dotfolders."
+            }
           />
         ) : page ? (
           <>
             <EntryList
-              entries={page.entries}
+              entries={visibleEntries}
               shareId={share.id}
               path={route.path}
               navigation={navigation}

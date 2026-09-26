@@ -887,13 +887,33 @@ html.preview-fullscreen-open body {
   padding: 1.4rem 1.25rem;
 }
 
-.write-toolbar {
+.directory-toolbar {
   align-items: center;
   border-top: 1px solid var(--line);
   display: flex;
   gap: 1rem;
-  justify-content: flex-end;
+  justify-content: space-between;
   padding: 0.85rem 1.25rem;
+}
+
+.hidden-files-toggle {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.hidden-files-toggle input {
+  accent-color: var(--accent);
+  height: 1rem;
+  width: 1rem;
+}
+
+.write-toolbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .write-actions,
@@ -1279,9 +1299,8 @@ html.preview-fullscreen-open body {
     justify-content: flex-start;
   }
 
-  .write-toolbar {
-    align-items: stretch;
-    flex-direction: column;
+  .directory-toolbar {
+    flex-wrap: wrap;
   }
 
   .preview-header {

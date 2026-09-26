@@ -158,6 +158,7 @@ export interface ApiClient {
     path: string,
     cursor?: string,
     signal?: AbortSignal,
+    showHidden?: boolean,
   ): Promise<DirectoryPage>;
   preview(
     shareId: string,
@@ -317,12 +318,13 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         signal,
         headers: { "X-CSRF-Token": csrfToken },
       }),
-    directory: async (shareId, path, cursor, signal) => {
+    directory: async (shareId, path, cursor, signal, showHidden = true) => {
       if (!isValidVirtualPath(path)) {
         throw new ApiError("invalid-request", "The virtual path is invalid");
       }
       const query = new URLSearchParams({ path, limit: "100" });
       if (cursor) query.set("cursor", cursor);
+      if (!showHidden) query.set("showHidden", "false");
       return parseDirectoryPage(
         await request<unknown>(
           `/api/v1/shares/${encodeURIComponent(shareId)}/directory?${query.toString()}`,
