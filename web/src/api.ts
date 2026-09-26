@@ -6,6 +6,7 @@ export interface User {
   id: string;
   username: string;
   displayName: string;
+  pictureUrl?: string;
 }
 
 export interface Share {
@@ -740,6 +741,8 @@ function parseSession(value: unknown): Session {
     typeof value.user.id !== "string" ||
     typeof value.user.username !== "string" ||
     typeof value.user.displayName !== "string" ||
+    (value.user.pictureUrl !== undefined &&
+      typeof value.user.pictureUrl !== "string") ||
     typeof value.csrfToken !== "string" ||
     !Array.isArray(value.shares) ||
     !value.shares.every(isShare) ||

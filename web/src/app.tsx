@@ -495,6 +495,16 @@ function AuthenticatedShell({
       )}
       <AppHeader>
         <div class="account-actions">
+          {session.user.pictureUrl && (
+            <img
+              class="account-avatar"
+              src={session.user.pictureUrl}
+              alt={`Google profile photo of ${session.user.displayName}`}
+              referrerPolicy="no-referrer"
+              width="32"
+              height="32"
+            />
+          )}
           <span class="account-name">{session.user.displayName}</span>
           <TooltipButton
             label="Settings"

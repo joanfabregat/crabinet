@@ -38,7 +38,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SESSION_COOKIE: &str = "crabinet_session";
 const TOKEN_BYTES: usize = 32;
-const SESSION_SCHEMA_VERSION: i64 = 2;
+const SESSION_SCHEMA_VERSION: i64 = 3;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
@@ -149,6 +149,7 @@ struct SessionStore {
 #[derive(Clone, Debug)]
 struct StoredSession {
     username: String,
+    picture_url: Option<String>,
     created_at: i64,
     last_seen_at: i64,
     expires_at: i64,
@@ -158,6 +159,7 @@ struct SessionRotation {
     old_key: Option<Vec<u8>>,
     new_key: Vec<u8>,
     username: String,
+    picture_url: Option<String>,
     now: i64,
     expires_at: i64,
     idle_cutoff: i64,
@@ -169,6 +171,7 @@ struct SessionRotation {
 struct AuthenticatedSession {
     principal: AuthenticatedPrincipal,
     session_token: [u8; TOKEN_BYTES],
+    picture_url: Option<String>,
 }
 
 trait Clock: Send + Sync {
@@ -261,12 +264,15 @@ struct SessionUser {
     id: String,
     username: String,
     display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    picture_url: Option<String>,
 }
 
 struct NewSession {
     cookie_token: String,
     csrf_token: String,
     username: String,
+    picture_url: Option<String>,
 }
 
 impl AuthService {
@@ -430,6 +436,7 @@ impl AuthService {
         let session = self
             .issue_session(
                 account,
+                None,
                 old_cookie.and_then(|token| self.session_key(token)),
             )
             .await?;
@@ -444,6 +451,7 @@ impl AuthService {
     pub(crate) async fn login_oidc(
         &self,
         email: &str,
+        picture_url: Option<&str>,
         old_cookie: Option<&str>,
     ) -> Result<(String, String, String), AppError> {
         let email = email.to_ascii_lowercase();
@@ -458,6 +466,7 @@ impl AuthService {
         let session = self
             .issue_session(
                 username,
+                picture_url,
                 old_cookie.and_then(|token| self.session_key(token)),
             )
             .await?;
@@ -467,6 +476,7 @@ impl AuthService {
     async fn issue_session(
         &self,
         username: &str,
+        picture_url: Option<&str>,
         old_key: Option<Vec<u8>>,
     ) -> Result<NewSession, AppError> {
         let now = self.inner.clock.now();
@@ -482,6 +492,7 @@ impl AuthService {
                 old_key,
                 new_key: session_key,
                 username: username.to_owned(),
+                picture_url: picture_url.map(str::to_owned),
                 now,
                 expires_at,
                 idle_cutoff: now.saturating_sub(self.inner.idle_timeout_seconds),
@@ -493,6 +504,7 @@ impl AuthService {
             cookie_token,
             csrf_token: csrf_token_text,
             username: username.to_owned(),
+            picture_url: picture_url.map(str::to_owned),
         })
     }
 
@@ -522,6 +534,7 @@ impl AuthService {
                 username: Arc::from(session.username),
             },
             session_token: raw_token,
+            picture_url: session.picture_url,
         })
     }
 
@@ -603,6 +616,7 @@ impl AuthService {
         browse: &BrowseState,
         username: &str,
         csrf_token: String,
+        picture_url: Option<String>,
     ) -> Result<SessionResponse, AppError> {
         let default_folder = self.inner.store.default_folder(username).await?;
         let default_folder =
@@ -612,6 +626,7 @@ impl AuthService {
                 id: username.to_owned(),
                 username: username.to_owned(),
                 display_name: username.to_owned(),
+                picture_url,
             },
             shares: self.effective_shares(username),
             default_folder,
@@ -713,6 +728,14 @@ impl SessionStore {
                  COMMIT;",
             )?;
         }
+        if version < 3 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE sessions ADD COLUMN picture_url TEXT;
+                 PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -787,6 +810,7 @@ impl SessionStore {
                 old_key,
                 new_key,
                 username,
+                picture_url,
                 now,
                 expires_at,
                 idle_cutoff,
@@ -825,9 +849,9 @@ impl SessionStore {
             )?;
             transaction.execute(
                 "INSERT INTO sessions
-                 (session_key, username, created_at, last_seen_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?3, ?4)",
-                params![new_key, username, now, expires_at],
+                 (session_key, username, created_at, last_seen_at, expires_at, picture_url)
+                 VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+                params![new_key, username, now, expires_at, picture_url],
             )?;
             transaction.commit()
         })
@@ -838,7 +862,7 @@ impl SessionStore {
         self.with_connection(move |connection| {
             connection
                 .query_row(
-                    "SELECT username, created_at, last_seen_at, expires_at
+                    "SELECT username, created_at, last_seen_at, expires_at, picture_url
                      FROM sessions WHERE session_key = ?1",
                     params![key],
                     |row| {
@@ -847,6 +871,7 @@ impl SessionStore {
                             created_at: row.get(1)?,
                             last_seen_at: row.get(2)?,
                             expires_at: row.get(3)?,
+                            picture_url: row.get(4)?,
                         })
                     },
                 )
@@ -970,6 +995,7 @@ async fn current_session(
             state.browse(),
             session.principal.username(),
             encode_hex(&auth.digest(b"csrf-token\0", &session.session_token)),
+            session.picture_url,
         )
         .await?,
         None,
@@ -1024,8 +1050,13 @@ async fn login(
         .await?;
     Ok(session_json(
         StatusCode::OK,
-        auth.session_response(state.browse(), &session.username, session.csrf_token)
-            .await?,
+        auth.session_response(
+            state.browse(),
+            &session.username,
+            session.csrf_token,
+            session.picture_url,
+        )
+        .await?,
         Some(session_cookie_header(
             &session.cookie_token,
             auth.inner.absolute_timeout_seconds,
@@ -1744,8 +1775,12 @@ mod tests {
         let sessions: i64 = connection
             .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(sessions, 1);
+        let picture: Option<String> = connection
+            .query_row("SELECT picture_url FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert!(picture.is_none());
     }
 
     #[tokio::test]
@@ -1762,16 +1797,24 @@ mod tests {
             Err(AppError::AuthenticationFailed)
         ));
         assert!(matches!(
-            test.service.login_oidc("unknown@example.com", None).await,
+            test.service
+                .login_oidc("unknown@example.com", None, None)
+                .await,
             Err(AppError::AuthenticationFailed)
         ));
         assert!(matches!(
-            test.service.login_oidc("disabled@example.com", None).await,
+            test.service
+                .login_oidc("disabled@example.com", None, None)
+                .await,
             Err(AppError::AuthenticationFailed)
         ));
         let (username, cookie, _) = test
             .service
-            .login_oidc("ALICE@example.com", None)
+            .login_oidc(
+                "ALICE@example.com",
+                Some("https://lh3.googleusercontent.com/a/test-avatar"),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(username, "Alice");
@@ -1781,6 +1824,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.principal.username(), "Alice");
+        assert_eq!(
+            session.picture_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/a/test-avatar")
+        );
+    }
+
+    #[tokio::test]
+    async fn password_login_does_not_inherit_google_picture() {
+        let mut test = test_auth(1, 5);
+        Arc::get_mut(&mut test.service.inner)
+            .unwrap()
+            .users
+            .get_mut("Alice")
+            .unwrap()
+            .email = Some("alice@example.com".into());
+        let (_, google_cookie, _) = test
+            .service
+            .login_oidc(
+                "alice@example.com",
+                Some("https://lh3.googleusercontent.com/a/avatar"),
+                None,
+            )
+            .await
+            .unwrap();
+        let password_session = test
+            .service
+            .login(
+                "Alice",
+                "a very long unicode password 🙂",
+                None,
+                Some(&google_cookie),
+            )
+            .await
+            .unwrap();
+        assert!(password_session.picture_url.is_none());
+        let session = test
+            .service
+            .authenticate(&headers_with_cookie(&format!(
+                "{SESSION_COOKIE}={}",
+                password_session.cookie_token
+            )))
+            .await
+            .unwrap();
+        assert!(session.picture_url.is_none());
     }
 
     #[tokio::test]
