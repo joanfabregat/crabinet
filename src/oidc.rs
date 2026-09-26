@@ -85,6 +85,7 @@ struct Claims {
     iat: Option<u64>,
     email: Option<String>,
     email_verified: Option<bool>,
+    picture: Option<String>,
 }
 
 impl Claims {
@@ -95,6 +96,17 @@ impl Claims {
             None
         }
     }
+}
+
+fn google_picture_url(picture: Option<&str>) -> Option<&str> {
+    let picture = picture.filter(|value| value.len() <= 2_048)?;
+    let url = Url::parse(picture).ok()?;
+    (url.scheme() == "https"
+        && url.host_str() == Some("lh3.googleusercontent.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(picture)
 }
 
 #[derive(Serialize)]
@@ -180,7 +192,7 @@ impl OidcService {
             .append_pair("response_type", "code")
             .append_pair("client_id", self.inner.config.client_id())
             .append_pair("redirect_uri", self.inner.config.redirect_uri())
-            .append_pair("scope", "openid email")
+            .append_pair("scope", "openid profile email")
             .append_pair("state", &state)
             .append_pair("nonce", &nonce)
             .append_pair("code_challenge", &challenge)
@@ -260,7 +272,11 @@ impl OidcService {
             return Ok(redirect_unknown());
         };
         match auth
-            .login_oidc(&email, transaction.previous_cookie.as_deref())
+            .login_oidc(
+                &email,
+                google_picture_url(claims.picture.as_deref()),
+                transaction.previous_cookie.as_deref(),
+            )
             .await
         {
             Ok((_, cookie_token, _)) => {
@@ -583,10 +599,27 @@ mod tests {
                 "iss": issuer, "sub": "stable-subject", "aud": audience,
                 "exp": expiry, "iat": unix_time().unwrap(), "nonce": nonce,
                 "email": "Alice@Example.com", "email_verified": verified,
+                "picture": "https://lh3.googleusercontent.com/a/test-avatar",
             }),
             &EncodingKey::from_ec_der(private),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn accepts_only_google_avatar_urls() {
+        assert_eq!(
+            google_picture_url(Some("https://lh3.googleusercontent.com/a/avatar")),
+            Some("https://lh3.googleusercontent.com/a/avatar")
+        );
+        for url in [
+            "http://lh3.googleusercontent.com/a/avatar",
+            "https://lh3.googleusercontent.com.evil.example/a/avatar",
+            "https://evil.example/a/avatar",
+            "https://user@lh3.googleusercontent.com/a/avatar",
+        ] {
+            assert_eq!(google_picture_url(Some(url)), None);
+        }
     }
 
     #[tokio::test]
@@ -751,6 +784,11 @@ email = "alice@example.com"
                 .unwrap(),
         )
         .unwrap();
+        assert!(
+            location
+                .query_pairs()
+                .any(|(key, value)| { key == "scope" && value == "openid profile email" })
+        );
         let state = location
             .query_pairs()
             .find(|(key, _)| key == "state")

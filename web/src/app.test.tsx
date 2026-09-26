@@ -595,6 +595,34 @@ describe("directory browser", () => {
     );
   });
 
+  it("shows a Google profile picture only when the session includes one", async () => {
+    const withPicture: Session = {
+      ...session,
+      user: {
+        ...session.user,
+        pictureUrl: "https://lh3.googleusercontent.com/a/test-avatar",
+      },
+    };
+    const first = render(
+      <App
+        api={fakeApi({ session: vi.fn(async () => withPicture) })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+    const picture = await screen.findByRole("img", {
+      name: "Google profile photo of Joan",
+    });
+    expect(picture).toHaveAttribute("src", withPicture.user.pictureUrl);
+    expect(picture).toHaveAttribute("referrerpolicy", "no-referrer");
+
+    first.unmount();
+    render(<App api={fakeApi()} navigation={new MemoryNavigation()} />);
+    await screen.findByRole("button", { name: "Settings" });
+    expect(
+      screen.queryByRole("img", { name: /Google profile photo/ }),
+    ).toBeNull();
+  });
+
   it("opens sidebar folders and explains when there are no subfolders", async () => {
     const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
       shareId,

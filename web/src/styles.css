@@ -285,6 +285,13 @@ select {
   font-size: 0.875rem;
 }
 
+.account-avatar {
+  border-radius: 50%;
+  height: 2rem;
+  object-fit: cover;
+  width: 2rem;
+}
+
 .settings-content {
   display: grid;
   gap: 0.5rem;
