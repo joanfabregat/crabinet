@@ -34,6 +34,7 @@ import {
 } from "./api";
 import {
   EntryActionButtons,
+  Modal,
   OperationDialog,
   UploadQueue,
   WriteToolbar,
@@ -177,6 +178,14 @@ export function App({
                 ...current,
                 session: { ...current.session, defaultFolder: folder },
               }
+            : current,
+        )
+      }
+      onSessionRefreshed={(session) =>
+        setAuth((current) =>
+          current.status === "authenticated" &&
+          current.session.user.id === session.user.id
+            ? { status: "authenticated", session }
             : current,
         )
       }
@@ -380,6 +389,7 @@ interface AuthenticatedShellProps {
   onSessionExpired: () => void;
   onSignedOut: () => void;
   onDefaultFolderChanged: (folder: DefaultFolder | null) => void;
+  onSessionRefreshed: (session: Session) => void;
 }
 
 function AuthenticatedShell({
@@ -390,6 +400,7 @@ function AuthenticatedShell({
   onSessionExpired,
   onSignedOut,
   onDefaultFolderChanged,
+  onSessionRefreshed,
 }: AuthenticatedShellProps) {
   const [signingOut, setSigningOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string>();
@@ -454,9 +465,8 @@ function AuthenticatedShell({
           <Button
             variant="secondary"
             type="button"
-            aria-expanded={settingsOpen}
-            aria-controls="user-settings"
-            onClick={() => setSettingsOpen((open) => !open)}
+            aria-haspopup="dialog"
+            onClick={() => setSettingsOpen(true)}
           >
             Settings
           </Button>
@@ -466,23 +476,21 @@ function AuthenticatedShell({
         </div>
       </AppHeader>
       {settingsOpen && (
-        <section
-          id="user-settings"
-          class="settings-panel"
-          aria-label="Settings"
+        <Modal
+          title="Settings"
+          onClose={() => setSettingsOpen(false)}
+          busy={savingPreferences}
         >
           <div class="settings-content">
-            <div>
-              <h2>Start folder</h2>
-              <p>
-                {defaultFolder && defaultShare
-                  ? `${defaultShare.name}${defaultFolder.path ? ` / ${defaultFolder.path}` : ""}`
-                  : "First shared folder"}
-              </p>
-              <p class="muted">
-                This choice follows your account across devices.
-              </p>
-            </div>
+            <h3>Start folder</h3>
+            <p>
+              {defaultFolder && defaultShare
+                ? `${defaultShare.name}${defaultFolder.path ? ` / ${defaultFolder.path}` : ""}`
+                : "First shared folder"}
+            </p>
+            <p class="muted">
+              This choice follows your account across devices.
+            </p>
             <div class="settings-actions">
               <Button
                 variant="secondary"
@@ -509,7 +517,7 @@ function AuthenticatedShell({
               <Notice tone="danger">{preferencesError}</Notice>
             )}
           </div>
-        </section>
+        </Modal>
       )}
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
@@ -538,6 +546,7 @@ function AuthenticatedShell({
             shares={session.shares}
             userId={session.user.id}
             onSessionExpired={onSessionExpired}
+            onSessionRefreshed={onSessionRefreshed}
           />
         ) : (
           <p role="status">Opening a shared folder…</p>
@@ -557,6 +566,7 @@ interface DirectoryBrowserProps {
   shares: Share[];
   userId: string;
   onSessionExpired: () => void;
+  onSessionRefreshed: (session: Session) => void;
 }
 
 function DirectoryBrowser({
@@ -568,6 +578,7 @@ function DirectoryBrowser({
   shares,
   userId,
   onSessionExpired,
+  onSessionRefreshed,
 }: DirectoryBrowserProps) {
   const [page, setPage] = useState<DirectoryPage>();
   const [loading, setLoading] = useState(true);
@@ -1096,6 +1107,8 @@ function DirectoryBrowser({
           onClose={() => setOperation(undefined)}
           onChanged={changed}
           onSessionExpired={onSessionExpired}
+          onSessionRefreshed={onSessionRefreshed}
+          userId={userId}
         />
       )}
       {uploadSelection && (

@@ -220,13 +220,19 @@ test.describe("writable share operations", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     const losingEditor = competingPage.getByLabel("UTF-8 text content");
-    await losingEditor.fill("Stale second-browser edit\n");
+    const losingText = "Stale second-browser edit\n";
+    await losingEditor.fill(losingText);
     await competingPage.getByRole("button", { name: "Save" }).click();
     const conflict = competingPage.getByRole("alert");
     await expect(conflict).toContainText("changed after you opened it");
-    await expect(losingEditor).toBeDisabled();
+    await expect(losingEditor).toBeEnabled();
+    await expect(losingEditor).toHaveValue(losingText);
+    await expect(
+      competingPage.getByRole("button", { name: "Save" }),
+    ).toBeDisabled();
     expect(await readText(page, "writable", "README.md")).toBe(winningText);
 
+    competingPage.once("dialog", (dialog) => dialog.accept());
     await conflict
       .getByRole("button", { name: "Reload latest version" })
       .click();

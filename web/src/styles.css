@@ -82,8 +82,8 @@ a {
 .brand-mark {
   border-radius: 0.65rem;
   display: block;
-  height: 2.25rem;
-  width: 2.25rem;
+  height: 3rem;
+  width: 3rem;
 }
 
 .centered-panel,
@@ -285,25 +285,14 @@ select {
   font-size: 0.875rem;
 }
 
-.settings-panel {
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-}
-
 .settings-content {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem 2rem;
-  justify-content: space-between;
-  margin: 0 auto;
-  max-width: 100rem;
-  padding: 1rem;
+  display: grid;
+  gap: 0.5rem;
 }
 
-.settings-content h2 {
+.settings-content h3 {
   font-size: 1rem;
-  margin: 0 0 0.2rem;
+  margin: 0;
 }
 
 .settings-content p {
@@ -318,6 +307,7 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+  margin-top: 1rem;
 }
 
 .global-notice,

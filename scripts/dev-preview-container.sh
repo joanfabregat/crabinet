@@ -32,14 +32,34 @@ sed \
   -e 's|session_absolute_timeout_seconds = 300|session_absolute_timeout_seconds = 28800|g' \
   "$fixtures/config.toml.in" > "$state_dir/config.toml"
 
+# Land preview users in the synthetic writable share so create actions are visible.
+awk '
+  function finish_share() {
+    if (share_id == "writable") writable_share = share_block
+    else other_shares = other_shares share_block
+    share_block = ""
+  }
+  /^\[\[shares\]\]$/ {
+    finish_share()
+    share_block = $0 ORS
+    share_id = ""
+    next
+  }
+  share_block != "" {
+    share_block = share_block $0 ORS
+    if ($0 == "id = \"writable\"") share_id = "writable"
+    next
+  }
+  { print }
+  END {
+    finish_share()
+    printf "%s%s", writable_share, other_shares
+  }
+' "$state_dir/config.toml" > "$state_dir/ordered-config.toml"
+mv "$state_dir/ordered-config.toml" "$state_dir/config.toml"
+
 if [ -d /run/crabinet-oidc ]; then
-  joan_permission=$(cat /run/crabinet-oidc/joan-permission)
-  kelly_permission=$(cat /run/crabinet-oidc/kelly-permission)
-  case "$joan_permission:$kelly_permission" in
-    read:read|read:write|write:read|write:write) ;;
-    *) echo 'Invalid development OIDC permissions.' >&2; exit 1 ;;
-  esac
-  awk -v joan_permission="$joan_permission" -v kelly_permission="$kelly_permission" '
+  awk '
     function grant(user, permission) {
       print ""
       print "[[shares.grants]]"
@@ -51,8 +71,8 @@ if [ -d /run/crabinet-oidc ]; then
         grant("joan", "read")
         grant("kelly", "read")
       } else if (share == "writable") {
-        grant("joan", joan_permission)
-        grant("kelly", kelly_permission)
+        grant("joan", "write")
+        grant("kelly", "write")
       }
     }
     BEGIN {
