@@ -25,7 +25,7 @@ Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem l
 
 The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores runtime sessions and each user's chosen start folder. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
 
-Signed-in users can open **Settings** and choose **Use current folder** to make the open directory their start folder across devices. **Reset** returns to the first shared folder. Direct folder links continue to open their specified destination. The Show hidden files preference remains local to each browser.
+Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files preference is also in Settings and remains local to each browser.
 
 Start with the [threat model](docs/threat-model.md), [architecture decisions](docs/architecture-decisions.md), and [filesystem invariants](docs/filesystem-security.md) before changing a security boundary. The HTTP behavior used by the frontend is documented in [browse](docs/browse-api.md), [mutation](docs/mutations.md), [preview](docs/previews.md), and [frontend contract](docs/frontend-api-contract.md) notes; these describe the current first-party API, not a stable third-party compatibility promise.
 

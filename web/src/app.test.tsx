@@ -415,7 +415,7 @@ describe("directory browser", () => {
     expect(direct.visits).toEqual([]);
   });
 
-  it("saves the current folder as the account start folder from Settings", async () => {
+  it("selects a shared-folder root as the account start folder from Settings", async () => {
     const updateDefaultFolder = vi.fn<ApiClient["updateDefaultFolder"]>(
       async (folder) => folder,
     );
@@ -429,18 +429,20 @@ describe("directory browser", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     const dialog = screen.getByRole("dialog", { name: "Settings" });
-    expect(dialog).toHaveTextContent("First shared folder");
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Use current folder" }),
-    );
+    const select = within(dialog).getByRole("combobox", {
+      name: "Start folder",
+    });
+    expect(select).toHaveValue("");
+    expect(within(dialog).getAllByRole("option")).toHaveLength(3);
+    fireEvent.change(select, { target: { value: "work" } });
     await waitFor(() =>
       expect(updateDefaultFolder).toHaveBeenCalledWith(
-        { shareId: "work", path: "projects" },
+        { shareId: "work", path: "" },
         "csrf-in-memory",
       ),
     );
-    expect(dialog).toHaveTextContent("Working files / projects");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Reset" }));
+    await waitFor(() => expect(select).toHaveValue("work"));
+    fireEvent.change(select, { target: { value: "" } });
     await waitFor(() =>
       expect(updateDefaultFolder).toHaveBeenCalledWith(null, "csrf-in-memory"),
     );
@@ -452,7 +454,28 @@ describe("directory browser", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("places a per-user hidden-file toggle above the list and persists it", async () => {
+  it("shows an existing nested start folder without offering nested choices", async () => {
+    const api = fakeApi({
+      session: vi.fn(async () => ({
+        ...session,
+        defaultFolder: { shareId: "work", path: "projects" },
+      })),
+    });
+    render(<App api={api} navigation={new MemoryNavigation()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const select = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("combobox", { name: "Start folder" });
+    expect(select).toHaveValue("/");
+    expect(
+      within(select).getByRole("option", {
+        name: "Current: Working files / projects",
+      }),
+    ).toBeDisabled();
+  });
+
+  it("places a per-user hidden-file toggle in Settings and persists it", async () => {
     const entries = [
       { name: ".private", kind: "directory" as const },
       { name: "public", kind: "directory" as const },
@@ -475,7 +498,9 @@ describe("directory browser", () => {
     const navigation = new MemoryNavigation();
     const first = render(<App api={api} navigation={navigation} />);
 
-    const toggle = await screen.findByRole("checkbox", {
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    const toggle = within(dialog).getByRole("checkbox", {
       name: "Show hidden files",
     });
     expect(toggle).toBeChecked();
@@ -507,28 +532,40 @@ describe("directory browser", () => {
 
     first.unmount();
     render(<App api={api} navigation={new MemoryNavigation()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     expect(
-      await screen.findByRole("checkbox", { name: "Show hidden files" }),
+      within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
+        "checkbox",
+        { name: "Show hidden files" },
+      ),
     ).not.toBeChecked();
     await screen.findByRole("link", { name: "notes.txt" });
     expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull();
   });
 
-  it("aligns the hidden-file toggle before the upload action", async () => {
+  it("places Upload files next to Copy path without a separate toolbar", async () => {
     const navigation = new MemoryNavigation({ shareId: "work", path: "" });
     render(<App api={fakeApi()} navigation={navigation} />);
 
-    const toolbar = (
-      await screen.findByRole("checkbox", {
-        name: "Show hidden files",
-      })
-    ).closest(".directory-toolbar");
-    expect(toolbar?.firstElementChild).toHaveTextContent("Show hidden files");
+    const upload = await screen.findByRole("button", {
+      name: "Upload files",
+    });
+    const actions = upload.closest(".directory-heading-actions");
     expect(
-      within(toolbar as HTMLElement).getByRole("button", {
-        name: "Upload files",
+      within(actions as HTMLElement).getByRole("button", {
+        name: "Copy full path for Working files",
       }),
     ).toBeVisible();
+    expect(document.querySelector(".directory-toolbar")).toBeNull();
+    expect(
+      screen.queryByRole("checkbox", { name: "Show hidden files" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Settings" }).querySelector("svg"),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Sign out" }).querySelector("svg"),
+    ).not.toBeNull();
   });
 
   it("opens sidebar folders and explains when there are no subfolders", async () => {

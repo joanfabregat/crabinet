@@ -280,6 +280,10 @@ select {
   gap: 0.85rem;
 }
 
+.account-actions .button {
+  gap: 0.45rem;
+}
+
 .account-name {
   color: var(--muted);
   font-size: 0.875rem;
@@ -290,24 +294,27 @@ select {
   gap: 0.5rem;
 }
 
-.settings-content h3 {
-  font-size: 1rem;
-  margin: 0;
+.settings-content > label:first-child {
+  font-size: 0.9rem;
+  font-weight: 720;
 }
 
 .settings-content p {
   margin: 0;
 }
 
+.settings-content select {
+  width: 100%;
+}
+
 .settings-content .muted {
   font-size: 0.85rem;
 }
 
-.settings-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 1rem;
+.settings-content .hidden-files-toggle {
+  border-top: 1px solid var(--line);
+  margin-top: 0.75rem;
+  padding-top: 1rem;
 }
 
 .global-notice,
@@ -933,13 +940,12 @@ html.preview-fullscreen-open body {
   padding: 1.4rem 1.25rem;
 }
 
-.directory-toolbar {
+.directory-heading-actions {
   align-items: center;
-  border-top: 1px solid var(--line);
   display: flex;
-  gap: 1rem;
-  justify-content: space-between;
-  padding: 0.85rem 1.25rem;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  justify-content: flex-end;
 }
 
 .hidden-files-toggle {
@@ -1331,7 +1337,12 @@ html.preview-fullscreen-open body {
 
   .directory-heading {
     align-items: flex-start;
+    flex-direction: column;
     gap: 1rem;
+  }
+
+  .directory-heading-actions {
+    justify-content: flex-start;
   }
 
   .entry-row {
@@ -1343,10 +1354,6 @@ html.preview-fullscreen-open body {
   .entry-actions {
     grid-column: 2 / -1;
     justify-content: flex-start;
-  }
-
-  .directory-toolbar {
-    flex-wrap: wrap;
   }
 
   .preview-header {

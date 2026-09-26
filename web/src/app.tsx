@@ -6,9 +6,11 @@ import {
   ExternalLink,
   FilePenLine,
   FolderInput,
+  LogOut,
   Maximize2,
   Minimize2,
   Pencil,
+  Settings2,
   Trash2,
   Upload,
   X,
@@ -407,6 +409,9 @@ function AuthenticatedShell({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string>();
+  const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
+    readShowHiddenFiles(session.user.id),
+  );
   const selectedShare = session.shares.find(
     (share) => share.id === route.shareId,
   );
@@ -414,12 +419,35 @@ function AuthenticatedShell({
   const defaultShare = session.shares.find(
     (share) => share.id === defaultFolder?.shareId,
   );
-  const currentFolder = selectedShare
-    ? { shareId: selectedShare.id, path: route.path }
-    : null;
-  const currentIsDefault =
-    currentFolder?.shareId === defaultFolder?.shareId &&
-    currentFolder?.path === defaultFolder?.path;
+  const startFolderValue = defaultFolder
+    ? defaultFolder.path
+      ? "/"
+      : defaultFolder.shareId
+    : "";
+
+  useEffect(() => {
+    const key = hiddenFilesPreferenceKey(session.user.id);
+    setShowHiddenFiles(readShowHiddenFiles(session.user.id));
+    const syncPreference = (event: StorageEvent) => {
+      if (event.key === key || event.key === null) {
+        setShowHiddenFiles(readShowHiddenFiles(session.user.id));
+      }
+    };
+    window.addEventListener("storage", syncPreference);
+    return () => window.removeEventListener("storage", syncPreference);
+  }, [session.user.id]);
+
+  const updateShowHiddenFiles = (value: boolean) => {
+    setShowHiddenFiles(value);
+    try {
+      window.localStorage.setItem(
+        hiddenFilesPreferenceKey(session.user.id),
+        String(value),
+      );
+    } catch {
+      // The display preference still works for this tab if storage is blocked.
+    }
+  };
 
   const saveDefaultFolder = async (folder: DefaultFolder | null) => {
     setSavingPreferences(true);
@@ -468,9 +496,11 @@ function AuthenticatedShell({
             aria-haspopup="dialog"
             onClick={() => setSettingsOpen(true)}
           >
+            <Settings2 size={17} aria-hidden="true" />
             Settings
           </Button>
           <Button variant="secondary" busy={signingOut} onClick={logout}>
+            <LogOut size={17} aria-hidden="true" />
             {signingOut ? "Signing out…" : "Sign out"}
           </Button>
         </div>
@@ -482,37 +512,43 @@ function AuthenticatedShell({
           busy={savingPreferences}
         >
           <div class="settings-content">
-            <h3>Start folder</h3>
-            <p>
-              {defaultFolder && defaultShare
-                ? `${defaultShare.name}${defaultFolder.path ? ` / ${defaultFolder.path}` : ""}`
-                : "First shared folder"}
-            </p>
+            <label for="start-folder">Start folder</label>
+            <select
+              id="start-folder"
+              value={startFolderValue}
+              disabled={savingPreferences}
+              onChange={(event) => {
+                const shareId = event.currentTarget.value;
+                if (shareId === "/") return;
+                void saveDefaultFolder(shareId ? { shareId, path: "" } : null);
+              }}
+            >
+              <option value="">First shared folder</option>
+              {defaultFolder?.path && defaultShare && (
+                <option value="/" disabled>
+                  Current: {defaultShare.name} / {defaultFolder.path}
+                </option>
+              )}
+              {session.shares.map((share) => (
+                <option key={share.id} value={share.id}>
+                  {share.name}
+                </option>
+              ))}
+            </select>
             <p class="muted">
               This choice follows your account across devices.
             </p>
-            <div class="settings-actions">
-              <Button
-                variant="secondary"
-                type="button"
-                disabled={!currentFolder || currentIsDefault}
-                busy={savingPreferences}
-                onClick={() => {
-                  if (currentFolder) void saveDefaultFolder(currentFolder);
-                }}
-              >
-                Use current folder
-              </Button>
-              <Button
-                variant="secondary"
-                type="button"
-                disabled={!defaultFolder}
-                busy={savingPreferences}
-                onClick={() => void saveDefaultFolder(null)}
-              >
-                Reset
-              </Button>
-            </div>
+            <label class="hidden-files-toggle">
+              <input
+                type="checkbox"
+                checked={showHiddenFiles}
+                onChange={(event) =>
+                  updateShowHiddenFiles(event.currentTarget.checked)
+                }
+              />
+              Show hidden files
+            </label>
+            <p class="muted">Saved in this browser for your account.</p>
             {preferencesError && (
               <Notice tone="danger">{preferencesError}</Notice>
             )}
@@ -545,6 +581,7 @@ function AuthenticatedShell({
             share={selectedShare}
             shares={session.shares}
             userId={session.user.id}
+            showHiddenFiles={showHiddenFiles}
             onSessionExpired={onSessionExpired}
             onSessionRefreshed={onSessionRefreshed}
           />
@@ -565,6 +602,7 @@ interface DirectoryBrowserProps {
   share: Share;
   shares: Share[];
   userId: string;
+  showHiddenFiles: boolean;
   onSessionExpired: () => void;
   onSessionRefreshed: (session: Session) => void;
 }
@@ -577,6 +615,7 @@ function DirectoryBrowser({
   share,
   shares,
   userId,
+  showHiddenFiles,
   onSessionExpired,
   onSessionRefreshed,
 }: DirectoryBrowserProps) {
@@ -585,9 +624,6 @@ function DirectoryBrowser({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiError>();
   const [refreshKey, setRefreshKey] = useState(0);
-  const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
-    readShowHiddenFiles(userId),
-  );
   const [operation, setOperation] = useState<EntryOperation>();
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
@@ -603,29 +639,6 @@ function DirectoryBrowser({
     page?.entries.filter(
       (entry) => showHiddenFiles || !entry.name.startsWith("."),
     ) ?? [];
-
-  useEffect(() => {
-    const key = hiddenFilesPreferenceKey(userId);
-    const syncPreference = (event: StorageEvent) => {
-      if (event.key === key || event.key === null) {
-        setShowHiddenFiles(readShowHiddenFiles(userId));
-      }
-    };
-    window.addEventListener("storage", syncPreference);
-    return () => window.removeEventListener("storage", syncPreference);
-  }, [userId]);
-
-  const updateShowHiddenFiles = (value: boolean) => {
-    setShowHiddenFiles(value);
-    try {
-      window.localStorage.setItem(
-        hiddenFilesPreferenceKey(userId),
-        String(value),
-      );
-    } catch {
-      // The display preference still works for this tab if storage is blocked.
-    }
-  };
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
@@ -987,30 +1000,19 @@ function DirectoryBrowser({
               {crumbs.at(-1)?.name ?? share.name}
             </h1>
           </div>
-          <CopyPathButton
-            value={`${share.id}${route.path ? `/${route.path}` : ""}`}
-            label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
-          />
-        </div>
-
-        <div class="directory-toolbar">
-          <label class="hidden-files-toggle">
-            <input
-              type="checkbox"
-              checked={showHiddenFiles}
-              onChange={(event) =>
-                updateShowHiddenFiles(event.currentTarget.checked)
-              }
+          <div class="directory-heading-actions">
+            {writable && (
+              <WriteToolbar
+                onUpload={(files) =>
+                  setUploadSelection({ id: crypto.randomUUID(), files })
+                }
+              />
+            )}
+            <CopyPathButton
+              value={`${share.id}${route.path ? `/${route.path}` : ""}`}
+              label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
             />
-            Show hidden files
-          </label>
-          {writable && (
-            <WriteToolbar
-              onUpload={(files) =>
-                setUploadSelection({ id: crypto.randomUUID(), files })
-              }
-            />
-          )}
+          </div>
         </div>
 
         <div class="sr-only" role="status" aria-live="polite">
@@ -1041,7 +1043,7 @@ function DirectoryBrowser({
             detail={
               showHiddenFiles
                 ? "There are no files or folders here."
-                : "Turn on Show hidden files to include dotfiles and dotfolders."
+                : "Turn on Show hidden files in Settings to include dotfiles and dotfolders."
             }
           />
         ) : page ? (
