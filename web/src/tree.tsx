@@ -1,9 +1,4 @@
-import {
-  ChevronDown,
-  ChevronRight,
-  FilePlus2,
-  FolderPlus,
-} from "lucide-preact";
+import { ChevronDown, ChevronRight, FolderPlus } from "lucide-preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import {
@@ -107,8 +102,6 @@ interface ShareTreeProps {
   activeShareId: string;
   activePath: string;
   navigation: BrowserNavigation;
-  onCreateFile: () => void;
-  onCreateFolder: () => void;
   onMove: (
     entry: DirectoryEntry,
     sourcePath: string,
@@ -125,8 +118,6 @@ export function ShareTree({
   activeShareId,
   activePath,
   navigation,
-  onCreateFile,
-  onCreateFolder,
   onMove,
   onSessionExpired,
 }: ShareTreeProps) {
@@ -134,7 +125,6 @@ export function ShareTree({
   const [state, setState] = useState<Record<string, TreeState>>({});
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
-  const activeShare = shares.find((share) => share.id === activeShareId);
 
   const load = useCallback(
     async (shareId: string, path: string, cursor?: string) => {
@@ -225,26 +215,6 @@ export function ShareTree({
 
   return (
     <aside class="share-tree" aria-label="Shared folders">
-      {activeShare?.access === "read-write" && (
-        <div class="tree-create-actions" aria-label="Create in current folder">
-          <button
-            class="button button-primary"
-            type="button"
-            onClick={onCreateFile}
-          >
-            <FilePlus2 size={18} aria-hidden="true" />
-            New file
-          </button>
-          <button
-            class="button button-secondary"
-            type="button"
-            onClick={onCreateFolder}
-          >
-            <FolderPlus size={18} aria-hidden="true" />
-            New folder
-          </button>
-        </div>
-      )}
       <div class="tree-scroll">
         <ul class="tree-list tree-roots">
           {shares.map((share) => (

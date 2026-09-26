@@ -1,6 +1,13 @@
 import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { FolderInput, Pencil, Trash2, Upload } from "lucide-preact";
+import {
+  FilePlus2,
+  FolderInput,
+  FolderPlus,
+  Pencil,
+  Trash2,
+  Upload,
+} from "lucide-preact";
 
 import {
   ApiError,
@@ -29,8 +36,12 @@ export interface UploadSelection {
 }
 
 export function WriteToolbar({
+  onCreateFile,
+  onCreateFolder,
   onUpload,
 }: {
+  onCreateFile: () => void;
+  onCreateFolder: () => void;
   onUpload: (files: File[]) => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
@@ -42,6 +53,22 @@ export function WriteToolbar({
 
   return (
     <section class="write-toolbar" aria-label="File operations">
+      <button
+        class="button button-primary"
+        type="button"
+        onClick={onCreateFile}
+      >
+        <FilePlus2 size={17} aria-hidden="true" />
+        New file
+      </button>
+      <button
+        class="button button-secondary"
+        type="button"
+        onClick={onCreateFolder}
+      >
+        <FolderPlus size={17} aria-hidden="true" />
+        New folder
+      </button>
       <button
         class="button button-secondary upload-picker"
         type="button"

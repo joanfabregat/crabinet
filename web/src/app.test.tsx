@@ -543,7 +543,7 @@ describe("directory browser", () => {
     expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull();
   });
 
-  it("places Upload files next to Copy path without a separate toolbar", async () => {
+  it("places create and upload actions beside Copy path outside the sidebar", async () => {
     const navigation = new MemoryNavigation({ shareId: "work", path: "" });
     render(<App api={fakeApi()} navigation={navigation} />);
 
@@ -552,10 +552,27 @@ describe("directory browser", () => {
     });
     const actions = upload.closest(".directory-heading-actions");
     expect(
+      within(actions as HTMLElement).getByRole("button", { name: "New file" }),
+    ).toBeVisible();
+    expect(
+      within(actions as HTMLElement).getByRole("button", {
+        name: "New folder",
+      }),
+    ).toBeVisible();
+    expect(
       within(actions as HTMLElement).getByRole("button", {
         name: "Copy full path for Working files",
       }),
     ).toBeVisible();
+    const sidebar = screen.getByRole("complementary", {
+      name: "Shared folders",
+    });
+    expect(
+      within(sidebar).queryByRole("button", { name: "New file" }),
+    ).toBeNull();
+    expect(
+      within(sidebar).queryByRole("button", { name: "New folder" }),
+    ).toBeNull();
     expect(document.querySelector(".directory-toolbar")).toBeNull();
     expect(
       screen.queryByRole("checkbox", { name: "Show hidden files" }),
