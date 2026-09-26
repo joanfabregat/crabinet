@@ -51,6 +51,29 @@ describe("API client", () => {
     );
   });
 
+  it("saves the start folder using a same-origin CSRF-protected request", async () => {
+    const folder = { shareId: "docs", path: "projects" };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(Response.json({ defaultFolder: folder }));
+
+    await expect(
+      createApiClient({ fetch }).updateDefaultFolder(folder, "csrf-value"),
+    ).resolves.toEqual(folder);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/preferences",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "same-origin",
+        body: JSON.stringify({ defaultFolder: folder }),
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "X-CSRF-Token": "csrf-value",
+        }),
+      }),
+    );
+  });
+
   it("sends authentication mutations once and includes CSRF only on logout", async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()

@@ -19,11 +19,14 @@ This document records the assumptions made by the Preact file-browser shell. The
 {
   "user": { "id": "user-id", "username": "joan", "displayName": "Joan" },
   "shares": [{ "id": "docs", "name": "Documents", "access": "read-write" }],
+  "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" },
   "csrfToken": "opaque-value"
 }
 ```
 
 An anonymous or expired session returns `401`. `csrfToken` is held in memory and sent on authenticated state-changing requests; it is not a session identifier.
+
+`defaultFolder` is `null` when no start folder is selected or the saved folder is no longer accessible. Opening `/` goes to this folder when present; a direct `/browse/*` link keeps its own destination. `PUT /api/v1/preferences` accepts `{ "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" } }` or `{ "defaultFolder": null }`, with same-origin and session-bound CSRF checks. The server accepts only an existing directory in a share granted to the current user, stores its virtual share ID and path in SQLite, and returns the new `defaultFolder` value. Passwords and host filesystem paths are not stored in this preference.
 
 `GET /api/v1/auth/methods` reports the enabled sign-in methods. `POST /api/v1/auth/login` accepts `{ "username": string, "password": string }`, where `username` may be a configured username or email address. It rotates the session identifier and returns the same session shape. Login failures return a generic `401` response. The server validates `Origin`/`Sec-Fetch-Site`, rate-limits attempts, and never includes credential details in responses or logs. When OIDC is enabled, the browser starts at `GET /api/v1/auth/oidc/start`; the server handles the fixed callback and creates the same local session after verifying the provider identity. In OIDC-only mode, the application redirects anonymous visitors to that start endpoint.
 

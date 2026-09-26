@@ -9,9 +9,9 @@ test("capture the deterministic authenticated browser", async ({ page }) => {
   );
   await page.setViewportSize({ width: 1440, height: 960 });
   await openSignedIn(page, "/browse/writable", "writer");
-  const icon = await page.request.get("/crabinet.svg");
+  const icon = await page.request.get("/crabinet.png");
   expect(icon.ok()).toBe(true);
-  expect(icon.headers()["content-type"]).toContain("image/svg+xml");
+  expect(icon.headers()["content-type"]).toContain("image/png");
   await page.getByRole("link", { name: "README.md" }).click();
   await expect(
     page.getByRole("heading", { name: "README.md", level: 2 }),

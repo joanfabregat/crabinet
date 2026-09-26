@@ -118,6 +118,27 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
 });
 
+test("a start folder follows the user while direct links keep their destination", async ({
+  page,
+}) => {
+  await openSignedIn(page, "/browse/writable?path=Projects", "writer");
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("region", { name: "Settings" });
+  await settings.getByRole("button", { name: "Use current folder" }).click();
+  await expect(settings).toContainText("Working files / Projects");
+
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
+  await page.goto("/browse/read-only");
+  await expect(page).toHaveURL(/\/browse\/read-only$/);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await settings.getByRole("button", { name: "Reset" }).click();
+  await expect(settings).toContainText("First shared folder");
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/browse\/read-only$/);
+});
+
 test("action tooltips escape clipped panels and remain inside the viewport", async ({
   page,
 }) => {

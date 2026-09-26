@@ -285,6 +285,41 @@ select {
   font-size: 0.875rem;
 }
 
+.settings-panel {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-content {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  justify-content: space-between;
+  margin: 0 auto;
+  max-width: 100rem;
+  padding: 1rem;
+}
+
+.settings-content h2 {
+  font-size: 1rem;
+  margin: 0 0 0.2rem;
+}
+
+.settings-content p {
+  margin: 0;
+}
+
+.settings-content .muted {
+  font-size: 0.85rem;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .global-notice,
 .browser-layout {
   margin: 0 auto;
@@ -319,15 +354,15 @@ select {
 .browser-workspace {
   display: grid;
   gap: 1rem;
-  grid-template-columns: 17rem minmax(0, 1fr);
+  grid-template-columns: 18rem minmax(0, 1fr);
 }
 
 .browser-workspace.has-preview {
-  grid-template-columns: 17rem minmax(20rem, 1.1fr) minmax(20rem, 0.9fr);
+  grid-template-columns: 18rem minmax(20rem, 1.1fr) minmax(20rem, 0.9fr);
 }
 
 .browser-workspace.preview-full {
-  grid-template-columns: 17rem minmax(0, 1fr);
+  grid-template-columns: 18rem minmax(0, 1fr);
 }
 
 .browser-workspace.preview-full .directory-panel {
@@ -362,6 +397,7 @@ select {
   gap: 0.35rem;
   padding-left: 0.55rem;
   padding-right: 0.55rem;
+  white-space: nowrap;
 }
 
 .tree-scroll,
@@ -387,6 +423,10 @@ select {
   min-height: 2.75rem;
   padding-left: calc(var(--tree-level) * 0.85rem);
   padding-right: 0.35rem;
+}
+
+.tree-row {
+  grid-template-columns: 2.75rem minmax(0, 1fr) auto auto;
 }
 
 .tree-row:hover,
@@ -426,7 +466,7 @@ select {
   border: 0;
   color: var(--accent);
   cursor: pointer;
-  grid-column: 5;
+  grid-column: 4;
 }
 
 .tree-toggle {
@@ -447,6 +487,22 @@ select {
   text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tree-link {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.tree-link svg {
+  flex: none;
+}
+
+.tree-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tree-access {

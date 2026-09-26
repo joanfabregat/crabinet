@@ -85,6 +85,8 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       vi.fn(async () => ({ passwordEnabled: true, oidcEnabled: false })),
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
+    updateDefaultFolder:
+      overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
     directory: overrides.directory ?? vi.fn(async () => files),
     preview:
       overrides.preview ?? vi.fn(async () => previewDocument("plain text")),

@@ -14,7 +14,7 @@ Users, shares, grants, limits, and secret-file references are operator configura
 
 ## Filesystem data and SQLite runtime state
 
-Files remain normal files in explicitly mounted roots. SQLite stores server-side sessions, while structured audit events go to standard output with the rest of the application logs. This avoids a database service while keeping runtime state separate from immutable configuration.
+Files remain normal files in explicitly mounted roots. SQLite stores server-side sessions and per-user start-folder preferences, while structured audit events go to standard output with the rest of the application logs. This avoids a database service while keeping runtime state separate from immutable configuration.
 
 ## Argon2id
 

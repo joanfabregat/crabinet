@@ -16,7 +16,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Request, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use getrandom::fill as random_fill;
 use hmac::{Hmac, KeyInit, Mac};
@@ -27,10 +27,10 @@ use tokio::sync::Semaphore;
 
 use crate::{
     app::AppState,
-    browse::AuthenticatedIdentity,
+    browse::{AuthenticatedIdentity, BrowseState},
     config::{Config, Permission},
     error::AppError,
-    filesystem::{AccessLevel, ShareGrant, ShareId},
+    filesystem::{AccessLevel, EntryKind, ShareGrant, ShareId, VirtualPath},
     mutations::CsrfVerified,
 };
 
@@ -38,7 +38,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SESSION_COOKIE: &str = "crabinet_session";
 const TOKEN_BYTES: usize = 32;
-const SESSION_SCHEMA_VERSION: i64 = 1;
+const SESSION_SCHEMA_VERSION: i64 = 2;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
@@ -232,7 +232,27 @@ where
 struct SessionResponse {
     user: SessionUser,
     shares: Vec<EffectiveShare>,
+    default_folder: Option<DefaultFolder>,
     csrf_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DefaultFolder {
+    share_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreferencesUpdate {
+    default_folder: Option<DefaultFolder>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreferencesResponse {
+    default_folder: Option<DefaultFolder>,
 }
 
 #[derive(Serialize)]
@@ -578,16 +598,51 @@ impl AuthService {
         decode_token(encoded).map(|token| self.digest(b"session\0", &token))
     }
 
-    fn session_response(&self, username: &str, csrf_token: String) -> SessionResponse {
-        SessionResponse {
+    async fn session_response(
+        &self,
+        browse: &BrowseState,
+        username: &str,
+        csrf_token: String,
+    ) -> Result<SessionResponse, AppError> {
+        let default_folder = self.inner.store.default_folder(username).await?;
+        let default_folder =
+            default_folder.filter(|folder| self.valid_default_folder(browse, username, folder));
+        Ok(SessionResponse {
             user: SessionUser {
                 id: username.to_owned(),
                 username: username.to_owned(),
                 display_name: username.to_owned(),
             },
             shares: self.effective_shares(username),
+            default_folder,
             csrf_token,
-        }
+        })
+    }
+
+    fn valid_default_folder(
+        &self,
+        browse: &BrowseState,
+        username: &str,
+        folder: &DefaultFolder,
+    ) -> bool {
+        let Ok(share_id) = ShareId::new(folder.share_id.clone()) else {
+            return false;
+        };
+        let path = if folder.path.is_empty() {
+            VirtualPath::root()
+        } else if let Ok(path) = VirtualPath::parse(&folder.path) {
+            path
+        } else {
+            return false;
+        };
+        let identity = self.browse_identity(username);
+        let Ok(authorized) = browse.authorize(&identity, &share_id) else {
+            return false;
+        };
+        path.is_root()
+            || authorized
+                .metadata(&path)
+                .is_ok_and(|metadata| metadata.kind == EntryKind::Directory)
     }
 }
 
@@ -646,9 +701,67 @@ impl SessionStore {
                  COMMIT;",
             )?;
         }
+        if version < 2 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE user_preferences (
+                   username TEXT PRIMARY KEY NOT NULL,
+                   default_share_id TEXT NOT NULL,
+                   default_path TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    async fn default_folder(&self, username: &str) -> Result<Option<DefaultFolder>, AuthError> {
+        let username = username.to_owned();
+        self.with_connection(move |connection| {
+            connection
+                .query_row(
+                    "SELECT default_share_id, default_path FROM user_preferences WHERE username = ?1",
+                    params![username],
+                    |row| {
+                        Ok(DefaultFolder {
+                            share_id: row.get(0)?,
+                            path: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+        })
+        .await
+    }
+
+    async fn set_default_folder(
+        &self,
+        username: &str,
+        folder: Option<DefaultFolder>,
+    ) -> Result<(), AuthError> {
+        let username = username.to_owned();
+        self.with_connection(move |connection| {
+            if let Some(folder) = folder {
+                connection.execute(
+                    "INSERT INTO user_preferences (username, default_share_id, default_path)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(username) DO UPDATE SET
+                       default_share_id = excluded.default_share_id,
+                       default_path = excluded.default_path",
+                    params![username, folder.share_id, folder.path],
+                )?;
+            } else {
+                connection.execute(
+                    "DELETE FROM user_preferences WHERE username = ?1",
+                    params![username],
+                )?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn with_connection<T, F>(&self, operation: F) -> Result<T, AuthError>
@@ -807,6 +920,7 @@ impl RateLimiter {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/session", get(current_session))
+        .route("/preferences", put(update_preferences))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
 }
@@ -853,11 +967,42 @@ async fn current_session(
     Ok(session_json(
         StatusCode::OK,
         auth.session_response(
+            state.browse(),
             session.principal.username(),
             encode_hex(&auth.digest(b"csrf-token\0", &session.session_token)),
-        ),
+        )
+        .await?,
         None,
     ))
+}
+
+async fn update_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<PreferencesUpdate>, JsonRejection>,
+) -> Result<Response, AppError> {
+    validate_same_origin(&headers)?;
+    let auth = state.auth().ok_or(AppError::Internal)?;
+    let session = auth.authenticate(&headers).await?;
+    if !auth.verify_csrf(&session, &headers) {
+        return Err(AppError::Forbidden);
+    }
+    let Json(payload) = payload.map_err(|_| AppError::InvalidRequest)?;
+    if let Some(folder) = payload.default_folder.as_ref()
+        && !auth.valid_default_folder(state.browse(), session.principal.username(), folder)
+    {
+        return Err(AppError::NotFound);
+    }
+    auth.inner
+        .store
+        .set_default_folder(session.principal.username(), payload.default_folder.clone())
+        .await?;
+    let mut response = Json(PreferencesResponse {
+        default_folder: payload.default_folder,
+    })
+    .into_response();
+    no_store(response.headers_mut());
+    Ok(response)
 }
 
 async fn login(
@@ -879,7 +1024,8 @@ async fn login(
         .await?;
     Ok(session_json(
         StatusCode::OK,
-        auth.session_response(&session.username, session.csrf_token),
+        auth.session_response(state.browse(), &session.username, session.csrf_token)
+            .await?,
         Some(session_cookie_header(
             &session.cookie_token,
             auth.inner.absolute_timeout_seconds,
@@ -1019,7 +1165,7 @@ fn decode_token(value: &str) -> Option<[u8; TOKEN_BYTES]> {
         return None;
     }
     let mut decoded = [0_u8; TOKEN_BYTES];
-    for (target, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (target, pair) in decoded.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
         *target = (decode_nibble(pair[0])? << 4) | decode_nibble(pair[1])?;
     }
     Some(decoded)
@@ -1473,6 +1619,133 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(old_replay.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn default_folder_is_per_user_validated_and_csrf_protected() {
+        let auth = test_auth(1, 5);
+        let documents = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        std::fs::create_dir(documents.path().join("nested")).unwrap();
+        std::fs::write(documents.path().join("file.txt"), b"file").unwrap();
+        let app = protected_app(auth.service, documents.path(), private.path());
+        let (alice_cookie, alice_csrf) =
+            login_as(&app, "Alice", "a very long unicode password 🙂").await;
+
+        let put = |cookie: &str, csrf: Option<&str>, body: &str| {
+            let mut request = Request::put("/api/v1/preferences")
+                .header(header::HOST, "files.example.test")
+                .header(header::ORIGIN, "https://files.example.test")
+                .header("sec-fetch-site", "same-origin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, cookie);
+            if let Some(csrf) = csrf {
+                request = request.header("x-csrf-token", csrf);
+            }
+            request.body(Body::from(body.to_owned())).unwrap()
+        };
+
+        let selected = r#"{"defaultFolder":{"shareId":"documents","path":"nested"}}"#;
+        let forbidden = app
+            .clone()
+            .oneshot(put(&alice_cookie, None, selected))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        for invalid in [
+            r#"{"defaultFolder":{"shareId":"private","path":""}}"#,
+            r#"{"defaultFolder":{"shareId":"documents","path":"file.txt"}}"#,
+            r#"{"defaultFolder":{"shareId":"documents","path":"missing"}}"#,
+            r#"{"defaultFolder":{"shareId":"documents","path":"../nested"}}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(put(&alice_cookie, Some(&alice_csrf), invalid))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        let saved = app
+            .clone()
+            .oneshot(put(&alice_cookie, Some(&alice_csrf), selected))
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(saved.headers()[header::CACHE_CONTROL], "no-store");
+
+        let alice_session = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/session")
+                    .header(header::COOKIE, &alice_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(alice_session.into_body(), 16_384).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["defaultFolder"]["shareId"], "documents");
+        assert_eq!(body["defaultFolder"]["path"], "nested");
+
+        let (bob_cookie, _) = login_as(&app, "Bob", "bob password").await;
+        let bob_session = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/session")
+                    .header(header::COOKIE, bob_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(bob_session.into_body(), 16_384).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["defaultFolder"].is_null());
+
+        let reset = app
+            .oneshot(put(
+                &alice_cookie,
+                Some(&alice_csrf),
+                r#"{"defaultFolder":null}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn version_one_session_database_migrates_without_losing_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                   session_key BLOB PRIMARY KEY NOT NULL,
+                   username TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_seen_at INTEGER NOT NULL,
+                   expires_at INTEGER NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO sessions VALUES (zeroblob(32), 'Alice', 1, 1, 100);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SessionStore::open(&path).unwrap();
+        let connection = store.connection.lock().unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let sessions: i64 = connection
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(sessions, 1);
     }
 
     #[tokio::test]

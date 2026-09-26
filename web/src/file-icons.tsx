@@ -4,6 +4,7 @@ import {
   FileJson2,
   FileText,
   Folder,
+  FolderDot,
   Image as ImageIcon,
   type LucideProps,
 } from "lucide-preact";
@@ -43,12 +44,13 @@ const textExtensions = new Set(["md", "markdown", "rst", "txt"]);
 const imageExtensions = new Set(["avif", "gif", "jpeg", "jpg", "png", "webp"]);
 
 export type EntryIconKind =
-  "folder" | "file" | "code" | "json" | "text" | "image";
+  "folder" | "hidden-folder" | "file" | "code" | "json" | "text" | "image";
 
 export function entryIconKind(
   entry: Pick<DirectoryEntry, "kind" | "name">,
 ): EntryIconKind {
-  if (entry.kind === "directory") return "folder";
+  if (entry.kind === "directory")
+    return entry.name.startsWith(".") ? "hidden-folder" : "folder";
   const extension = entry.name.toLowerCase().split(".").at(-1) ?? "";
   if (extension === "json") return "json";
   if (imageExtensions.has(extension)) return "image";
@@ -64,6 +66,8 @@ export function EntryIcon({
   switch (entryIconKind(entry)) {
     case "folder":
       return <Folder {...props} />;
+    case "hidden-folder":
+      return <FolderDot {...props} />;
     case "json":
       return <FileJson2 {...props} />;
     case "image":

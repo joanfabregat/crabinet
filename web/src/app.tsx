@@ -26,6 +26,7 @@ import {
   type AuthMethods,
   type DirectoryEntry,
   type DirectoryPage,
+  type DefaultFolder,
   type EntryMetadata,
   type PreviewDocument,
   type Session,
@@ -126,8 +127,10 @@ export function App({
       (share) => share.id === route.shareId,
     );
     if (!routeIsAllowed) {
+      const startFolder =
+        route.shareId === null ? auth.session.defaultFolder : null;
       navigation.go(
-        { shareId: auth.session.shares[0]!.id, path: "" },
+        startFolder ?? { shareId: auth.session.shares[0]!.id, path: "" },
         { replace: true },
       );
     }
@@ -167,6 +170,16 @@ export function App({
       session={auth.session}
       onSessionExpired={handleSessionExpired}
       onSignedOut={handleSignedOut}
+      onDefaultFolderChanged={(folder) =>
+        setAuth((current) =>
+          current.status === "authenticated"
+            ? {
+                ...current,
+                session: { ...current.session, defaultFolder: folder },
+              }
+            : current,
+        )
+      }
     />
   );
 }
@@ -175,7 +188,7 @@ function AppHeader({ children }: { children?: preact.ComponentChildren }) {
   return (
     <header class="app-header">
       <a class="brand" href="/" aria-label="Crabinet home">
-        <img class="brand-mark" src="/crabinet.svg" alt="" />
+        <img class="brand-mark" src="/crabinet.png" alt="" />
         <span>Crabinet</span>
       </a>
       {children}
@@ -366,6 +379,7 @@ interface AuthenticatedShellProps {
   session: Session;
   onSessionExpired: () => void;
   onSignedOut: () => void;
+  onDefaultFolderChanged: (folder: DefaultFolder | null) => void;
 }
 
 function AuthenticatedShell({
@@ -375,12 +389,43 @@ function AuthenticatedShell({
   session,
   onSessionExpired,
   onSignedOut,
+  onDefaultFolderChanged,
 }: AuthenticatedShellProps) {
   const [signingOut, setSigningOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string>();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [savingPreferences, setSavingPreferences] = useState(false);
+  const [preferencesError, setPreferencesError] = useState<string>();
   const selectedShare = session.shares.find(
     (share) => share.id === route.shareId,
   );
+  const defaultFolder = session.defaultFolder ?? null;
+  const defaultShare = session.shares.find(
+    (share) => share.id === defaultFolder?.shareId,
+  );
+  const currentFolder = selectedShare
+    ? { shareId: selectedShare.id, path: route.path }
+    : null;
+  const currentIsDefault =
+    currentFolder?.shareId === defaultFolder?.shareId &&
+    currentFolder?.path === defaultFolder?.path;
+
+  const saveDefaultFolder = async (folder: DefaultFolder | null) => {
+    setSavingPreferences(true);
+    setPreferencesError(undefined);
+    try {
+      const saved = await api.updateDefaultFolder(folder, session.csrfToken);
+      onDefaultFolderChanged(saved);
+    } catch (error) {
+      if (isUnauthorized(error)) {
+        onSessionExpired();
+      } else {
+        setPreferencesError("Could not save your start folder. Try again.");
+      }
+    } finally {
+      setSavingPreferences(false);
+    }
+  };
 
   const logout = async () => {
     setSigningOut(true);
@@ -406,11 +451,66 @@ function AuthenticatedShell({
       <AppHeader>
         <div class="account-actions">
           <span class="account-name">{session.user.displayName}</span>
+          <Button
+            variant="secondary"
+            type="button"
+            aria-expanded={settingsOpen}
+            aria-controls="user-settings"
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            Settings
+          </Button>
           <Button variant="secondary" busy={signingOut} onClick={logout}>
             {signingOut ? "Signing out…" : "Sign out"}
           </Button>
         </div>
       </AppHeader>
+      {settingsOpen && (
+        <section
+          id="user-settings"
+          class="settings-panel"
+          aria-label="Settings"
+        >
+          <div class="settings-content">
+            <div>
+              <h2>Start folder</h2>
+              <p>
+                {defaultFolder && defaultShare
+                  ? `${defaultShare.name}${defaultFolder.path ? ` / ${defaultFolder.path}` : ""}`
+                  : "First shared folder"}
+              </p>
+              <p class="muted">
+                This choice follows your account across devices.
+              </p>
+            </div>
+            <div class="settings-actions">
+              <Button
+                variant="secondary"
+                type="button"
+                disabled={!currentFolder || currentIsDefault}
+                busy={savingPreferences}
+                onClick={() => {
+                  if (currentFolder) void saveDefaultFolder(currentFolder);
+                }}
+              >
+                Use current folder
+              </Button>
+              <Button
+                variant="secondary"
+                type="button"
+                disabled={!defaultFolder}
+                busy={savingPreferences}
+                onClick={() => void saveDefaultFolder(null)}
+              >
+                Reset
+              </Button>
+            </div>
+            {preferencesError && (
+              <Notice tone="danger">{preferencesError}</Notice>
+            )}
+          </div>
+        </section>
+      )}
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
           Development preview · revision{" "}
