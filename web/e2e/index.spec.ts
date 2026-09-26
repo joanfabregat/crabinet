@@ -122,21 +122,53 @@ test("a start folder follows the user while direct links keep their destination"
   page,
 }) => {
   await openSignedIn(page, "/browse/writable?path=Projects", "writer");
+  const headingActions = page.locator(".directory-heading-actions");
+  const upload = headingActions.getByRole("button", { name: "Upload files" });
+  const copyPath = headingActions.getByRole("button", {
+    name: "Copy full path for Projects",
+  });
+  await expect(upload).toBeVisible();
+  await expect(copyPath).toBeVisible();
+  await expect(page.locator(".directory-toolbar")).toHaveCount(0);
+  await expect(
+    page.getByRole("checkbox", { name: "Show hidden files" }),
+  ).toHaveCount(0);
+  const [uploadBox, copyBox] = await Promise.all([
+    upload.boundingBox(),
+    copyPath.boundingBox(),
+  ]);
+  expect(uploadBox).not.toBeNull();
+  expect(copyBox).not.toBeNull();
+  expect(
+    Math.abs(
+      uploadBox!.y + uploadBox!.height / 2 - (copyBox!.y + copyBox!.height / 2),
+    ),
+  ).toBeLessThan(2);
+  const pageWidth = await page.evaluate(
+    () => document.documentElement.scrollWidth,
+  );
+  expect(pageWidth).toBeLessThanOrEqual(page.viewportSize()!.width);
+
   await page.getByRole("button", { name: "Settings" }).click();
   const settings = page.getByRole("dialog", { name: "Settings" });
-  await settings.getByRole("button", { name: "Use current folder" }).click();
-  await expect(settings).toContainText("Working files / Projects");
+  await expect(
+    settings.getByRole("checkbox", { name: "Show hidden files" }),
+  ).toBeVisible();
+  const startFolder = settings.getByRole("combobox", { name: "Start folder" });
+  await expect(startFolder.locator("option")).toHaveCount(3);
+  await startFolder.selectOption("writable");
+  await expect(startFolder).toHaveValue("writable");
   await settings.getByRole("button", { name: "Close Settings" }).click();
   await expect(settings).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
+  await expect(page).toHaveURL(/\/browse\/writable$/);
   await page.goto("/browse/read-only");
   await expect(page).toHaveURL(/\/browse\/read-only$/);
 
   await page.getByRole("button", { name: "Settings" }).click();
-  await settings.getByRole("button", { name: "Reset" }).click();
-  await expect(settings).toContainText("First shared folder");
+  await startFolder.selectOption("");
+  await expect(startFolder).toHaveValue("");
   await page.goto("/");
   await expect(page).toHaveURL(/\/browse\/read-only$/);
 });
