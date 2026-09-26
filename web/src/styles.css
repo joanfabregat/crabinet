@@ -664,6 +664,16 @@ html.preview-fullscreen-open body {
   background: var(--surface-subtle);
 }
 
+.icon-button-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.icon-button-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
 .icon-button-danger {
   color: var(--danger);
 }
@@ -958,11 +968,6 @@ html.preview-fullscreen-open body {
   min-width: 0;
 }
 
-.write-toolbar .button {
-  gap: 0.4rem;
-  white-space: nowrap;
-}
-
 .write-actions,
 .entry-actions,
 .dialog-actions,
@@ -983,12 +988,6 @@ html.preview-fullscreen-open body {
   padding: 0.3rem;
   text-decoration: underline;
   text-underline-offset: 0.18em;
-}
-
-.upload-picker {
-  align-items: center;
-  display: inline-flex;
-  gap: 0.3rem;
 }
 
 .upload-drop-overlay {

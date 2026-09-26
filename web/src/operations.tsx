@@ -54,28 +54,31 @@ export function WriteToolbar({
   return (
     <section class="write-toolbar" aria-label="File operations">
       <button
-        class="button button-primary"
+        class="icon-button icon-button-primary tooltip-action"
         type="button"
+        aria-label="New file"
+        data-tooltip="New file"
         onClick={onCreateFile}
       >
-        <FilePlus2 size={17} aria-hidden="true" />
-        New file
+        <FilePlus2 size={19} aria-hidden="true" />
       </button>
       <button
-        class="button button-secondary"
+        class="icon-button tooltip-action"
         type="button"
+        aria-label="New folder"
+        data-tooltip="New folder"
         onClick={onCreateFolder}
       >
-        <FolderPlus size={17} aria-hidden="true" />
-        New folder
+        <FolderPlus size={19} aria-hidden="true" />
       </button>
       <button
-        class="button button-secondary upload-picker"
+        class="icon-button tooltip-action"
         type="button"
+        aria-label="Upload files"
+        data-tooltip="Upload files"
         onClick={() => input.current?.click()}
       >
-        <Upload size={17} aria-hidden="true" />
-        Upload files
+        <Upload size={19} aria-hidden="true" />
       </button>
       <input
         ref={input}
