@@ -16,6 +16,7 @@ test -x "$repo_root/web/node_modules/.bin/vite" || {
 
 unit_base="crabinet-preview-$(id -u)-${BASHPID}-${RANDOM}"
 container_name="$unit_base"
+network_name="$unit_base-network"
 image='docker.io/library/node:24-bookworm-slim@sha256:713cfbf4a0ac19f40e1bb9919893e126b74a5c8cf5d0623c9f89515c8f74c6fa'
 oidc_dir=/home/joan/.local/state/crabinet-preview/oidc
 oidc_mount=()
@@ -31,16 +32,32 @@ fi
 
 cleanup() {
   trap - EXIT INT TERM HUP
-  sudo systemctl stop "$unit_base.service" >/dev/null 2>&1 || true
+  systemctl --user stop "$unit_base.service" >/dev/null 2>&1 || true
   podman rm --force "$container_name" >/dev/null 2>&1 || true
+  podman network rm "$network_name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM HUP
 
-sudo systemd-run --quiet --wait --pipe --collect \
+# Podman 5.7 cannot create blackhole routes. Route GCE metadata traffic to an
+# unused address in this otherwise private subnet, outside its IPAM range.
+# A killed shell cannot run its trap, so remove any detached preview networks
+# from earlier runs. Podman refuses to remove a network still in use.
+while IFS= read -r stale_network; do
+  podman network rm "$stale_network" >/dev/null 2>&1 || true
+done < <(podman network ls --filter label=io.jf.crabinet-preview=true --format '{{.Name}}')
+
+podman network create \
+  --subnet=10.250.251.0/24 \
+  --gateway=10.250.251.1 \
+  --ip-range=10.250.251.2-10.250.251.253 \
+  --route=169.254.0.0/16,10.250.251.254 \
+  --label=io.jf.crabinet-preview=true \
+  "$network_name" >/dev/null
+
+systemd-run --user --quiet --wait --pipe --collect \
   --unit="$unit_base" \
   --description='Attached Crabinet development preview' \
   --service-type=exec \
-  --uid=joan --gid=joan \
   --setenv=HOME=/home/joan \
   --setenv=XDG_RUNTIME_DIR=/run/user/1001 \
   --property=KillMode=control-group \
@@ -52,13 +69,11 @@ sudo systemd-run --quiet --wait --pipe --collect \
   --property=TasksMax=512 \
   --property=OOMPolicy=kill \
   --property=UMask=0077 \
-  --property=IPAddressDeny=169.254.0.0/16 \
-  --property=IPAddressDeny=fd20:ce::254/128 \
   /usr/bin/podman run --rm --interactive \
     --name="$container_name" \
     --cgroups=disabled \
     --pull=missing \
-    --network=bridge \
+    --network="$network_name" \
     --dns=1.1.1.1 --dns=1.0.0.1 \
     --userns=keep-id \
     --user="$(id -u):$(id -g)" \
