@@ -123,9 +123,11 @@ test("a start folder follows the user while direct links keep their destination"
 }) => {
   await openSignedIn(page, "/browse/writable?path=Projects", "writer");
   await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("region", { name: "Settings" });
+  const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("button", { name: "Use current folder" }).click();
   await expect(settings).toContainText("Working files / Projects");
+  await settings.getByRole("button", { name: "Close Settings" }).click();
+  await expect(settings).toHaveCount(0);
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);

@@ -844,7 +844,7 @@ export function UploadQueue({
   );
 }
 
-function Modal({
+export function Modal({
   title,
   children,
   onClose,
@@ -906,7 +906,9 @@ function Modal({
     <div
       class="modal-backdrop"
       role="presentation"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+      onMouseDown={(event) =>
+        !busy && event.target === event.currentTarget && onClose()
+      }
     >
       <div
         ref={panel}

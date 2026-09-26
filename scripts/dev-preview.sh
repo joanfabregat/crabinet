@@ -20,7 +20,7 @@ image='docker.io/library/node:24-bookworm-slim@sha256:713cfbf4a0ac19f40e1bb99198
 oidc_dir=/home/joan/.local/state/crabinet-preview/oidc
 oidc_mount=()
 if [ -d "$oidc_dir" ]; then
-  for file in client-id client-secret joan-email kelly-email joan-permission kelly-permission; do
+  for file in client-id client-secret joan-email kelly-email; do
     test -s "$oidc_dir/$file" || {
       echo "Incomplete development OIDC credentials: missing $file." >&2
       exit 1

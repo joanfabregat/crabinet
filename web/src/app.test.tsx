@@ -428,23 +428,28 @@ describe("directory browser", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("region", { name: "Settings" })).toHaveTextContent(
-      "First shared folder",
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(dialog).toHaveTextContent("First shared folder");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Use current folder" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Use current folder" }));
     await waitFor(() =>
       expect(updateDefaultFolder).toHaveBeenCalledWith(
         { shareId: "work", path: "projects" },
         "csrf-in-memory",
       ),
     );
-    expect(screen.getByRole("region", { name: "Settings" })).toHaveTextContent(
-      "Working files / projects",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(dialog).toHaveTextContent("Working files / projects");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reset" }));
     await waitFor(() =>
       expect(updateDefaultFolder).toHaveBeenCalledWith(null, "csrf-in-memory"),
     );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close Settings" }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "Settings" }),
+    ).not.toBeInTheDocument();
   });
 
   it("places a per-user hidden-file toggle above the list and persists it", async () => {

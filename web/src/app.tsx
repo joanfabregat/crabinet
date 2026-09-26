@@ -34,6 +34,7 @@ import {
 } from "./api";
 import {
   EntryActionButtons,
+  Modal,
   OperationDialog,
   UploadQueue,
   WriteToolbar,
@@ -454,9 +455,8 @@ function AuthenticatedShell({
           <Button
             variant="secondary"
             type="button"
-            aria-expanded={settingsOpen}
-            aria-controls="user-settings"
-            onClick={() => setSettingsOpen((open) => !open)}
+            aria-haspopup="dialog"
+            onClick={() => setSettingsOpen(true)}
           >
             Settings
           </Button>
@@ -466,23 +466,21 @@ function AuthenticatedShell({
         </div>
       </AppHeader>
       {settingsOpen && (
-        <section
-          id="user-settings"
-          class="settings-panel"
-          aria-label="Settings"
+        <Modal
+          title="Settings"
+          onClose={() => setSettingsOpen(false)}
+          busy={savingPreferences}
         >
           <div class="settings-content">
-            <div>
-              <h2>Start folder</h2>
-              <p>
-                {defaultFolder && defaultShare
-                  ? `${defaultShare.name}${defaultFolder.path ? ` / ${defaultFolder.path}` : ""}`
-                  : "First shared folder"}
-              </p>
-              <p class="muted">
-                This choice follows your account across devices.
-              </p>
-            </div>
+            <h3>Start folder</h3>
+            <p>
+              {defaultFolder && defaultShare
+                ? `${defaultShare.name}${defaultFolder.path ? ` / ${defaultFolder.path}` : ""}`
+                : "First shared folder"}
+            </p>
+            <p class="muted">
+              This choice follows your account across devices.
+            </p>
             <div class="settings-actions">
               <Button
                 variant="secondary"
@@ -509,7 +507,7 @@ function AuthenticatedShell({
               <Notice tone="danger">{preferencesError}</Notice>
             )}
           </div>
-        </section>
+        </Modal>
       )}
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
