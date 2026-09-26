@@ -333,11 +333,6 @@ function TreeNode(props: TreeNodeProps) {
         >
           {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         </button>
-        <EntryIcon
-          entry={{ kind: "directory", name }}
-          size={17}
-          aria-hidden="true"
-        />
         <a
           class="tree-link"
           href={directoryUrl(share.id, path)}
@@ -348,7 +343,12 @@ function TreeNode(props: TreeNodeProps) {
             navigation.go({ shareId: share.id, path });
           }}
         >
-          {name}
+          <EntryIcon
+            entry={{ kind: "directory", name }}
+            size={17}
+            aria-hidden="true"
+          />
+          <span>{name}</span>
         </a>
         {level === 0 && (
           <span

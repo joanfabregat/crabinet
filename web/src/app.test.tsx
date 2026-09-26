@@ -532,7 +532,10 @@ describe("directory browser", () => {
       path,
       entries:
         path === ""
-          ? [{ name: "Photos", kind: "directory" }]
+          ? [
+              { name: "Photos", kind: "directory" },
+              { name: ".cache", kind: "directory" },
+            ]
           : [{ name: "portrait.jpg", kind: "file" }],
     }));
     const navigation = new MemoryNavigation();
@@ -543,7 +546,12 @@ describe("directory browser", () => {
     );
     fireEvent.click(sidebar.getByRole("link", { name: "Reference" }));
     const photos = await sidebar.findByRole("link", { name: "Photos" });
-    fireEvent.click(photos);
+    const icon = photos.querySelector("svg");
+    expect(icon).not.toBeNull();
+    fireEvent.click(icon!);
+
+    const hiddenFolder = sidebar.getByRole("link", { name: ".cache" });
+    expect(hiddenFolder.querySelector(".lucide-folder-dot")).not.toBeNull();
 
     expect(navigation.visits.at(-1)?.route).toEqual({
       shareId: "read-only",
