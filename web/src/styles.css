@@ -280,10 +280,6 @@ select {
   gap: 0.85rem;
 }
 
-.account-actions .button {
-  gap: 0.45rem;
-}
-
 .account-name {
   color: var(--muted);
   font-size: 0.875rem;
@@ -326,7 +322,7 @@ select {
 }
 
 .development-banner {
-  background: #3a245c;
+  background: #b93815;
   color: white;
   font-size: 0.78rem;
   font-weight: 750;
@@ -1319,12 +1315,6 @@ html.preview-fullscreen-open body {
 
   .account-actions {
     gap: 0.5rem;
-  }
-
-  .account-actions .button {
-    font-size: 0.875rem;
-    padding: 0.5rem 0.6rem;
-    white-space: nowrap;
   }
 
   .account-name {

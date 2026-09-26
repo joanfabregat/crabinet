@@ -584,12 +584,15 @@ describe("directory browser", () => {
     expect(
       screen.queryByRole("checkbox", { name: "Show hidden files" }),
     ).toBeNull();
-    expect(
-      screen.getByRole("button", { name: "Settings" }).querySelector("svg"),
-    ).not.toBeNull();
-    expect(
-      screen.getByRole("button", { name: "Sign out" }).querySelector("svg"),
-    ).not.toBeNull();
+    for (const label of ["Settings", "Sign out"]) {
+      const button = screen.getByRole("button", { name: label });
+      expect(button.querySelector("svg")).not.toBeNull();
+      expect(button).toHaveTextContent("");
+      expect(button).toHaveAttribute("data-tooltip", label);
+    }
+    expect(document.querySelector(".app-frame")?.firstElementChild).toHaveClass(
+      "development-banner",
+    );
   });
 
   it("opens sidebar folders and explains when there are no subfolders", async () => {
