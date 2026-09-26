@@ -1188,7 +1188,8 @@ describe("writable file operations", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "changed after you opened it",
     );
-    expect(editor).toBeDisabled();
+    expect(editor).toBeEnabled();
+    expect(editor).toHaveValue("new");
     expect(saveText).toHaveBeenCalledWith(
       "work",
       "projects/notes.txt",
@@ -1197,6 +1198,153 @@ describe("writable file operations", () => {
       "csrf-in-memory",
       expect.any(AbortSignal),
     );
+  });
+
+  it("keeps a denied save draft and retries with a refreshed session", async () => {
+    const refreshedSession = { ...session, csrfToken: "refreshed-csrf" };
+    const getSession = vi
+      .fn<ApiClient["session"]>()
+      .mockResolvedValueOnce(session)
+      .mockResolvedValue(refreshedSession);
+    const saveText = vi
+      .fn<ApiClient["saveText"]>()
+      .mockRejectedValueOnce(
+        new ApiError("forbidden", "denied", { status: 403 }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError("forbidden", "denied", { status: 403 }),
+      )
+      .mockImplementation(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+      }));
+    const loadText = vi.fn<ApiClient["text"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      text: "old",
+      size: 3,
+      mimeType: "text/plain",
+      etag: '"content"',
+    }));
+    render(
+      <App
+        api={fakeApi({
+          session: getSession,
+          directory: vi.fn(async () => writablePage),
+          text: loadText,
+          saveText,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
+    const editor = await screen.findByLabelText("UTF-8 text content");
+    fireEvent.input(editor, { target: { value: "unsaved draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your edits are still here",
+    );
+    expect(editor).toHaveValue("unsaved draft");
+    expect(editor).toBeEnabled();
+    expect(loadText).toHaveBeenCalledTimes(1);
+    expect(saveText).toHaveBeenNthCalledWith(
+      2,
+      "work",
+      "projects/notes.txt",
+      "unsaved draft",
+      'W/"test"',
+      "refreshed-csrf",
+      expect.any(AbortSignal),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+    await waitFor(() => expect(saveText).toHaveBeenCalledTimes(3));
+    expect(saveText).toHaveBeenNthCalledWith(
+      3,
+      "work",
+      "projects/notes.txt",
+      "unsaved draft",
+      'W/"test"',
+      "refreshed-csrf",
+      expect.any(AbortSignal),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "Edit notes.txt" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the draft visible when sign-in expires during a save", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          saveText: vi.fn(async () => {
+            throw new ApiError("unauthorized", "expired", { status: 401 });
+          }),
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
+    const editor = await screen.findByLabelText("UTF-8 text content");
+    fireEvent.input(editor, { target: { value: "keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Sign in again in another tab",
+    );
+    expect(editor).toHaveValue("keep this draft");
+    expect(screen.getByRole("button", { name: "Retry save" })).toBeEnabled();
+  });
+
+  it("keeps the draft without retrying when write access is revoked", async () => {
+    const readOnlySession = {
+      ...session,
+      shares: session.shares.map((share) =>
+        share.id === "work" ? { ...share, access: "read" as const } : share,
+      ),
+    };
+    const getSession = vi
+      .fn<ApiClient["session"]>()
+      .mockResolvedValueOnce(session)
+      .mockResolvedValue(readOnlySession);
+    const saveText = vi
+      .fn<ApiClient["saveText"]>()
+      .mockRejectedValue(new ApiError("forbidden", "denied", { status: 403 }));
+    render(
+      <App
+        api={fakeApi({
+          session: getSession,
+          directory: vi.fn(async () => writablePage),
+          saveText,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
+    const editor = await screen.findByLabelText("UTF-8 text content");
+    fireEvent.input(editor, { target: { value: "keep private draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Write access is unavailable",
+    );
+    expect(editor).toHaveValue("keep private draft");
+    expect(saveText).toHaveBeenCalledTimes(1);
   });
 
   it("uploads dropped files independently, exposes conflicts, and supports replacement", async () => {

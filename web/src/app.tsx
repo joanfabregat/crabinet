@@ -181,6 +181,14 @@ export function App({
             : current,
         )
       }
+      onSessionRefreshed={(session) =>
+        setAuth((current) =>
+          current.status === "authenticated" &&
+          current.session.user.id === session.user.id
+            ? { status: "authenticated", session }
+            : current,
+        )
+      }
     />
   );
 }
@@ -381,6 +389,7 @@ interface AuthenticatedShellProps {
   onSessionExpired: () => void;
   onSignedOut: () => void;
   onDefaultFolderChanged: (folder: DefaultFolder | null) => void;
+  onSessionRefreshed: (session: Session) => void;
 }
 
 function AuthenticatedShell({
@@ -391,6 +400,7 @@ function AuthenticatedShell({
   onSessionExpired,
   onSignedOut,
   onDefaultFolderChanged,
+  onSessionRefreshed,
 }: AuthenticatedShellProps) {
   const [signingOut, setSigningOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string>();
@@ -536,6 +546,7 @@ function AuthenticatedShell({
             shares={session.shares}
             userId={session.user.id}
             onSessionExpired={onSessionExpired}
+            onSessionRefreshed={onSessionRefreshed}
           />
         ) : (
           <p role="status">Opening a shared folder…</p>
@@ -555,6 +566,7 @@ interface DirectoryBrowserProps {
   shares: Share[];
   userId: string;
   onSessionExpired: () => void;
+  onSessionRefreshed: (session: Session) => void;
 }
 
 function DirectoryBrowser({
@@ -566,6 +578,7 @@ function DirectoryBrowser({
   shares,
   userId,
   onSessionExpired,
+  onSessionRefreshed,
 }: DirectoryBrowserProps) {
   const [page, setPage] = useState<DirectoryPage>();
   const [loading, setLoading] = useState(true);
@@ -1094,6 +1107,8 @@ function DirectoryBrowser({
           onClose={() => setOperation(undefined)}
           onChanged={changed}
           onSessionExpired={onSessionExpired}
+          onSessionRefreshed={onSessionRefreshed}
+          userId={userId}
         />
       )}
       {uploadSelection && (

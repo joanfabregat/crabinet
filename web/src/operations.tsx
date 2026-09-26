@@ -7,6 +7,7 @@ import {
   type ApiClient,
   type DirectoryEntry,
   type EntryMetadata,
+  type Session,
 } from "./api";
 import { CopyPathButton } from "./copy-path-button";
 import { isValidPathComponent } from "./virtual-path";
@@ -129,9 +130,11 @@ interface OperationDialogProps {
   operation: EntryOperation;
   directory: string;
   shareId: string;
+  userId: string;
   onClose: () => void;
   onChanged: (operation: EntryOperation, destinationPath?: string) => void;
   onSessionExpired: () => void;
+  onSessionRefreshed: (session: Session) => void;
 }
 
 export function OperationDialog(props: OperationDialogProps) {
@@ -463,9 +466,11 @@ function EditorDialog({
   csrfToken,
   operation,
   shareId,
+  userId,
   onClose,
   onChanged,
   onSessionExpired,
+  onSessionRefreshed,
 }: OperationDialogProps) {
   if (operation.kind !== "edit") throw new Error("editor requires a file");
   const [text, setText] = useState("");
@@ -536,20 +541,53 @@ function EditorDialog({
     setError(undefined);
     setConflict(false);
     try {
-      await api.saveText(
-        shareId,
-        operation.path,
-        text,
-        metadata.etag,
-        csrfToken,
-        nextController.signal,
-      );
+      const write = (token: string) =>
+        api.saveText(
+          shareId,
+          operation.path,
+          text,
+          metadata.etag,
+          token,
+          nextController.signal,
+        );
+      try {
+        await write(csrfToken);
+      } catch (cause) {
+        if (!(cause instanceof ApiError && cause.kind === "forbidden"))
+          throw cause;
+        const refreshed = await api.session(nextController.signal);
+        if (refreshed.user.id !== userId) {
+          setError(
+            "A different account is signed in. Return to your original account, then retry save. Your edits are still here.",
+          );
+          return;
+        }
+        if (
+          !refreshed.shares.some(
+            (share) => share.id === shareId && share.access === "read-write",
+          )
+        ) {
+          setError(
+            "Write access is unavailable for this folder. Your edits are still here to copy or retry after access is restored.",
+          );
+          return;
+        }
+        onSessionRefreshed(refreshed);
+        await write(refreshed.csrfToken);
+      }
       setInitialText(text);
       onChanged(operation);
     } catch (cause) {
-      if (isUnauthorized(cause)) onSessionExpired();
+      if (isUnauthorized(cause))
+        setError(
+          "Your sign-in needs refreshing. Sign in again in another tab, then retry save here. Your edits are still here.",
+        );
       else if (cause instanceof ApiError && cause.kind === "conflict")
         setConflict(true);
+      else if (cause instanceof ApiError && cause.kind === "forbidden")
+        setError(
+          "Save was denied with the current access. Your edits are still here. Retry save or contact an administrator.",
+        );
       else if (!isAborted(cause)) setError(operationError(cause, "edit"));
     } finally {
       setSaving(false);
@@ -561,6 +599,14 @@ function EditorDialog({
     if (!dirty || window.confirm("Discard your unsaved changes?")) onClose();
   };
 
+  const reloadLatest = () => {
+    if (
+      !dirty ||
+      window.confirm("Discard your unsaved edits and reload the file?")
+    )
+      load();
+  };
+
   return (
     <Modal
       title={`Edit ${operation.entry.name}`}
@@ -570,15 +616,20 @@ function EditorDialog({
     >
       {loading ? (
         <p role="status">Loading text…</p>
-      ) : error ? (
+      ) : !metadata ? (
         <div role="alert" class="field-error">
-          <p>{error}</p>
+          <p>{error ?? "The file could not be loaded."}</p>
           <button class="button button-secondary" type="button" onClick={load}>
             Try again
           </button>
         </div>
       ) : (
         <div class="editor-form">
+          {error && (
+            <div role="alert" class="notice notice-warning">
+              {error}
+            </div>
+          )}
           {conflict && (
             <div class="notice notice-warning" role="alert">
               <p>
@@ -588,7 +639,7 @@ function EditorDialog({
               <button
                 class="button button-secondary"
                 type="button"
-                onClick={load}
+                onClick={reloadLatest}
               >
                 Reload latest version
               </button>
@@ -599,7 +650,7 @@ function EditorDialog({
             ref={editor}
             id="text-editor"
             value={text}
-            disabled={saving || conflict}
+            disabled={saving}
             spellcheck={false}
             onInput={(event) => setText(event.currentTarget.value)}
           />
@@ -625,7 +676,7 @@ function EditorDialog({
               disabled={!dirty || saving || conflict}
               onClick={save}
             >
-              Save
+              {error ? "Retry save" : "Save"}
             </button>
           </div>
         </div>
