@@ -133,6 +133,11 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(newFolder).toBeVisible();
   await expect(upload).toBeVisible();
   await expect(copyPath).toBeVisible();
+  await expect(newFile).toHaveText("");
+  await expect(newFolder).toHaveText("");
+  await expect(upload).toHaveText("");
+  await newFile.focus();
+  await expect(page.getByRole("tooltip")).toHaveText("New file");
   const sidebar = page.getByRole("complementary", { name: "Shared folders" });
   await expect(sidebar.getByRole("button", { name: "New file" })).toHaveCount(
     0,

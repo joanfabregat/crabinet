@@ -564,6 +564,13 @@ describe("directory browser", () => {
         name: "Copy full path for Working files",
       }),
     ).toBeVisible();
+    for (const label of ["New file", "New folder", "Upload files"]) {
+      const button = within(actions as HTMLElement).getByRole("button", {
+        name: label,
+      });
+      expect(button).toHaveTextContent("");
+      expect(button).toHaveAttribute("data-tooltip", label);
+    }
     const sidebar = screen.getByRole("complementary", {
       name: "Shared folders",
     });
