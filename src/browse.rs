@@ -1286,8 +1286,7 @@ mod tests {
     #[tokio::test]
     async fn hidden_entries_are_filtered_before_pagination_but_remain_accessible() {
         let fixture = fixture(BrowseLimits::default());
-        fs::create_dir(fixture._root.path().join(".private"))
-            .expect("hidden directory fixture");
+        fs::create_dir(fixture._root.path().join(".private")).expect("hidden directory fixture");
         fs::write(fixture._root.path().join(".secret.txt"), b"hidden")
             .expect("hidden file fixture");
 
