@@ -951,8 +951,6 @@ function DirectoryBrowser({
         activeShareId={share.id}
         activePath={route.path}
         navigation={navigation}
-        onCreateFile={() => setOperation({ kind: "create-file" })}
-        onCreateFolder={() => setOperation({ kind: "create-folder" })}
         onMove={(entry, path, destinationDirectory) =>
           setOperation({ kind: "move", entry, path, destinationDirectory })
         }
@@ -1003,6 +1001,8 @@ function DirectoryBrowser({
           <div class="directory-heading-actions">
             {writable && (
               <WriteToolbar
+                onCreateFile={() => setOperation({ kind: "create-file" })}
+                onCreateFolder={() => setOperation({ kind: "create-folder" })}
                 onUpload={(files) =>
                   setUploadSelection({ id: crypto.randomUUID(), files })
                 }

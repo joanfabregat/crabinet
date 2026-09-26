@@ -382,21 +382,6 @@ select {
   top: 1rem;
 }
 
-.tree-create-actions {
-  border-bottom: 1px solid var(--line);
-  display: grid;
-  gap: 0.5rem;
-  grid-template-columns: 1fr 1fr;
-  padding: 0.75rem;
-}
-
-.tree-create-actions .button {
-  gap: 0.35rem;
-  padding-left: 0.55rem;
-  padding-right: 0.55rem;
-  white-space: nowrap;
-}
-
 .tree-scroll,
 .folder-picker {
   max-height: min(70vh, 42rem);
@@ -946,6 +931,8 @@ html.preview-fullscreen-open body {
   flex-wrap: wrap;
   gap: 0.6rem;
   justify-content: flex-end;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .hidden-files-toggle {
@@ -965,7 +952,15 @@ html.preview-fullscreen-open body {
 
 .write-toolbar {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
   justify-content: flex-end;
+  min-width: 0;
+}
+
+.write-toolbar .button {
+  gap: 0.4rem;
+  white-space: nowrap;
 }
 
 .write-actions,
@@ -1360,6 +1355,11 @@ html.preview-fullscreen-open body {
   }
 
   .directory-heading-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .write-toolbar {
     justify-content: flex-start;
   }
 

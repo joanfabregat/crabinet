@@ -123,27 +123,27 @@ test("a start folder follows the user while direct links keep their destination"
 }) => {
   await openSignedIn(page, "/browse/writable?path=Projects", "writer");
   const headingActions = page.locator(".directory-heading-actions");
+  const newFile = headingActions.getByRole("button", { name: "New file" });
+  const newFolder = headingActions.getByRole("button", { name: "New folder" });
   const upload = headingActions.getByRole("button", { name: "Upload files" });
   const copyPath = headingActions.getByRole("button", {
     name: "Copy full path for Projects",
   });
+  await expect(newFile).toBeVisible();
+  await expect(newFolder).toBeVisible();
   await expect(upload).toBeVisible();
   await expect(copyPath).toBeVisible();
+  const sidebar = page.getByRole("complementary", { name: "Shared folders" });
+  await expect(sidebar.getByRole("button", { name: "New file" })).toHaveCount(
+    0,
+  );
+  await expect(sidebar.getByRole("button", { name: "New folder" })).toHaveCount(
+    0,
+  );
   await expect(page.locator(".directory-toolbar")).toHaveCount(0);
   await expect(
     page.getByRole("checkbox", { name: "Show hidden files" }),
   ).toHaveCount(0);
-  const [uploadBox, copyBox] = await Promise.all([
-    upload.boundingBox(),
-    copyPath.boundingBox(),
-  ]);
-  expect(uploadBox).not.toBeNull();
-  expect(copyBox).not.toBeNull();
-  expect(
-    Math.abs(
-      uploadBox!.y + uploadBox!.height / 2 - (copyBox!.y + copyBox!.height / 2),
-    ),
-  ).toBeLessThan(2);
   const pageWidth = await page.evaluate(
     () => document.documentElement.scrollWidth,
   );
@@ -165,6 +165,8 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(page).toHaveURL(/\/browse\/writable$/);
   await page.goto("/browse/read-only");
   await expect(page).toHaveURL(/\/browse\/read-only$/);
+  await expect(page.getByRole("button", { name: "New file" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings" }).click();
   await startFolder.selectOption("");
