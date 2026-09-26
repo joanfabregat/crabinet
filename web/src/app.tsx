@@ -487,22 +487,30 @@ function AuthenticatedShell({
 
   return (
     <div class="app-frame">
+      {import.meta.env.DEV && (
+        <div class="development-banner" role="status">
+          Development preview · revision{" "}
+          {__CRABINET_DEV_REVISION__ ?? "working tree"} · live HMR
+        </div>
+      )}
       <AppHeader>
         <div class="account-actions">
           <span class="account-name">{session.user.displayName}</span>
-          <Button
-            variant="secondary"
-            type="button"
+          <TooltipButton
+            label="Settings"
             aria-haspopup="dialog"
             onClick={() => setSettingsOpen(true)}
           >
-            <Settings2 size={17} aria-hidden="true" />
-            Settings
-          </Button>
-          <Button variant="secondary" busy={signingOut} onClick={logout}>
-            <LogOut size={17} aria-hidden="true" />
-            {signingOut ? "Signing out…" : "Sign out"}
-          </Button>
+            <Settings2 size={19} aria-hidden="true" />
+          </TooltipButton>
+          <TooltipButton
+            label={signingOut ? "Signing out…" : "Sign out"}
+            disabled={signingOut}
+            aria-busy={signingOut || undefined}
+            onClick={logout}
+          >
+            <LogOut size={19} aria-hidden="true" />
+          </TooltipButton>
         </div>
       </AppHeader>
       {settingsOpen && (
@@ -554,12 +562,6 @@ function AuthenticatedShell({
             )}
           </div>
         </Modal>
-      )}
-      {import.meta.env.DEV && (
-        <div class="development-banner" role="status">
-          Development preview · revision{" "}
-          {__CRABINET_DEV_REVISION__ ?? "working tree"} · live HMR
-        </div>
       )}
       {logoutError && (
         <div class="global-notice">

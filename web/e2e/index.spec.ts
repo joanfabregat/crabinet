@@ -154,7 +154,15 @@ test("a start folder follows the user while direct links keep their destination"
   );
   expect(pageWidth).toBeLessThanOrEqual(page.viewportSize()!.width);
 
-  await page.getByRole("button", { name: "Settings" }).click();
+  const settingsButton = page.getByRole("button", { name: "Settings" });
+  const signOutButton = page.getByRole("button", { name: "Sign out" });
+  await expect(settingsButton).toHaveText("");
+  await expect(signOutButton).toHaveText("");
+  await settingsButton.focus();
+  await expect(page.getByRole("tooltip")).toHaveText("Settings");
+  await signOutButton.focus();
+  await expect(page.getByRole("tooltip")).toHaveText("Sign out");
+  await settingsButton.click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await expect(
     settings.getByRole("checkbox", { name: "Show hidden files" }),
