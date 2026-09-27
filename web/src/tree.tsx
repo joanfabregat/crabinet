@@ -1,4 +1,10 @@
-import { ChevronDown, ChevronRight, FolderPlus, Trash2 } from "lucide-preact";
+import {
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  FolderPlus,
+  Trash2,
+} from "lucide-preact";
 import { Fragment } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
@@ -144,6 +150,7 @@ export function ShareTree({
   onSessionExpired,
 }: ShareTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [trashExpanded, setTrashExpanded] = useState(false);
   const [state, setState] = useState<Record<string, TreeState>>({});
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
@@ -280,13 +287,35 @@ export function ShareTree({
                 onLoadMore={load}
                 onDrop={drop}
               />
-              <li class="tree-item">
-                <div
-                  class={`tree-row tree-trash-row${activeView === "trash" && activeShareId === share.id ? " is-selected" : ""}`}
-                  style={{ "--tree-level": 1 }}
-                >
+            </Fragment>
+          ))}
+        </ul>
+        <div class="tree-special" aria-label="Special folders">
+          <button
+            type="button"
+            class={`tree-special-toggle${activeView === "trash" ? " is-active" : ""}`}
+            aria-expanded={trashExpanded}
+            aria-controls="tree-trash-shares"
+            onClick={() => setTrashExpanded((value) => !value)}
+          >
+            {trashExpanded ? (
+              <ChevronDown size={16} />
+            ) : (
+              <ChevronRight size={16} />
+            )}
+            <Trash2 size={17} aria-hidden="true" />
+            <span>Trash</span>
+          </button>
+          {trashExpanded && (
+            <ul
+              id="tree-trash-shares"
+              class="tree-list tree-trash-shares"
+              aria-label="Trash shares"
+            >
+              {shares.map((share) => (
+                <li class="tree-item" key={share.id}>
                   <a
-                    class="tree-link"
+                    class={`tree-trash-link${activeView === "trash" && activeShareId === share.id ? " is-selected" : ""}`}
                     href={trashUrl(share.id)}
                     aria-current={
                       activeView === "trash" && activeShareId === share.id
@@ -302,14 +331,14 @@ export function ShareTree({
                       });
                     }}
                   >
-                    <Trash2 size={17} aria-hidden="true" />
-                    <span>Trash</span>
+                    <Folder size={17} aria-hidden="true" />
+                    <span>{share.name}</span>
                   </a>
-                </div>
-              </li>
-            </Fragment>
-          ))}
-        </ul>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </aside>
   );

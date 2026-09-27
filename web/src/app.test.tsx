@@ -657,7 +657,7 @@ describe("directory browser", () => {
     const sidebar = within(
       await screen.findByRole("complementary", { name: "Shared folders" }),
     );
-    fireEvent.click(sidebar.getByRole("link", { name: "Reference" }));
+    fireEvent.click(sidebar.getAllByRole("link", { name: "Reference" })[0]!);
     const photos = await sidebar.findByRole("link", { name: "Photos" });
     const icon = photos.querySelector("svg");
     expect(icon).not.toBeNull();
@@ -731,7 +731,7 @@ describe("directory browser", () => {
     fireEvent.click(
       within(
         screen.getByRole("complementary", { name: "Shared folders" }),
-      ).getByRole("link", { name: "Working files" }),
+      ).getAllByRole("link", { name: "Working files" })[0]!,
     );
     expect(navigation.visits.at(-1)?.route).toEqual({
       shareId: "work",
@@ -934,13 +934,14 @@ describe("writable file operations", () => {
         outcome: "success",
       }),
     );
+    const navigation = writableNavigation();
     render(
       <App
         api={fakeApi({
           directory: vi.fn(async () => writablePage),
           createFile,
         })}
-        navigation={writableNavigation()}
+        navigation={navigation}
       />,
     );
 
@@ -963,6 +964,14 @@ describe("writable file operations", () => {
       ),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(navigation.current()).toEqual({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/todo.md",
+    });
+    expect(
+      await screen.findByRole("complementary", { name: "todo.md" }),
+    ).toBeVisible();
   });
 
   it("renames only after fetching a fresh validator", async () => {
@@ -1222,7 +1231,7 @@ describe("writable file operations", () => {
     );
   });
 
-  it("shows per-share Trash independently of hidden files and confirms permanent deletion", async () => {
+  it("groups share Trash folders separately and confirms permanent deletion", async () => {
     const item = {
       id: "deleted-1",
       originalPath: "projects/notes.txt",
@@ -1245,9 +1254,19 @@ describe("writable file operations", () => {
     const sidebar = await screen.findByRole("complementary", {
       name: "Shared folders",
     });
-    const trashLinks = within(sidebar).getAllByRole("link", { name: "Trash" });
-    expect(trashLinks).toHaveLength(2);
-    fireEvent.click(trashLinks[1]!);
+    expect(
+      within(sidebar).getAllByRole("button", { name: "Trash" }),
+    ).toHaveLength(1);
+    expect(
+      within(sidebar).queryByRole("list", { name: "Trash shares" }),
+    ).toBeNull();
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Trash" }));
+    const trashShares = within(sidebar).getByRole("list", {
+      name: "Trash shares",
+    });
+    fireEvent.click(
+      within(trashShares).getByRole("link", { name: "Working files" }),
+    );
     expect(navigation.current()).toEqual({
       shareId: "work",
       path: "",
@@ -1256,7 +1275,17 @@ describe("writable file operations", () => {
     expect(
       await screen.findByText("Original path: projects/notes.txt"),
     ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+    const restoreButton = screen.getByRole("button", {
+      name: "Restore notes.txt",
+    });
+    expect(restoreButton).toHaveAttribute("data-tooltip", "Restore");
+    expect(restoreButton.querySelector(".lucide-undo-2")).not.toBeNull();
+    const deleteButton = screen.getByRole("button", {
+      name: "Permanently delete notes.txt",
+    });
+    expect(deleteButton).toHaveAttribute("data-tooltip", "Delete permanently");
+    expect(deleteButton.querySelector(".lucide-shredder")).not.toBeNull();
+    fireEvent.click(deleteButton);
     const dialog = screen.getByRole("dialog", {
       name: "Permanently delete notes.txt",
     });
@@ -1270,6 +1299,52 @@ describe("writable file operations", () => {
         "deleted-1",
         "csrf-in-memory",
       ),
+    );
+  });
+
+  it("confirms Empty Trash and purges only the displayed share snapshot", async () => {
+    const items = ["first.txt", "second.txt"].map((name, index) => ({
+      id: `deleted-${index}`,
+      originalPath: name,
+      kind: "file" as const,
+      deletedAt: "2026-09-01T10:00:00Z",
+      deletedBy: "Joan",
+      expiresAt: "2026-10-01T10:00:00Z",
+    }));
+    const purgeTrash = vi.fn<ApiClient["purgeTrash"]>(async () => undefined);
+    const navigation = writableNavigation();
+    navigation.restore({ shareId: "work", path: "", view: "trash" });
+    render(
+      <App
+        api={fakeApi({
+          trash: vi.fn(async (shareId) => ({ shareId, items })),
+          purgeTrash,
+        })}
+        navigation={navigation}
+      />,
+    );
+    const emptyButton = await screen.findByRole("button", {
+      name: "Empty Trash",
+    });
+    expect(emptyButton.querySelector(".lucide-trash-2")).not.toBeNull();
+    fireEvent.click(emptyButton);
+    const dialog = screen.getByRole("dialog", {
+      name: "Empty Working files Trash?",
+    });
+    expect(
+      within(dialog).getByText(/Permanently delete 2 items/),
+    ).toBeVisible();
+    expect(purgeTrash).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Empty Trash" }),
+    );
+    await waitFor(() => expect(purgeTrash).toHaveBeenCalledTimes(2));
+    expect(purgeTrash.mock.calls.map((call) => call[1])).toEqual([
+      "deleted-0",
+      "deleted-1",
+    ]);
+    expect(purgeTrash.mock.calls.every((call) => call[0] === "work")).toBe(
+      true,
     );
   });
 
@@ -1343,6 +1418,13 @@ describe("writable file operations", () => {
       ),
     ).toBeVisible();
     fireEvent.click(screen.getByRole("link", { name: "notes.txt" }));
+    expect(
+      screen.getByRole("link", { name: "notes.txt" }).closest(".entry-row"),
+    ).toHaveClass("is-selected");
+    expect(screen.getByRole("link", { name: "notes.txt" })).toHaveAttribute(
+      "aria-current",
+      "location",
+    );
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit notes.txt" }),
     );
@@ -1914,7 +1996,7 @@ describe("security review regressions", () => {
       screen.getByRole("complementary", { name: "Shared folders" }),
     );
     const target = sidebar
-      .getByRole("link", { name: "Working files" })
+      .getAllByRole("link", { name: "Working files" })[0]!
       .closest<HTMLElement>(".tree-row")!;
     const type = "application/x-crabinet-entry";
 

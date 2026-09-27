@@ -390,7 +390,9 @@ function SimpleOperationDialog({
       }
       onChanged(
         operation,
-        operation.kind === "rename" ? destination : undefined,
+        operation.kind === "rename" || operation.kind === "create-file"
+          ? destination
+          : undefined,
       );
     } catch (cause) {
       if (isUnauthorized(cause)) {
