@@ -98,6 +98,21 @@ describe("API client", () => {
     ).toBe("csrf-value");
   });
 
+  it("starts discoverable passkey sign-in without an account name", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json({ flowId: "flow", options: { publicKey: {} } }),
+      );
+    const api = createApiClient({ fetch });
+
+    await api.startPasskeyLogin();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/auth/passkeys/login/start",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
   it("returns structured errors without trusting non-JSON response bodies", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       new Response(

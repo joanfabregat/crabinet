@@ -487,6 +487,7 @@ dependencies = [
  "unicode-normalization",
  "url",
  "webauthn-rs",
+ "webauthn-rs-proto",
 ]
 
 [[package]]

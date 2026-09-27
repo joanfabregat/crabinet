@@ -353,6 +353,24 @@ select {
   padding: 0.75rem;
 }
 
+.passkey-row-header {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.passkey-row-header strong {
+  overflow-wrap: anywhere;
+}
+
+.passkey-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.35rem;
+}
+
 .passkey-list small {
   color: var(--muted);
 }

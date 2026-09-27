@@ -222,11 +222,11 @@ describe("authentication", () => {
       await screen.findByRole("link", { name: "Sign in with Google" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByLabelText("Email or username for passkey"),
-    ).toBeInTheDocument();
-    expect(
       screen.getByRole("button", { name: "Sign in with a passkey" }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Use an older passkey with an account name"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
   });
 
@@ -607,7 +607,7 @@ describe("directory browser", () => {
     );
   });
 
-  it("shows a Google profile picture only when the session includes one", async () => {
+  it("shows the profile picture supplied by the session", async () => {
     const withPicture: Session = {
       ...session,
       user: {
@@ -622,17 +622,16 @@ describe("directory browser", () => {
       />,
     );
     const picture = await screen.findByRole("img", {
-      name: "Google profile photo of Joan",
+      name: "Profile image for Joan",
     });
     expect(picture).toHaveAttribute("src", withPicture.user.pictureUrl);
     expect(picture).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(picture.previousElementSibling).toHaveClass("account-name");
 
     first.unmount();
     render(<App api={fakeApi()} navigation={new MemoryNavigation()} />);
     await screen.findByRole("button", { name: "Settings" });
-    expect(
-      screen.queryByRole("img", { name: /Google profile photo/ }),
-    ).toBeNull();
+    expect(screen.queryByRole("img", { name: /Profile image/ })).toBeNull();
   });
 
   it("opens sidebar folders and explains when there are no subfolders", async () => {

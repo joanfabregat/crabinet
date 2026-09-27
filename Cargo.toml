@@ -44,7 +44,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 unicode-normalization = "0.1.25"
 url = "2.5.8"
-webauthn-rs = "=0.5.5"
+webauthn-rs = { version = "=0.5.5", features = ["conditional-ui"] }
+webauthn-rs-proto = "=0.5.5"
 
 [dev-dependencies]
 aws-lc-rs = "1.18.1"

@@ -58,7 +58,26 @@ awk '
 ' "$state_dir/config.toml" > "$state_dir/ordered-config.toml"
 mv "$state_dir/ordered-config.toml" "$state_dir/config.toml"
 
-if [ -d /run/crabinet-oidc ]; then
+oidc_dir=/run/crabinet-oidc
+if [ -n "${CRABINET_PREVIEW_OIDC_CLIENT_ID:-}${CRABINET_PREVIEW_OIDC_CLIENT_SECRET:-}${CRABINET_PREVIEW_JOAN_EMAIL:-}${CRABINET_PREVIEW_KELLY_EMAIL:-}" ]; then
+  if [ -z "${CRABINET_PREVIEW_OIDC_CLIENT_ID:-}" ] ||
+     [ -z "${CRABINET_PREVIEW_OIDC_CLIENT_SECRET:-}" ] ||
+     [ -z "${CRABINET_PREVIEW_JOAN_EMAIL:-}" ] ||
+     [ -z "${CRABINET_PREVIEW_KELLY_EMAIL:-}" ]; then
+    echo 'Incomplete development OIDC credentials.' >&2
+    exit 1
+  fi
+  oidc_dir="$state_dir/oidc"
+  mkdir -m 700 "$oidc_dir"
+  printf '%s\n' "$CRABINET_PREVIEW_OIDC_CLIENT_ID" > "$oidc_dir/client-id"
+  printf '%s' "$CRABINET_PREVIEW_OIDC_CLIENT_SECRET" > "$oidc_dir/client-secret"
+  printf '%s\n' "$CRABINET_PREVIEW_JOAN_EMAIL" > "$oidc_dir/joan-email"
+  printf '%s\n' "$CRABINET_PREVIEW_KELLY_EMAIL" > "$oidc_dir/kelly-email"
+  chmod 600 "$oidc_dir"/*
+  unset CRABINET_PREVIEW_OIDC_CLIENT_ID CRABINET_PREVIEW_OIDC_CLIENT_SECRET CRABINET_PREVIEW_JOAN_EMAIL CRABINET_PREVIEW_KELLY_EMAIL
+fi
+
+if [ -d "$oidc_dir" ]; then
   awk '
     function grant(user, permission) {
       print ""
@@ -76,8 +95,8 @@ if [ -d /run/crabinet-oidc ]; then
       }
     }
     BEGIN {
-      if ((getline joan_email < "/run/crabinet-oidc/joan-email") <= 0 ||
-          (getline kelly_email < "/run/crabinet-oidc/kelly-email") <= 0 ||
+      if ((getline joan_email < "'"$oidc_dir"'/joan-email") <= 0 ||
+          (getline kelly_email < "'"$oidc_dir"'/kelly-email") <= 0 ||
           joan_email !~ /^[[:alnum:]._%+-]+@[[:alnum:].-]+$/ ||
           kelly_email !~ /^[[:alnum:]._%+-]+@[[:alnum:].-]+$/) exit 1
     }
@@ -110,8 +129,8 @@ oidc_enabled = true
 
 [auth.oidc]
 issuer = "https://accounts.google.com"
-client_id = "$(cat /run/crabinet-oidc/client-id)"
-client_secret_file = "/run/crabinet-oidc/client-secret"
+client_id = "$(cat "$oidc_dir/client-id")"
+client_secret_file = "$oidc_dir/client-secret"
 redirect_uri = "https://files-dev.jf.ffwip.com/api/v1/auth/oidc/callback"
 EOF
 fi
