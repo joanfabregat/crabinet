@@ -16,7 +16,15 @@ export interface BrowserNavigation {
 }
 
 export const browserNavigation: BrowserNavigation = {
-  current: () => routeFromUrl(new URL(window.location.href)),
+  current: () => {
+    const url = new URL(window.location.href);
+    const route = routeFromUrl(url);
+    // Rewrite bookmarks from the former ?path= format to the canonical URL.
+    if (url.searchParams.has("path") && route.shareId) {
+      window.history.replaceState(null, "", browserUrl(route) + url.hash);
+    }
+    return route;
+  },
   go: (route, options) => {
     const url = browserUrl(route);
     if (options?.replace) {
@@ -47,11 +55,18 @@ export function routeFromUrl(url: URL): BrowserRoute {
       return { shareId: null, path: "" };
     }
   }
-  const match = /^\/browse\/([^/]+)\/?$/.exec(url.pathname);
+  const match = /^\/browse\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
   if (!match) return { shareId: null, path: "" };
 
   try {
-    const path = url.searchParams.get("path") ?? "";
+    const segments = (match[2] ?? "")
+      .split("/")
+      .filter(Boolean)
+      .map(decodeURIComponent);
+    // An encoded slash cannot come from a real folder name.
+    const path = segments.some((segment) => segment.includes("/"))
+      ? ""
+      : segments.join("/") || (url.searchParams.get("path") ?? "");
     const previewPath = url.searchParams.get("preview");
     const route: BrowserRoute = {
       shareId: decodeURIComponent(match[1]!),
@@ -90,13 +105,17 @@ function browserUrl(route: BrowserRoute): string {
   if (route.view === "trash") return trashUrl(shareId);
   const query = new URLSearchParams();
   const safePath = isValidVirtualPath(route.path) ? route.path : "";
-  if (safePath) query.set("path", safePath);
+  const pathSuffix = safePath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => `/${encodeURIComponent(segment)}`)
+    .join("");
   if (route.previewPath && isValidVirtualPath(route.previewPath)) {
     query.set("preview", route.previewPath);
     if (route.previewMode === "full") query.set("view", "full");
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return `/browse/${encodeURIComponent(shareId)}${suffix}`;
+  return `/browse/${encodeURIComponent(shareId)}${pathSuffix}${suffix}`;
 }
 
 export function parentPath(path: string): string {

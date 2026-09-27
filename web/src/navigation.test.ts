@@ -22,7 +22,7 @@ describe("browser navigation", () => {
   it("round-trips Unicode share IDs and relative paths", () => {
     const href = directoryUrl("équipe/a", "Designs/東京 🚀");
     expect(href).toBe(
-      "/browse/%C3%A9quipe%2Fa?path=Designs%2F%E6%9D%B1%E4%BA%AC+%F0%9F%9A%80",
+      "/browse/%C3%A9quipe%2Fa/Designs/%E6%9D%B1%E4%BA%AC%20%F0%9F%9A%80",
     );
     expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
       shareId: "équipe/a",
@@ -64,6 +64,41 @@ describe("browser navigation", () => {
     expect(directoryUrl("docs", path)).toBe("/browse/docs");
   });
 
+  it("rejects path segments that decode to a slash or an ambiguous name", () => {
+    for (const href of [
+      "/browse/docs/one%2Ftwo",
+      "/browse/docs/literal%252e",
+      "/browse/docs/trailing%20",
+    ]) {
+      expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
+        shareId: "docs",
+        path: "",
+      });
+    }
+    expect(
+      routeFromUrl(new URL("https://crabinet.test/browse/docs/one/two/")),
+    ).toEqual({ shareId: "docs", path: "one/two" });
+  });
+
+  it("still reads the former ?path= links and rewrites them in place", () => {
+    const legacy = "/browse/docs?path=one%2Ftwo&preview=one%2Ftwo%2Fa.md";
+    expect(routeFromUrl(new URL(legacy, "https://crabinet.test"))).toEqual({
+      shareId: "docs",
+      path: "one/two",
+      previewPath: "one/two/a.md",
+    });
+
+    window.history.replaceState(null, "", legacy);
+    expect(browserNavigation.current()).toEqual({
+      shareId: "docs",
+      path: "one/two",
+      previewPath: "one/two/a.md",
+    });
+    expect(window.location.pathname + window.location.search).toBe(
+      "/browse/docs/one/two?preview=one%2Ftwo%2Fa.md",
+    );
+  });
+
   it("builds parent paths without escaping the share route", () => {
     expect(parentPath("one/two/three")).toBe("one/two");
     expect(parentPath("one")).toBe("");
@@ -72,9 +107,7 @@ describe("browser navigation", () => {
 
   it("round-trips preview deep links without putting file content in history", () => {
     const href = previewRouteUrl("docs", "projects", "projects/README.md");
-    expect(href).toBe(
-      "/browse/docs?path=projects&preview=projects%2FREADME.md",
-    );
+    expect(href).toBe("/browse/docs/projects?preview=projects%2FREADME.md");
     expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
       shareId: "docs",
       path: "projects",
@@ -85,7 +118,7 @@ describe("browser navigation", () => {
   it("round-trips an explicit full-screen preview without changing the folder", () => {
     const href = previewRouteUrl("docs", "projects", "projects/app.rs", "full");
     expect(href).toBe(
-      "/browse/docs?path=projects&preview=projects%2Fapp.rs&view=full",
+      "/browse/docs/projects?preview=projects%2Fapp.rs&view=full",
     );
     expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
       shareId: "docs",
@@ -96,11 +129,11 @@ describe("browser navigation", () => {
   });
 
   it("ignores an ambiguous preview path while keeping the directory route", () => {
-    const url = new URL("https://crabinet.test/browse/docs?path=projects");
+    const url = new URL("https://crabinet.test/browse/docs/projects");
     url.searchParams.set("preview", "../secret");
     expect(routeFromUrl(url)).toEqual({ shareId: "docs", path: "projects" });
     expect(previewRouteUrl("docs", "projects", "../secret")).toBe(
-      "/browse/docs?path=projects",
+      "/browse/docs/projects",
     );
   });
 
@@ -109,7 +142,7 @@ describe("browser navigation", () => {
     const unsubscribe = browserNavigation.subscribe((route) =>
       routes.push(route),
     );
-    window.history.pushState(null, "", "/browse/docs?path=one%2Ftwo");
+    window.history.pushState(null, "", "/browse/docs/one/two");
     window.dispatchEvent(new PopStateEvent("popstate"));
 
     expect(routes).toEqual([{ shareId: "docs", path: "one/two" }]);

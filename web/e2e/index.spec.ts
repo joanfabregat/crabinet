@@ -85,10 +85,11 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 test("direct routes, tree share navigation, breadcrumbs, and browser history", async ({
   page,
 }) => {
+  // The former ?path= format still resolves and is rewritten in place.
   await page.goto("/browse/writable?path=Projects");
   await signIn(page, "writer");
 
-  await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
+  await expect(page).toHaveURL(/\/browse\/writable\/Projects$/);
   await expect(
     page.getByRole("heading", { name: "Projects", level: 1 }),
   ).toBeFocused();
@@ -100,7 +101,7 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
     .click();
   await expect(page).toHaveURL(/\/browse\/writable$/);
   await page.goBack();
-  await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
+  await expect(page).toHaveURL(/\/browse\/writable\/Projects$/);
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
   const sidebar = page.getByLabel("Shared folders", { exact: true });
@@ -111,7 +112,7 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(nested).toBeVisible();
 
   await nested.click();
-  await expect(page).toHaveURL(/path=nested/);
+  await expect(page).toHaveURL(/\/browse\/read-only\/nested$/);
   await expect(sidebar.getByText("No subfolders")).toBeVisible();
   await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
   await page.goBack();
@@ -121,7 +122,7 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
 test("a start folder follows the user while direct links keep their destination", async ({
   page,
 }) => {
-  await openSignedIn(page, "/browse/writable?path=Projects", "writer");
+  await openSignedIn(page, "/browse/writable/Projects", "writer");
   const headingActions = page.locator(".directory-heading-actions");
   const newFile = headingActions.getByRole("button", { name: "New file" });
   const newFolder = headingActions.getByRole("button", { name: "New folder" });

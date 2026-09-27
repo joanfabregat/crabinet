@@ -396,7 +396,7 @@ test.describe("writable share operations", () => {
   }) => {
     await openSignedIn(page, "/browse/writable", "writer");
     await page.getByRole("link", { name: "Projects" }).click();
-    await expect(page).toHaveURL(/path=Projects/);
+    await expect(page).toHaveURL(/\/browse\/writable\/Projects$/);
     await expect(
       page.getByRole("link", { name: "example.toml" }),
     ).toBeVisible();
