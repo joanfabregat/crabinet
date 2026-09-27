@@ -1421,6 +1421,11 @@ html.preview-fullscreen-open body {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.entry-row.is-selected .entry-kind,
+.entry-row.is-selected .entry-meta {
+  color: #536259;
+}
+
 .entry-icon {
   color: var(--muted);
   font-size: 1.1rem;
