@@ -10,6 +10,7 @@ use std::{
     fmt,
     io::{Read, Write},
     path::Path,
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -27,6 +28,9 @@ const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
 const MAX_SHARE_ID_BYTES: usize = 64;
 const INTERNAL_STAGING_DIRECTORY: &str = ".index-staging";
 const INTERNAL_TEMP_PREFIX: &str = ".index-tmp-";
+/// Entries moved into staging by a delete use a distinct prefix so startup
+/// recovery never removes user data left behind by a failed rollback.
+const INTERNAL_DELETE_PREFIX: &str = ".index-del-";
 
 pub type FsResult<T> = Result<T, FsError>;
 
@@ -137,12 +141,24 @@ impl EntryName {
             || contains_percent_escape(&value)
             || !value.nfc().eq(value.chars())
             || is_windows_device_name(&value)
-            || value == INTERNAL_STAGING_DIRECTORY
-            || value.starts_with(INTERNAL_TEMP_PREFIX)
+            || is_reserved_name(&value)
         {
             return Err(FsError::new(FsErrorCode::InvalidPath));
         }
         Ok(Self(value))
+    }
+
+    /// Additional policy for a name that a mutation is about to create.
+    ///
+    /// Existing entries keep the permissive read grammar so they remain
+    /// visible, but new names must not contain bidirectional controls,
+    /// invisible zero-width characters, or line and paragraph separators that
+    /// can spoof a filename. Joiners and emoji tag characters stay allowed.
+    pub fn ensure_creatable(&self) -> FsResult<()> {
+        if self.0.chars().any(is_spoofing_character) {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -317,8 +333,9 @@ impl PendingWrite {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         self.published = true;
-        sync_directory(&self.staging)?;
-        sync_directory(&self.destination_parent)
+        sync_after_commit(&self.staging);
+        sync_after_commit(&self.destination_parent);
+        Ok(())
     }
 
     pub fn publish_replacement(mut self, expected: EntryMetadata) -> FsResult<()> {
@@ -337,40 +354,53 @@ impl PendingWrite {
             rustix::fs::RenameFlags::EXCHANGE,
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-        let valid_exchange =
-            metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
+        let valid_exchange = !fault_injected(Fault::InvalidExchange)
+            && metadata_in_parent_raw(&self.destination_parent, self.destination_name.as_str())
                 .is_ok_and(|current| current.matches_validator(&replacement))
-                && metadata_in_parent_raw(&self.staging, &self.temporary_name)
-                    .is_ok_and(|current| current.matches_validator(&expected));
+            && metadata_in_parent_raw(&self.staging, &self.temporary_name)
+                .is_ok_and(|current| current.matches_validator(&expected));
         if !valid_exchange {
-            rustix::fs::renameat_with(
-                &self.staging,
-                &self.temporary_name,
-                &self.destination_parent,
-                self.destination_name.as_str(),
-                rustix::fs::RenameFlags::EXCHANGE,
-            )
-            .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
+            if self.rollback_exchange().is_err() {
+                // The staging name may now hold the user's original file.
+                // Disarm the drop guard so it is never unlinked.
+                self.published = true;
+                tracing::error!(
+                    operation = "replace",
+                    "replacement rollback failed; the previous file version was left in private staging"
+                );
+                return Err(FsError::new(FsErrorCode::Unavailable));
+            }
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         if let Err(error) = self.staging.remove_file(&self.temporary_name) {
-            let rollback = rustix::fs::renameat_with(
-                &self.staging,
-                &self.temporary_name,
-                &self.destination_parent,
-                self.destination_name.as_str(),
-                rustix::fs::RenameFlags::EXCHANGE,
-            );
-            return if rollback.is_err() {
+            if self.rollback_exchange().is_err() {
                 self.published = true;
-                Err(FsError::new(FsErrorCode::Unavailable))
-            } else {
-                Err(map_io(error))
-            };
+                tracing::error!(
+                    operation = "replace",
+                    "replacement rollback failed; the previous file version was left in private staging"
+                );
+                return Err(FsError::new(FsErrorCode::Unavailable));
+            }
+            return Err(map_io(error));
         }
         self.published = true;
-        sync_directory(&self.staging)?;
-        sync_directory(&self.destination_parent)
+        sync_after_commit(&self.staging);
+        sync_after_commit(&self.destination_parent);
+        Ok(())
+    }
+
+    fn rollback_exchange(&self) -> FsResult<()> {
+        if fault_injected(Fault::FailedRollback) {
+            return Err(FsError::new(FsErrorCode::Unavailable));
+        }
+        rustix::fs::renameat_with(
+            &self.staging,
+            &self.temporary_name,
+            &self.destination_parent,
+            self.destination_name.as_str(),
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(|error| map_io(std::io::Error::from(error)))
     }
 }
 
@@ -467,6 +497,22 @@ impl ShareFs {
         &self.id
     }
 
+    /// Produces an owned, `'static` authorization for work that must run on a
+    /// blocking thread. It performs exactly the same grant check as
+    /// [`Self::authorize`] and exposes operations only through
+    /// [`OwnedAuthorizedShare::view`].
+    pub fn authorize_owned(
+        self: &Arc<Self>,
+        grant: Option<&ShareGrant>,
+        policy: GlobalPolicy,
+    ) -> FsResult<OwnedAuthorizedShare> {
+        let access = self.authorize(grant, policy)?.access();
+        Ok(OwnedAuthorizedShare {
+            share: Arc::clone(self),
+            access,
+        })
+    }
+
     /// Produces the only object that exposes request-time filesystem methods.
     /// Missing and wrong-share grants use the same denial.
     pub fn authorize<'share>(
@@ -509,6 +555,37 @@ impl ShareFs {
         self.staging.as_ref().map_or(Ok(0), |staging| {
             recover_staging_directory(staging, max_entries)
         })
+    }
+}
+
+/// An owned authorization for one share that can move into
+/// `tokio::task::spawn_blocking`. It can only be produced by
+/// [`ShareFs::authorize_owned`] and carries no ambient path.
+#[derive(Clone)]
+pub struct OwnedAuthorizedShare {
+    share: Arc<ShareFs>,
+    access: AccessLevel,
+}
+
+impl OwnedAuthorizedShare {
+    #[must_use]
+    pub const fn access(&self) -> AccessLevel {
+        self.access
+    }
+
+    #[must_use]
+    pub fn share_id(&self) -> &ShareId {
+        self.share.id()
+    }
+
+    /// Borrows the same authorization-bound view that [`ShareFs::authorize`]
+    /// returns, so every operation keeps one implementation.
+    #[must_use]
+    pub fn view(&self) -> AuthorizedShare<'_> {
+        AuthorizedShare {
+            share: &self.share,
+            access: self.access,
+        }
     }
 }
 
@@ -582,7 +659,13 @@ impl AuthorizedShare<'_> {
             let Ok(name) = EntryName::new(name) else {
                 continue;
             };
-            let metadata = entry.metadata().map_err(map_io)?;
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                // The entry was removed or renamed between `readdir` and
+                // `stat`; the directory itself still exists.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(map_io(error)),
+            };
             let kind = match classify_metadata(&metadata) {
                 Ok(kind) => kind,
                 Err(error) if error.code() == FsErrorCode::UnsupportedEntry => continue,
@@ -669,7 +752,8 @@ impl AuthorizedShare<'_> {
         parent.create_dir(name.as_str()).map_err(map_io)?;
         // Re-open without following so a concurrently substituted link is never accepted.
         parent.open_dir_nofollow(name.as_str()).map_err(map_io)?;
-        sync_directory(&parent)
+        sync_after_commit(&parent);
+        Ok(())
     }
 
     pub fn begin_write(&self, path: &VirtualPath) -> FsResult<PendingWrite> {
@@ -736,8 +820,9 @@ impl AuthorizedShare<'_> {
 
         match metadata_in_parent(&destination_parent, destination_name) {
             Ok(moved) if moved.matches_validator(&expected) => {
-                sync_directory(&source_parent)?;
-                sync_directory(&destination_parent)
+                sync_after_commit(&source_parent);
+                sync_after_commit(&destination_parent);
+                Ok(())
             }
             validation => {
                 let rollback = rustix::fs::renameat_with(
@@ -748,6 +833,10 @@ impl AuthorizedShare<'_> {
                     rustix::fs::RenameFlags::NOREPLACE,
                 );
                 if rollback.is_err() {
+                    tracing::error!(
+                        operation = "move",
+                        "move rollback failed; the entry remains at its destination"
+                    );
                     return Err(FsError::new(FsErrorCode::Unavailable));
                 }
                 validation.and_then(|_| Err(FsError::new(FsErrorCode::Conflict)))
@@ -768,7 +857,7 @@ impl AuthorizedShare<'_> {
             .as_ref()
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
         ensure_same_device(staging, &parent)?;
-        let staged_name = random_temporary_name()?;
+        let staged_name = random_internal_name(INTERNAL_DELETE_PREFIX)?;
         rustix::fs::renameat_with(
             &parent,
             name.as_str(),
@@ -777,20 +866,31 @@ impl AuthorizedShare<'_> {
             rustix::fs::RenameFlags::NOREPLACE,
         )
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-        let staged = metadata_in_parent_raw(staging, &staged_name);
-        if staged.as_ref().is_err()
-            || staged
-                .as_ref()
-                .is_ok_and(|value| !value.matches_validator(&expected))
-        {
-            let rollback = rustix::fs::renameat_with(
+        let rollback = || {
+            let result = rustix::fs::renameat_with(
                 staging,
                 &staged_name,
                 &parent,
                 name.as_str(),
                 rustix::fs::RenameFlags::NOREPLACE,
             );
-            return if rollback.is_err() {
+            if result.is_err() {
+                // Startup recovery never removes delete-staged entries, so an
+                // operator can still restore the entry from private staging.
+                tracing::error!(
+                    operation = "delete",
+                    "delete rollback failed; the entry was left in private staging"
+                );
+            }
+            result
+        };
+        let staged = metadata_in_parent_raw(staging, &staged_name);
+        if staged.as_ref().is_err()
+            || staged
+                .as_ref()
+                .is_ok_and(|value| !value.matches_validator(&expected))
+        {
+            return if rollback().is_err() {
                 Err(FsError::new(FsErrorCode::Unavailable))
             } else {
                 Err(FsError::new(FsErrorCode::Conflict))
@@ -801,21 +901,15 @@ impl AuthorizedShare<'_> {
             EntryKind::Directory => staging.remove_dir(&staged_name),
         };
         if let Err(error) = removal {
-            let rollback = rustix::fs::renameat_with(
-                staging,
-                &staged_name,
-                &parent,
-                name.as_str(),
-                rustix::fs::RenameFlags::NOREPLACE,
-            );
-            return if rollback.is_err() {
+            return if rollback().is_err() {
                 Err(FsError::new(FsErrorCode::Unavailable))
             } else {
                 Err(map_io(error))
             };
         }
-        sync_directory(staging)?;
-        sync_directory(&parent)
+        sync_after_commit(staging);
+        sync_after_commit(&parent);
+        Ok(())
     }
 
     pub fn usage_bounded(&self, max_entries: usize, max_bytes: u64) -> FsResult<u64> {
@@ -936,6 +1030,7 @@ fn ensure_same_device(staging: &Dir, destination: &Dir) -> FsResult<()> {
 
 fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usize> {
     let mut visited = 0_usize;
+    let mut retained = 0_usize;
     let mut recoverable = Vec::with_capacity(max_entries.min(256));
     for entry in staging.entries().map_err(map_io)? {
         visited = visited
@@ -949,6 +1044,12 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
             // A non-UTF-8 name cannot match the reserved ASCII namespace.
             continue;
         };
+        if name.starts_with(INTERNAL_DELETE_PREFIX) {
+            // Never remove these: a failed delete rollback leaves user data
+            // here, and a crash mid-delete is harmless to keep.
+            retained += 1;
+            continue;
+        }
         let file_type = entry.file_type().map_err(map_io)?;
         if !is_internal_temp_name(&name) || !file_type.is_file() {
             // Never follow or remove malformed names, symlinks, directories,
@@ -962,6 +1063,12 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
     }
     if !recoverable.is_empty() {
         sync_directory(staging)?;
+    }
+    if retained > 0 {
+        tracing::error!(
+            retained,
+            "private staging holds entries from interrupted or failed deletes; they are kept for operator review"
+        );
     }
     Ok(recoverable.len())
 }
@@ -989,7 +1096,7 @@ fn measure_directory(
             .file_name()
             .into_string()
             .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
-        if is_internal_name(&name) {
+        if is_own_internal_name(&name) {
             continue;
         }
         let metadata = entry.metadata().map_err(map_io)?;
@@ -1014,10 +1121,14 @@ fn measure_directory(
 }
 
 fn random_temporary_name() -> FsResult<String> {
+    random_internal_name(INTERNAL_TEMP_PREFIX)
+}
+
+fn random_internal_name(prefix: &str) -> FsResult<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
-    let mut name = String::with_capacity(INTERNAL_TEMP_PREFIX.len() + bytes.len() * 2);
-    name.push_str(INTERNAL_TEMP_PREFIX);
+    let mut name = String::with_capacity(prefix.len() + bytes.len() * 2);
+    name.push_str(prefix);
     for byte in bytes {
         use std::fmt::Write as _;
         write!(&mut name, "{byte:02x}").expect("writing to String cannot fail");
@@ -1032,8 +1143,80 @@ fn is_internal_temp_name(name: &str) -> bool {
         })
 }
 
-fn is_internal_name(name: &str) -> bool {
+/// Names this process creates, compared exactly. Quota traversal uses this so
+/// out-of-band user content is still counted.
+fn is_own_internal_name(name: &str) -> bool {
     name == INTERNAL_STAGING_DIRECTORY || is_internal_temp_name(name)
+}
+
+/// Listing filter. Compared ASCII-case-insensitively because a
+/// case-insensitive filesystem resolves `.INDEX-STAGING` to staging.
+fn is_internal_name(name: &str) -> bool {
+    is_reserved_name(name)
+}
+
+fn is_reserved_name(value: &str) -> bool {
+    value.eq_ignore_ascii_case(INTERNAL_STAGING_DIRECTORY)
+        || starts_with_ignore_ascii_case(value, INTERNAL_TEMP_PREFIX)
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+/// Bidirectional controls, invisible zero-width characters, and line or
+/// paragraph separators, which can hide or reorder a displayed filename.
+/// Joiners (U+200C, U+200D) and emoji tag characters stay allowed because
+/// emoji sequences and several scripts need them.
+fn is_spoofing_character(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x00AD
+            | 0x061C
+            | 0x180E
+            | 0x200B
+            | 0x200E..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+    )
+}
+
+/// Syncs a directory after its change has already been committed. A failure
+/// here cannot undo the rename or unlink, so it is logged rather than turned
+/// into an error that would make a client retry an applied mutation.
+fn sync_after_commit(directory: &Dir) {
+    if sync_directory(directory).is_err() {
+        tracing::warn!("directory fsync failed after a committed filesystem change");
+    }
+}
+
+/// Test-only fault injection for rollback paths that cannot be raced
+/// deterministically. Production builds compile every check to `false`.
+#[derive(Clone, Copy)]
+enum Fault {
+    InvalidExchange = 1,
+    FailedRollback = 2,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_FAULTS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn fault_injected(fault: Fault) -> bool {
+    INJECTED_FAULTS.with(|faults| faults.get() & fault as u8 != 0)
+}
+
+#[cfg(not(test))]
+const fn fault_injected(_fault: Fault) -> bool {
+    false
 }
 
 fn sync_directory(directory: &Dir) -> FsResult<()> {
@@ -1149,8 +1332,12 @@ fn map_io(error: std::io::Error) -> FsError {
     // unauthorized paths. Linux is the explicitly supported v1 target.
     let code = if matches!(error.raw_os_error(), Some(6) | Some(19) | Some(40)) {
         FsErrorCode::UnsupportedEntry
+    } else if error.raw_os_error() == Some(18) {
+        // EXDEV: a rename crossed a nested mount inside the share.
+        FsErrorCode::CrossDevice
     } else {
         match error.kind() {
+            ErrorKind::CrossesDevices => FsErrorCode::CrossDevice,
             ErrorKind::NotFound | ErrorKind::NotADirectory => FsErrorCode::NotFound,
             ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty => FsErrorCode::Conflict,
             ErrorKind::InvalidInput | ErrorKind::InvalidFilename => FsErrorCode::InvalidPath,
@@ -1877,6 +2064,154 @@ mod tests {
             fs::read(temporary.path().join("winner.txt")).unwrap(),
             b"first"
         );
+    }
+
+    #[test]
+    fn reserved_internal_names_are_case_insensitive() {
+        for value in [
+            ".index-staging",
+            ".INDEX-STAGING",
+            ".Index-Staging",
+            ".index-tmp-anything",
+            ".INDEX-TMP-0123",
+        ] {
+            assert_eq!(
+                EntryName::new(value).expect_err(value).code(),
+                FsErrorCode::InvalidPath,
+                "accepted {value:?}"
+            );
+            assert!(is_internal_name(value), "listed {value:?}");
+        }
+        assert!(EntryName::new(".index").is_ok());
+    }
+
+    #[test]
+    fn new_names_reject_invisible_and_reordering_characters() {
+        for value in [
+            "invoice\u{202e}fdp.exe",
+            "zero\u{200b}width.txt",
+            "line\u{2028}separator",
+            "paragraph\u{2029}separator",
+            "bom\u{feff}.txt",
+            "isolate\u{2067}.txt",
+        ] {
+            let name = EntryName::new(value).expect("existing entries remain readable");
+            assert_eq!(
+                name.ensure_creatable().expect_err(value).code(),
+                FsErrorCode::InvalidPath
+            );
+        }
+        for value in [
+            "café.txt",
+            "日本語.md",
+            "report: 100%done.txt",
+            "family \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}.jpg",
+            "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}.txt",
+            "flag \u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}.png",
+        ] {
+            EntryName::new(value)
+                .expect("valid")
+                .ensure_creatable()
+                .expect("ordinary names are creatable");
+        }
+    }
+
+    #[test]
+    fn cross_device_errors_keep_their_stable_code() {
+        assert_eq!(
+            map_io(std::io::Error::from_raw_os_error(18)).code(),
+            FsErrorCode::CrossDevice
+        );
+        assert_eq!(
+            map_io(std::io::Error::from(std::io::ErrorKind::CrossesDevices)).code(),
+            FsErrorCode::CrossDevice
+        );
+    }
+
+    #[test]
+    fn failed_replacement_rollback_never_unlinks_the_original() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let path = VirtualPath::parse("hello.txt").expect("path");
+        let expected = authorized.metadata(&path).expect("metadata");
+        let pending = authorized.begin_write(&path).expect("temporary file");
+        pending
+            .writer()
+            .expect("writer")
+            .write_all(b"replacement")
+            .expect("write replacement");
+        let temporary_name = pending.temporary_name.clone();
+
+        INJECTED_FAULTS.with(|faults| {
+            faults.set(Fault::InvalidExchange as u8 | Fault::FailedRollback as u8);
+        });
+        let result = pending.publish_replacement(expected);
+        INJECTED_FAULTS.with(|faults| faults.set(0));
+
+        assert_eq!(
+            result.expect_err("rollback failure").code(),
+            FsErrorCode::Unavailable
+        );
+        // The exchange happened and the rollback "failed": the original
+        // content now lives under the staging name and must survive drop.
+        let staged = temporary
+            .path()
+            .join(INTERNAL_STAGING_DIRECTORY)
+            .join(temporary_name);
+        assert_eq!(fs::read(staged).unwrap(), b"hello");
+        assert_eq!(
+            fs::read(temporary.path().join("hello.txt")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_keeps_delete_staged_entries() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("open share");
+        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let deleted = format!("{INTERNAL_DELETE_PREFIX}{}", "d".repeat(32));
+        fs::write(staging.join(&deleted), b"user data").expect("delete-staged file");
+
+        assert_eq!(share.recover_staging_files(10).expect("recover"), 0);
+        assert_eq!(fs::read(staging.join(deleted)).unwrap(), b"user data");
+    }
+
+    #[test]
+    fn owned_authorization_matches_borrowed_authorization() {
+        let (_temporary, share, read, write) = fixture();
+        let share = Arc::new(share);
+        let wrong = ShareGrant {
+            share_id: ShareId::new("other").expect("id"),
+            access: AccessLevel::ReadWrite,
+        };
+        assert_eq!(
+            share
+                .authorize_owned(Some(&wrong), GlobalPolicy::default())
+                .err()
+                .expect("wrong share denied")
+                .code(),
+            FsErrorCode::AccessDenied
+        );
+        let owned = share
+            .authorize_owned(Some(&write), GlobalPolicy { read_only: true })
+            .expect("authorized");
+        assert_eq!(owned.access(), AccessLevel::ReadOnly);
+        let owned = share
+            .authorize_owned(Some(&read), GlobalPolicy::default())
+            .expect("authorized");
+        let bytes = thread::spawn(move || {
+            owned
+                .view()
+                .read_file(&VirtualPath::parse("hello.txt").expect("path"), 32)
+        })
+        .join()
+        .expect("blocking thread")
+        .expect("read");
+        assert_eq!(bytes, b"hello");
     }
 
     proptest! {

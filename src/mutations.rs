@@ -4,8 +4,16 @@
 //! [`CsrfVerified`] request extensions. The latter is deliberately not inferred
 //! from a header here: only the session layer has enough context to validate a
 //! token. All endpoints therefore fail closed when that layer is absent.
+//!
+//! Filesystem work runs on Tokio's blocking pool. Each capability-scoped
+//! operation receives an owned, freshly authorized share handle, and commits
+//! are serialized per share rather than process-wide.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -16,18 +24,15 @@ use axum::{
     routing::{delete, post, put},
 };
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::AsyncWriteExt,
-    sync::{Mutex, Semaphore},
-};
+use tokio::{io::AsyncWriteExt, sync::OwnedMutexGuard, time::timeout};
 
 use crate::{
     app::AppState,
-    browse::AuthenticatedIdentity,
+    browse::{AuthenticatedIdentity, SubjectGate, run_blocking},
     error::AppError,
     filesystem::{
-        AccessLevel, AuthorizedShare, EntryMetadata, EntryName, FsError, FsErrorCode, PendingWrite,
-        ShareId, VirtualPath,
+        AccessLevel, AuthorizedShare, EntryMetadata, EntryName, FsError, FsErrorCode,
+        OwnedAuthorizedShare, PendingWrite, ShareId, VirtualPath,
     },
 };
 
@@ -37,6 +42,9 @@ const MULTIPART_OVERHEAD_PER_FILE: usize = 8_192;
 const MULTIPART_FIXED_OVERHEAD: usize = 4_096;
 const MAX_METADATA_BODY_BYTES: usize = 16_384;
 const QUOTA_SCAN_ENTRY_LIMIT: usize = 1_000_000;
+/// A multipart upload that delivers no new part or chunk for this long is
+/// aborted, releasing its upload slot and unpublished staging files.
+const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug)]
 pub struct MutationLimits {
@@ -69,8 +77,15 @@ pub enum MutationStateError {
 
 pub struct MutationState {
     limits: MutationLimits,
-    upload_gate: Arc<Semaphore>,
-    commit_lock: Arc<Mutex<()>>,
+    /// Process-wide upload cap plus a per-subject cap of half of it (at least
+    /// one), so a single user cannot hold every upload slot.
+    upload_gate: SubjectGate,
+    /// One commit lock per share. Quota checks and publication are atomic
+    /// within a share; unrelated shares never wait on each other's fsyncs.
+    /// Entries are created only for shares that passed authorization, so the
+    /// map is bounded by the configured share count.
+    commit_locks: Mutex<HashMap<ShareId, Arc<tokio::sync::Mutex<()>>>>,
+    upload_idle_timeout: Duration,
 }
 
 impl MutationState {
@@ -88,8 +103,12 @@ impl MutationState {
         }
         Ok(Self {
             limits,
-            upload_gate: Arc::new(Semaphore::new(limits.max_concurrent_uploads)),
-            commit_lock: Arc::new(Mutex::new(())),
+            upload_gate: SubjectGate::new(
+                limits.max_concurrent_uploads,
+                (limits.max_concurrent_uploads / 2).max(1),
+            ),
+            commit_locks: Mutex::new(HashMap::new()),
+            upload_idle_timeout: UPLOAD_IDLE_TIMEOUT,
         })
     }
 
@@ -119,6 +138,23 @@ impl MutationState {
             .saturating_add(MULTIPART_FIXED_OVERHEAD)
             .min(MAX_MULTIPART_OVERHEAD);
         payload_limit.saturating_add(overhead)
+    }
+
+    #[cfg(test)]
+    fn with_upload_idle_timeout(mut self, idle: Duration) -> Self {
+        self.upload_idle_timeout = idle;
+        self
+    }
+
+    async fn commit_lock(&self, share_id: &ShareId) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .commit_locks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(locks.entry(share_id.clone()).or_default())
+        };
+        lock.lock_owned().await
     }
 }
 
@@ -211,6 +247,38 @@ struct StagedUpload {
     size: u64,
 }
 
+/// A rejected mutation and its stable audit reason. Every handler returns
+/// its failures through [`audited`], so no rejection path skips the audit
+/// event that `docs/mutations.md` promises.
+struct Rejection {
+    error: AppError,
+    reason: &'static str,
+}
+
+impl Rejection {
+    const fn new(error: AppError, reason: &'static str) -> Self {
+        Self { error, reason }
+    }
+}
+
+impl From<AppError> for Rejection {
+    fn from(error: AppError) -> Self {
+        let reason = app_reason(&error);
+        Self { error, reason }
+    }
+}
+
+impl From<FsError> for Rejection {
+    fn from(error: FsError) -> Self {
+        Self {
+            reason: fs_reason(error.code()),
+            error: map_mutation_fs_error(error),
+        }
+    }
+}
+
+type MutationResult<T> = Result<T, Rejection>;
+
 async fn create_directory(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
@@ -218,15 +286,31 @@ async fn create_directory(
     Path(raw_share_id): Path<String>,
     Json(body): Json<PathBody>,
 ) -> Result<Response, AppError> {
+    let result = create_directory_inner(&state, &identity, &raw_share_id, body).await;
+    audited(&identity, &raw_share_id, "create_directory", result)
+}
+
+async fn create_directory_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    body: PathBody,
+) -> MutationResult<Response> {
     reject_oversized_metadata(&body.path)?;
-    let (share_id, path, authorized) =
-        authorize_write(&state, &identity, &raw_share_id, &body.path)?;
-    let result = {
-        let _commit = state.mutations().commit_lock.lock().await;
-        authorized.create_directory(&path)
-    };
+    let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, &body.path)?;
+    ensure_creatable(&path)?;
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let target = path.clone();
+    let result = run_blocking(move || {
+        let _commit = commit;
+        authorized
+            .view()
+            .create_directory(&target)
+            .map_err(Rejection::from)
+    })
+    .await?;
     finish_mutation(
-        &identity,
+        identity,
         &share_id,
         &path,
         "create_directory",
@@ -242,19 +326,32 @@ async fn create_file(
     Path(raw_share_id): Path<String>,
     Json(body): Json<PathBody>,
 ) -> Result<Response, AppError> {
+    let result = create_file_inner(&state, &identity, &raw_share_id, body).await;
+    audited(&identity, &raw_share_id, "create_file", result)
+}
+
+async fn create_file_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    body: PathBody,
+) -> MutationResult<Response> {
     reject_oversized_metadata(&body.path)?;
-    let (share_id, path, authorized) =
-        authorize_write(&state, &identity, &raw_share_id, &body.path)?;
-    let result = {
-        let _commit = state.mutations().commit_lock.lock().await;
-        ensure_quota(&authorized, state.mutations().limits, 0, 0)?;
-        let pending = authorized
-            .begin_write(&path)
-            .map_err(map_mutation_fs_error)?;
-        pending.publish_new()
-    };
+    let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, &body.path)?;
+    ensure_creatable(&path)?;
+    let limits = state.mutations().limits;
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let target = path.clone();
+    let result = run_blocking(move || {
+        let _commit = commit;
+        let share = authorized.view();
+        ensure_quota(&share, limits, 0, 0)?;
+        let pending = share.begin_write(&target)?;
+        pending.publish_new().map_err(Rejection::from)
+    })
+    .await?;
     finish_mutation(
-        &identity,
+        identity,
         &share_id,
         &path,
         "create_file",
@@ -272,25 +369,33 @@ async fn save_text(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, AppError> {
+    let result = save_text_inner(&state, &identity, &raw_share_id, query, &headers, body).await;
+    audited(&identity, &raw_share_id, "save_text", result)
+}
+
+async fn save_text_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    query: PathQuery,
+    headers: &HeaderMap,
+    body: Body,
+) -> MutationResult<Response> {
     let raw_path = query.path.as_deref().ok_or(AppError::InvalidRequest)?;
-    let (share_id, path, authorized) = authorize_write(&state, &identity, &raw_share_id, raw_path)?;
-    let bytes = to_bytes(
-        body,
-        state.mutations().limits.max_text_bytes.saturating_add(1),
-    )
-    .await
-    .map_err(|_| AppError::TooLarge)?;
-    if bytes.len() > state.mutations().limits.max_text_bytes {
-        return Err(AppError::TooLarge);
+    let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, raw_path)?;
+    let limits = state.mutations().limits;
+    let bytes = to_bytes(body, limits.max_text_bytes.saturating_add(1))
+        .await
+        .map_err(|_| AppError::TooLarge)?;
+    if bytes.len() > limits.max_text_bytes {
+        return Err(AppError::TooLarge.into());
     }
     std::str::from_utf8(&bytes).map_err(|_| AppError::UnsupportedMedia)?;
 
-    let current = authorized.metadata(&path).map_err(map_mutation_fs_error)?;
-    require_if_match(&state, &share_id, &path, current, &headers)?;
-    let pending = authorized
-        .begin_write(&path)
-        .map_err(map_mutation_fs_error)?;
-    let mut writer = tokio::fs::File::from_std(pending.writer().map_err(map_mutation_fs_error)?);
+    let current = current_metadata(&authorized, &path).await?;
+    require_if_match(state, &share_id, &path, current, headers)?;
+    let pending = stage_write(&authorized, &path).await?;
+    let mut writer = tokio::fs::File::from_std(pending.writer()?);
     writer
         .write_all(&bytes)
         .await
@@ -298,18 +403,18 @@ async fn save_text(
     writer.flush().await.map_err(|_| AppError::Internal)?;
     writer.sync_all().await.map_err(|_| AppError::Internal)?;
     drop(writer);
-    let result = {
-        let _commit = state.mutations().commit_lock.lock().await;
-        ensure_quota(
-            &authorized,
-            state.mutations().limits,
-            bytes.len() as u64,
-            current.size,
-        )?;
-        pending.publish_replacement(current)
-    };
+    let size = bytes.len() as u64;
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let result = run_blocking(move || {
+        let _commit = commit;
+        ensure_quota(&authorized.view(), limits, size, current.size)?;
+        pending
+            .publish_replacement(current)
+            .map_err(Rejection::from)
+    })
+    .await?;
     finish_mutation(
-        &identity,
+        identity,
         &share_id,
         &path,
         "save_text",
@@ -326,23 +431,43 @@ async fn move_entry(
     headers: HeaderMap,
     Json(body): Json<MoveBody>,
 ) -> Result<Response, AppError> {
+    let result = move_entry_inner(&state, &identity, &raw_share_id, &headers, body).await;
+    audited(&identity, &raw_share_id, "move", result)
+}
+
+async fn move_entry_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    headers: &HeaderMap,
+    body: MoveBody,
+) -> MutationResult<Response> {
     reject_oversized_metadata(&body.source)?;
     reject_oversized_metadata(&body.destination)?;
-    let share_id = parse_share_id(&raw_share_id)?;
-    let source = VirtualPath::parse(&body.source).map_err(map_mutation_fs_error)?;
-    let destination = VirtualPath::parse(&body.destination).map_err(map_mutation_fs_error)?;
-    let authorized = state.browse().authorize(&identity, &share_id)?;
-    require_write_access(&authorized)?;
-    let current = authorized
-        .metadata(&source)
-        .map_err(map_mutation_fs_error)?;
-    require_if_match(&state, &share_id, &source, current, &headers)?;
-    let result = {
-        let _commit = state.mutations().commit_lock.lock().await;
-        authorized.move_entry(&source, &destination, current)
-    };
+    let share_id = parse_share_id(raw_share_id)?;
+    let source = VirtualPath::parse(&body.source)?;
+    let destination = VirtualPath::parse(&body.destination)?;
+    let authorized = state.browse().authorize_owned(identity, &share_id)?;
+    require_write_access(authorized.access())?;
+    // Moving an existing entry to another directory under its current name
+    // is allowed; choosing a new name must satisfy the creation policy.
+    if destination.file_name() != source.file_name() {
+        ensure_creatable(&destination)?;
+    }
+    let current = current_metadata(&authorized, &source).await?;
+    require_if_match(state, &share_id, &source, current, headers)?;
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let (from, to) = (source, destination.clone());
+    let result = run_blocking(move || {
+        let _commit = commit;
+        authorized
+            .view()
+            .move_entry(&from, &to, current)
+            .map_err(Rejection::from)
+    })
+    .await?;
     finish_mutation(
-        &identity,
+        identity,
         &share_id,
         &destination,
         "move",
@@ -359,22 +484,32 @@ async fn delete_entry(
     Query(query): Query<PathQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    let result = delete_entry_inner(&state, &identity, &raw_share_id, query, &headers).await;
+    audited(&identity, &raw_share_id, "delete", result)
+}
+
+async fn delete_entry_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    query: PathQuery,
+    headers: &HeaderMap,
+) -> MutationResult<Response> {
     let raw_path = query.path.as_deref().ok_or(AppError::InvalidRequest)?;
-    let (share_id, path, authorized) = authorize_write(&state, &identity, &raw_share_id, raw_path)?;
-    let current = authorized.metadata(&path).map_err(map_mutation_fs_error)?;
-    require_if_match(&state, &share_id, &path, current, &headers)?;
-    let result = {
-        let _commit = state.mutations().commit_lock.lock().await;
-        authorized.delete_entry(&path, current)
-    };
-    finish_mutation(
-        &identity,
-        &share_id,
-        &path,
-        "delete",
-        result,
-        StatusCode::OK,
-    )
+    let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, raw_path)?;
+    let current = current_metadata(&authorized, &path).await?;
+    require_if_match(state, &share_id, &path, current, headers)?;
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let target = path.clone();
+    let result = run_blocking(move || {
+        let _commit = commit;
+        authorized
+            .view()
+            .delete_entry(&target, current)
+            .map_err(Rejection::from)
+    })
+    .await?;
+    finish_mutation(identity, &share_id, &path, "delete", result, StatusCode::OK)
 }
 
 async fn upload_files(
@@ -384,56 +519,75 @@ async fn upload_files(
     Path(raw_share_id): Path<String>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Response, AppError> {
-    let share_id = parse_share_id(&raw_share_id)?;
-    let authorized = state.browse().authorize(&identity, &share_id)?;
-    require_write_access(&authorized)?;
+    let result =
+        upload_files_inner(&state, &identity, &raw_share_id, query, &headers, multipart).await;
+    audited(&identity, &raw_share_id, "upload", result)
+}
+
+async fn upload_files_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    query: UploadQuery,
+    headers: &HeaderMap,
+    mut multipart: Multipart,
+) -> MutationResult<Response> {
+    let share_id = parse_share_id(raw_share_id)?;
+    let authorized = state.browse().authorize_owned(identity, &share_id)?;
+    require_write_access(authorized.access())?;
     let directory = parse_optional_path(query.path.as_deref())?;
     let _permit = state
         .mutations()
         .upload_gate
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| AppError::Busy)?;
+        .try_acquire(identity.subject())
+        .ok_or(AppError::Busy)?;
+    let limits = state.mutations().limits;
+    let idle = state.mutations().upload_idle_timeout;
     let mut total_bytes = 0_u64;
     let mut file_count = 0_usize;
     let mut staged = Vec::new();
 
-    while let Some(mut field) = multipart
-        .next_field()
+    while let Some(mut field) = timeout(idle, multipart.next_field())
         .await
+        .map_err(|_| idle_timeout())?
         .map_err(|_| AppError::InvalidRequest)?
     {
         file_count += 1;
-        if file_count > state.mutations().limits.max_files {
-            audit_rejected(&identity, &share_id, "upload", "file_count_limit");
-            return Err(AppError::TooLarge);
+        if file_count > limits.max_files {
+            return Err(Rejection::new(AppError::TooLarge, "file_count_limit"));
         }
         let filename = field
             .file_name()
             .ok_or(AppError::InvalidRequest)?
             .to_owned();
-        let name = EntryName::new(filename).map_err(map_mutation_fs_error)?;
+        let name = EntryName::new(filename)?;
+        if !query.replace {
+            name.ensure_creatable()?;
+        }
         let path = directory.join(name);
         let expected = if query.replace {
-            let current = authorized.metadata(&path).map_err(map_mutation_fs_error)?;
+            let current = current_metadata(&authorized, &path).await?;
             let part_match = field
                 .headers()
                 .get(header::IF_MATCH)
                 .or_else(|| headers.get(header::IF_MATCH));
-            require_if_match_value(&state, &share_id, &path, current, part_match)?;
+            require_if_match_value(state, &share_id, &path, current, part_match)?;
             Some(current)
         } else {
             None
         };
-        let pending = authorized
-            .begin_write(&path)
-            .map_err(map_mutation_fs_error)?;
-        let mut writer =
-            tokio::fs::File::from_std(pending.writer().map_err(map_mutation_fs_error)?);
+        let pending = stage_write(&authorized, &path).await?;
+        // `tokio::fs::File` performs each write and the final sync on the
+        // blocking pool, so a slow disk never stalls the runtime.
+        let mut writer = tokio::fs::File::from_std(pending.writer()?);
         let mut file_bytes = 0_u64;
-        while let Some(chunk) = field.chunk().await.map_err(|_| AppError::InvalidRequest)? {
+        while let Some(chunk) = timeout(idle, field.chunk())
+            .await
+            .map_err(|_| idle_timeout())?
+            .map_err(|_| AppError::InvalidRequest)?
+        {
             let chunk_len = u64::try_from(chunk.len()).map_err(|_| AppError::TooLarge)?;
             file_bytes = file_bytes
                 .checked_add(chunk_len)
@@ -441,11 +595,8 @@ async fn upload_files(
             total_bytes = total_bytes
                 .checked_add(chunk_len)
                 .ok_or(AppError::TooLarge)?;
-            if file_bytes > state.mutations().limits.max_file_bytes
-                || total_bytes > state.mutations().limits.max_request_bytes
-            {
-                audit_rejected(&identity, &share_id, "upload", "byte_limit");
-                return Err(AppError::TooLarge);
+            if file_bytes > limits.max_file_bytes || total_bytes > limits.max_request_bytes {
+                return Err(Rejection::new(AppError::TooLarge, "byte_limit"));
             }
             writer
                 .write_all(&chunk)
@@ -463,31 +614,31 @@ async fn upload_files(
         });
     }
     if staged.is_empty() {
-        return Err(AppError::InvalidRequest);
+        return Err(Rejection::new(AppError::InvalidRequest, "no_files"));
     }
 
     let mut outcomes = Vec::with_capacity(staged.len());
     for upload in staged {
         let path = upload.path;
         let is_replacement = upload.expected.is_some();
-        let publish = {
-            let _commit = state.mutations().commit_lock.lock().await;
-            match ensure_quota(
-                &authorized,
-                state.mutations().limits,
+        let commit = state.mutations().commit_lock(&share_id).await;
+        let share = authorized.clone();
+        let publish = run_blocking(move || {
+            let _commit = commit;
+            ensure_quota(
+                &share.view(),
+                limits,
                 upload.size,
                 upload.expected.map_or(0, |metadata| metadata.size),
-            ) {
-                Ok(()) => match upload.expected {
-                    Some(expected) => upload
-                        .pending
-                        .publish_replacement(expected)
-                        .map_err(map_mutation_fs_error),
-                    None => upload.pending.publish_new().map_err(map_mutation_fs_error),
-                },
-                Err(error) => Err(error),
+            )?;
+            match upload.expected {
+                Some(expected) => upload.pending.publish_replacement(expected),
+                None => upload.pending.publish_new(),
             }
-        };
+            .map_err(Rejection::from)
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.into()));
         match publish {
             Ok(()) => {
                 tracing::info!(
@@ -507,25 +658,16 @@ async fn upload_files(
                     },
                 });
             }
-            Err(AppError::Conflict) => {
-                audit_rejected(&identity, &share_id, "upload", "conflict");
+            Err(rejection) => {
+                let outcome = match rejection.error {
+                    AppError::Conflict => "conflict",
+                    AppError::TooLarge => "quota_exceeded",
+                    _ => "error",
+                };
+                audit_rejected(identity, share_id.as_str(), "upload", rejection.reason);
                 outcomes.push(UploadOutcome {
                     path: path.to_string(),
-                    outcome: "conflict",
-                });
-            }
-            Err(AppError::TooLarge) => {
-                audit_rejected(&identity, &share_id, "upload", "quota");
-                outcomes.push(UploadOutcome {
-                    path: path.to_string(),
-                    outcome: "quota_exceeded",
-                });
-            }
-            Err(_) => {
-                audit_rejected(&identity, &share_id, "upload", "internal_error");
-                outcomes.push(UploadOutcome {
-                    path: path.to_string(),
-                    outcome: "error",
+                    outcome,
                 });
             }
         }
@@ -539,33 +681,63 @@ async fn upload_files(
     ))
 }
 
-fn authorize_write<'state>(
-    state: &'state AppState,
+fn idle_timeout() -> Rejection {
+    Rejection::new(AppError::InvalidRequest, "idle_timeout")
+}
+
+fn authorize_write(
+    state: &AppState,
     identity: &AuthenticatedIdentity,
     raw_share_id: &str,
     raw_path: &str,
-) -> Result<(ShareId, VirtualPath, AuthorizedShare<'state>), AppError> {
+) -> MutationResult<(ShareId, VirtualPath, OwnedAuthorizedShare)> {
     let share_id = parse_share_id(raw_share_id)?;
-    let path = VirtualPath::parse(raw_path).map_err(map_mutation_fs_error)?;
-    let authorized = state.browse().authorize(identity, &share_id)?;
-    require_write_access(&authorized)?;
+    let path = VirtualPath::parse(raw_path)?;
+    let authorized = state.browse().authorize_owned(identity, &share_id)?;
+    require_write_access(authorized.access())?;
     Ok((share_id, path, authorized))
 }
 
-fn require_write_access(authorized: &AuthorizedShare<'_>) -> Result<(), AppError> {
-    (authorized.access() == AccessLevel::ReadWrite)
+fn require_write_access(access: AccessLevel) -> Result<(), AppError> {
+    (access == AccessLevel::ReadWrite)
         .then_some(())
         .ok_or(AppError::Forbidden)
+}
+
+/// Applies the new-name policy to the final component a mutation creates.
+fn ensure_creatable(path: &VirtualPath) -> MutationResult<()> {
+    match path.file_name() {
+        Some(name) => name.ensure_creatable().map_err(Rejection::from),
+        None => Err(AppError::InvalidRequest.into()),
+    }
+}
+
+async fn current_metadata(
+    authorized: &OwnedAuthorizedShare,
+    path: &VirtualPath,
+) -> MutationResult<EntryMetadata> {
+    let (share, path) = (authorized.clone(), path.clone());
+    Ok(run_blocking(move || share.view().metadata(&path)).await??)
+}
+
+/// Creates a private staging file on the blocking pool. If the request is
+/// cancelled meanwhile, the returned guard is dropped and removes the file.
+async fn stage_write(
+    authorized: &OwnedAuthorizedShare,
+    path: &VirtualPath,
+) -> MutationResult<PendingWrite> {
+    let (share, path) = (authorized.clone(), path.clone());
+    Ok(run_blocking(move || share.view().begin_write(&path)).await??)
 }
 
 fn parse_share_id(raw: &str) -> Result<ShareId, AppError> {
     ShareId::new(raw.to_owned()).map_err(|_| AppError::NotFound)
 }
 
-fn parse_optional_path(raw: Option<&str>) -> Result<VirtualPath, AppError> {
+fn parse_optional_path(raw: Option<&str>) -> MutationResult<VirtualPath> {
     match raw {
         None | Some("") => Ok(VirtualPath::root()),
-        Some(path) => VirtualPath::parse(path).map_err(map_mutation_fs_error),
+        Some(path) => Ok(VirtualPath::parse(path)?),
     }
 }
 
@@ -581,7 +753,7 @@ fn require_if_match(
     path: &VirtualPath,
     metadata: EntryMetadata,
     headers: &HeaderMap,
-) -> Result<(), AppError> {
+) -> MutationResult<()> {
     require_if_match_value(
         state,
         share_id,
@@ -597,35 +769,41 @@ fn require_if_match_value(
     path: &VirtualPath,
     metadata: EntryMetadata,
     supplied: Option<&axum::http::HeaderValue>,
-) -> Result<(), AppError> {
+) -> MutationResult<()> {
+    let stale = || Rejection::new(AppError::Conflict, "stale_validator");
     let supplied = supplied
         .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::Conflict)?;
+        .ok_or_else(stale)?;
     let expected = state.browse().version_tag(share_id, path, metadata);
     if supplied == expected {
         Ok(())
     } else {
-        Err(AppError::Conflict)
+        Err(stale())
     }
 }
 
+/// Runs on the blocking pool with the share's commit lock held.
 fn ensure_quota(
     authorized: &AuthorizedShare<'_>,
     limits: MutationLimits,
     incoming: u64,
     replacing: u64,
-) -> Result<(), AppError> {
+) -> MutationResult<()> {
     let Some(limit) = limits.max_share_bytes else {
         return Ok(());
     };
-    let usage = authorized
-        .usage_bounded(QUOTA_SCAN_ENTRY_LIMIT, limit.saturating_add(replacing))
-        .map_err(map_mutation_fs_error)?;
+    let exceeded = || Rejection::new(AppError::TooLarge, "quota");
+    let usage =
+        match authorized.usage_bounded(QUOTA_SCAN_ENTRY_LIMIT, limit.saturating_add(replacing)) {
+            Ok(usage) => usage,
+            Err(error) if error.code() == FsErrorCode::TooLarge => return Err(exceeded()),
+            Err(error) => return Err(error.into()),
+        };
     let projected = usage
         .saturating_sub(replacing)
         .checked_add(incoming)
-        .ok_or(AppError::TooLarge)?;
-    (projected <= limit).then_some(()).ok_or(AppError::TooLarge)
+        .ok_or_else(exceeded)?;
+    (projected <= limit).then_some(()).ok_or_else(exceeded)
 }
 
 fn finish_mutation(
@@ -633,49 +811,78 @@ fn finish_mutation(
     share_id: &ShareId,
     path: &VirtualPath,
     operation: &'static str,
-    result: Result<(), FsError>,
+    result: MutationResult<()>,
     status: StatusCode,
+) -> MutationResult<Response> {
+    result?;
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation,
+        path = %path,
+        outcome = "success"
+    );
+    Ok(inert_json(
+        status,
+        MutationResponse {
+            share_id: share_id.to_string(),
+            path: path.to_string(),
+            outcome: "success",
+        },
+    ))
+}
+
+/// Emits the rejection audit event for any failed mutation, then returns
+/// the public error.
+fn audited(
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    operation: &'static str,
+    result: MutationResult<Response>,
 ) -> Result<Response, AppError> {
-    match result {
-        Ok(()) => {
-            tracing::info!(
-                audit = true,
-                subject = identity.subject(),
-                share_id = share_id.as_str(),
-                operation,
-                path = %path,
-                outcome = "success"
-            );
-            Ok(inert_json(
-                status,
-                MutationResponse {
-                    share_id: share_id.to_string(),
-                    path: path.to_string(),
-                    outcome: "success",
-                },
-            ))
-        }
-        Err(error) => {
-            audit_rejected(identity, share_id, operation, fs_reason(error.code()));
-            Err(map_mutation_fs_error(error))
-        }
-    }
+    result.map_err(|rejection| {
+        // Only a syntactically valid share ID is logged verbatim.
+        let share_id = if ShareId::new(raw_share_id.to_owned()).is_ok() {
+            raw_share_id
+        } else {
+            "invalid"
+        };
+        audit_rejected(identity, share_id, operation, rejection.reason);
+        rejection.error
+    })
 }
 
 fn audit_rejected(
     identity: &AuthenticatedIdentity,
-    share_id: &ShareId,
+    share_id: &str,
     operation: &'static str,
     reason: &'static str,
 ) {
     tracing::warn!(
         audit = true,
         subject = identity.subject(),
-        share_id = share_id.as_str(),
+        share_id,
         operation,
         outcome = "rejected",
         reason
     );
+}
+
+fn app_reason(error: &AppError) -> &'static str {
+    match error {
+        AppError::Forbidden => "access_denied",
+        AppError::NotFound => "not_found",
+        AppError::InvalidRequest => "invalid_request",
+        AppError::Conflict => "conflict",
+        AppError::TooLarge => "too_large",
+        AppError::Busy | AppError::TooManyRequests => "busy",
+        AppError::UnsupportedMedia => "unsupported_media",
+        AppError::Unauthorized
+        | AppError::AuthenticationFailed
+        | AppError::ReauthenticationRequired => "unauthenticated",
+        AppError::NotReady | AppError::Internal => "internal_error",
+    }
 }
 
 fn fs_reason(code: FsErrorCode) -> &'static str {
@@ -725,9 +932,10 @@ mod tests {
         body::{Body, Bytes},
         http::{Request, StatusCode, header},
     };
-    use futures_util::stream;
+    use futures_util::{StreamExt as _, stream};
     use serde_json::json;
     use tempfile::TempDir;
+    use tokio::sync::Semaphore;
     use tower::ServiceExt;
 
     use super::*;
@@ -745,6 +953,18 @@ mod tests {
     }
 
     fn fixture(access: AccessLevel, global_read_only: bool, limits: MutationLimits) -> Fixture {
+        fixture_with_state(
+            access,
+            global_read_only,
+            MutationState::new(limits).expect("mutation state"),
+        )
+    }
+
+    fn fixture_with_state(
+        access: AccessLevel,
+        global_read_only: bool,
+        mutations: MutationState,
+    ) -> Fixture {
         let root = TempDir::new().expect("temporary share");
         fs::write(root.path().join("existing.txt"), b"original").expect("fixture file");
         fs::create_dir(root.path().join("nonempty")).expect("fixture directory");
@@ -765,8 +985,7 @@ mod tests {
             [0x5a; 32],
         )
         .expect("browse state");
-        let mutations = MutationState::new(limits).expect("mutation state");
-        let upload_gate = Arc::clone(&mutations.upload_gate);
+        let upload_gate = Arc::clone(mutations.upload_gate.process_semaphore());
         let app = app::router(
             AppState::new(true)
                 .with_browse(browse)
@@ -1377,5 +1596,266 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
         assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CapturedLogs {
+        fn take(&self) -> String {
+            let bytes = std::mem::take(&mut *self.0.lock().expect("log buffer"));
+            String::from_utf8(bytes).expect("UTF-8 logs")
+        }
+    }
+
+    #[tokio::test]
+    async fn every_rejected_mutation_emits_an_audit_event() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let cases = [
+            (
+                Request::delete("/api/v1/shares/documents/entry?path=existing.txt")
+                    .header(header::IF_MATCH, "W/\"stale\"")
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::CONFLICT,
+                "stale_validator",
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/v1/shares/documents/files",
+                    json!({"path":"../escape"}),
+                ),
+                StatusCode::BAD_REQUEST,
+                "invalid_path",
+            ),
+            (
+                Request::post("/api/v1/shares/documents/move")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::IF_MATCH, "W/\"stale\"")
+                    .body(Body::from(
+                        json!({"source":"missing.txt","destination":"moved.txt"}).to_string(),
+                    ))
+                    .unwrap(),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/v1/shares/documents/files",
+                    json!({"path":"existing.txt"}),
+                ),
+                StatusCode::CONFLICT,
+                "conflict",
+            ),
+            (
+                json_request(
+                    "POST",
+                    "/api/v1/shares/unknown/directories",
+                    json!({"path":"folder"}),
+                ),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+        ];
+        for (request, status, reason) in cases {
+            let response = send(&fixture.app, Some(&fixture.identity), true, request).await;
+            assert_eq!(response.status(), status, "{reason}");
+            let emitted = logs.take();
+            assert!(emitted.contains("rejected"), "no audit event: {emitted}");
+            assert!(emitted.contains(reason), "missing {reason}: {emitted}");
+        }
+    }
+
+    #[tokio::test]
+    async fn new_names_reject_spoofing_characters_but_existing_names_stay_usable() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let spoofed = "invoice\u{202e}fdp.exe";
+        fs::write(fixture.root.path().join("zero\u{200b}width.txt"), b"legacy")
+            .expect("existing spoofing name");
+        for (route, path) in [("files", spoofed), ("directories", "line\u{2028}break")] {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                json_request(
+                    "POST",
+                    &format!("/api/v1/shares/documents/{route}"),
+                    json!({ "path": path }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");
+        }
+
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+        let rename = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/move")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, &etag)
+                .body(Body::from(
+                    json!({"source":"existing.txt","destination": spoofed}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rename.status(), StatusCode::BAD_REQUEST);
+        assert!(fixture.root.path().join("existing.txt").exists());
+
+        // An existing entry keeps its name when moved to another directory.
+        let legacy_etag = metadata_etag(&fixture, "zero%E2%80%8Bwidth.txt").await;
+        let moved = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/move")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, legacy_etag)
+                .body(Body::from(
+                    json!({
+                        "source": "zero\u{200b}width.txt",
+                        "destination": "nonempty/zero\u{200b}width.txt"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(moved.status(), StatusCode::OK);
+        assert!(
+            fixture
+                .root
+                .path()
+                .join("nonempty/zero\u{200b}width.txt")
+                .exists()
+        );
+
+        let boundary = "spoof-boundary";
+        let upload = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(
+                    boundary,
+                    &[(spoofed, b"payload")],
+                )))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::BAD_REQUEST);
+        assert!(!fixture.root.path().join(spoofed).exists());
+    }
+
+    #[tokio::test]
+    async fn stalled_uploads_time_out_and_release_their_slot() {
+        let limits = MutationLimits {
+            max_concurrent_uploads: 1,
+            ..MutationLimits::default()
+        };
+        let mutations = MutationState::new(limits)
+            .expect("mutation state")
+            .with_upload_idle_timeout(Duration::from_millis(100));
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        let boundary = "stalled-boundary";
+        let prefix = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"stalled.txt\"\r\nContent-Type: application/octet-stream\r\n\r\npartial"
+        );
+        let stalled = stream::iter([Ok::<_, std::io::Error>(Bytes::from(prefix))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from_stream(stalled))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(fixture.upload_gate.available_permits(), 1);
+        assert!(!fixture.root.path().join("stalled.txt").exists());
+        let staging = fixture.root.path().join(".index-staging");
+        assert!(fs::read_dir(staging).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".index-tmp-")
+        }));
+    }
+
+    #[test]
+    fn one_subject_cannot_take_every_upload_slot() {
+        let state = MutationState::new(MutationLimits::default()).expect("mutation state");
+        let first = state.upload_gate.try_acquire("alice").expect("first slot");
+        let second = state.upload_gate.try_acquire("alice").expect("second slot");
+        assert!(state.upload_gate.try_acquire("alice").is_none());
+        let other = state.upload_gate.try_acquire("bob").expect("other user");
+        drop((first, second, other));
+
+        let single = MutationState::new(MutationLimits {
+            max_concurrent_uploads: 1,
+            ..MutationLimits::default()
+        })
+        .expect("mutation state");
+        assert!(single.upload_gate.try_acquire("alice").is_some());
+    }
+
+    #[tokio::test]
+    async fn commit_locks_are_per_share() {
+        let state = MutationState::default();
+        let documents = ShareId::new("documents").expect("id");
+        let photos = ShareId::new("photos").expect("id");
+        let held = state.commit_lock(&documents).await;
+        tokio::time::timeout(Duration::from_secs(1), state.commit_lock(&photos))
+            .await
+            .expect("another share is not blocked");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), state.commit_lock(&documents))
+                .await
+                .is_err()
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(1), state.commit_lock(&documents))
+            .await
+            .expect("released lock is available");
     }
 }
