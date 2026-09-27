@@ -23,6 +23,9 @@ use cap_std::{
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+mod trash;
+pub use trash::TrashEntry;
+
 const MAX_COMPONENT_BYTES: usize = 255;
 const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
 const MAX_SHARE_ID_BYTES: usize = 64;
@@ -457,6 +460,8 @@ pub struct ShareFs {
     id: ShareId,
     root: Dir,
     staging: Option<Dir>,
+    trash: Option<Dir>,
+    gc_cookie: std::sync::Mutex<u64>,
 }
 
 impl ShareFs {
@@ -491,7 +496,18 @@ impl ShareFs {
         let staging = writable
             .then(|| open_staging_directory(&root))
             .transpose()?;
-        Ok(Self { id, root, staging })
+        let trash = if writable {
+            Some(trash::open_trash_directory(&root)?)
+        } else {
+            trash::open_existing_trash_directory(&root)?
+        };
+        Ok(Self {
+            id,
+            root,
+            staging,
+            trash,
+            gc_cookie: std::sync::Mutex::new(0),
+        })
     }
 
     #[must_use]
@@ -925,6 +941,9 @@ impl AuthorizedShare<'_> {
             max_bytes,
             0,
         )?;
+        if let Some(trash) = &self.share.trash {
+            trash::measure_trash(trash, &mut entries, max_entries, &mut bytes, max_bytes)?;
+        }
         Ok(bytes)
     }
 
