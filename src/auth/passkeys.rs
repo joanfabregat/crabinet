@@ -11,9 +11,11 @@ use axum::{
     routing::patch,
 };
 use webauthn_rs::prelude::{
-    AuthenticationResult, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
-    RegisterPublicKeyCredential, Uuid, Webauthn, WebauthnBuilder,
+    AuthenticationResult, DiscoverableAuthentication, DiscoverableKey, Passkey,
+    PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    Uuid, Webauthn, WebauthnBuilder,
 };
+use webauthn_rs_proto::ResidentKeyRequirement;
 
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(300);
 const MAX_PENDING: usize = 1_024;
@@ -41,6 +43,9 @@ enum PendingKind {
         username: String,
         state: PasskeyAuthentication,
     },
+    DiscoverableLogin {
+        state: DiscoverableAuthentication,
+    },
 }
 
 #[derive(Serialize)]
@@ -66,7 +71,8 @@ struct FinishRegistration {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartLogin {
-    username: String,
+    #[serde(default)]
+    username: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -226,7 +232,7 @@ async fn start_registration(
     }
     let user_handle = auth.inner.store.passkey_user_handle(&username).await?;
     let exclude = existing.iter().map(|key| key.cred_id().clone()).collect();
-    let (options, registration) = passkeys
+    let (mut options, registration) = passkeys
         .webauthn
         .start_passkey_registration(
             Uuid::from_bytes(user_handle),
@@ -235,6 +241,12 @@ async fn start_registration(
             Some(exclude),
         )
         .map_err(|_| AppError::Internal)?;
+    if let Some(selection) = options.public_key.authenticator_selection.as_mut() {
+        selection.resident_key = Some(ResidentKeyRequirement::Required);
+        selection.require_resident_key = true;
+    } else {
+        return Err(AppError::Internal);
+    }
     let session_key = auth.digest(b"session\0", &session.session_token);
     let flow_id = passkeys.insert(PendingKind::Registration {
         username,
@@ -290,7 +302,30 @@ async fn start_login(
     let auth = state.auth().ok_or(AppError::Internal)?;
     let passkeys = enabled(auth)?;
     let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
-    let input = payload.username.trim();
+    let input = payload.username.as_deref().unwrap_or("").trim();
+    if input.is_empty() {
+        let rate_key = RateLimitKey {
+            account: normalized_identifier_digest("passkey-discoverable"),
+            source,
+        };
+        if !auth
+            .inner
+            .rate_limit
+            .lock()
+            .map_err(|_| AppError::Internal)?
+            .allow(rate_key, auth.inner.clock.now())
+        {
+            return Err(AppError::TooManyRequests);
+        }
+        let (options, authentication) = passkeys
+            .webauthn
+            .start_discoverable_authentication()
+            .map_err(|_| AppError::Internal)?;
+        let flow_id = passkeys.insert(PendingKind::DiscoverableLogin {
+            state: authentication,
+        })?;
+        return Ok(no_store_json(Challenge { flow_id, options }));
+    }
     let user = if is_plausible_username(input) {
         auth.inner.users.get_key_value(input)
     } else if input.len() <= 254 && input.is_ascii() && input.contains('@') {
@@ -343,25 +378,54 @@ async fn finish_login(
     let auth = state.auth().ok_or(AppError::Internal)?;
     let passkeys = enabled(auth)?;
     let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
-    let PendingKind::Login {
-        username,
-        state: authentication,
-    } = passkeys.take(&payload.flow_id)?
-    else {
-        return Err(AppError::AuthenticationFailed);
+    let pending = passkeys.take(&payload.flow_id)?;
+    let (username, result) = match pending {
+        PendingKind::Login { username, state } => {
+            if auth
+                .inner
+                .users
+                .get(&username)
+                .is_none_or(|user| user.disabled)
+            {
+                return Err(AppError::AuthenticationFailed);
+            }
+            let result = passkeys
+                .webauthn
+                .finish_passkey_authentication(&payload.credential, &state)
+                .map_err(|_| AppError::AuthenticationFailed)?;
+            (username, result)
+        }
+        PendingKind::DiscoverableLogin { state } => {
+            let (handle, credential_id) = passkeys
+                .webauthn
+                .identify_discoverable_authentication(&payload.credential)
+                .map_err(|_| AppError::AuthenticationFailed)?;
+            let (username, credential) = auth
+                .inner
+                .store
+                .passkey_for_discoverable_login(handle.as_bytes(), credential_id)
+                .await?
+                .ok_or(AppError::AuthenticationFailed)?;
+            if auth
+                .inner
+                .users
+                .get(&username)
+                .is_none_or(|user| user.disabled)
+            {
+                return Err(AppError::AuthenticationFailed);
+            }
+            let result = passkeys
+                .webauthn
+                .finish_discoverable_authentication(
+                    &payload.credential,
+                    state,
+                    &[DiscoverableKey::from(&credential)],
+                )
+                .map_err(|_| AppError::AuthenticationFailed)?;
+            (username, result)
+        }
+        PendingKind::Registration { .. } => return Err(AppError::AuthenticationFailed),
     };
-    if auth
-        .inner
-        .users
-        .get(&username)
-        .is_none_or(|user| user.disabled)
-    {
-        return Err(AppError::AuthenticationFailed);
-    }
-    let result = passkeys
-        .webauthn
-        .finish_passkey_authentication(&payload.credential, &authentication)
-        .map_err(|_| AppError::AuthenticationFailed)?;
     if !auth
         .inner
         .store
@@ -492,6 +556,31 @@ impl SessionStore {
                 .collect()
         })
         .await
+    }
+
+    async fn passkey_for_discoverable_login(
+        &self,
+        user_handle: &[u8],
+        credential_id: &[u8],
+    ) -> Result<Option<(String, Passkey)>, AuthError> {
+        let user_handle = user_handle.to_vec();
+        let credential_id = credential_id.to_vec();
+        self.with_connection(move |connection| {
+            let row: Option<(String, String)> = connection.query_row(
+                "SELECT p.username, p.credential_json FROM passkeys p JOIN passkey_users u ON u.username = p.username WHERE u.user_handle = ?1 AND p.credential_id = ?2",
+                params![user_handle, credential_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            row.map(|(username, json)| {
+                serde_json::from_str(&json)
+                    .map(|credential| (username, credential))
+                    .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    ))
+            }).transpose()
+        }).await
     }
 
     async fn add_passkey(

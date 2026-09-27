@@ -245,7 +245,6 @@ interface LoginScreenProps {
 function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
   const [pending, setPending] = useState(false);
   const [passkeyPending, setPasskeyPending] = useState(false);
-  const [passkeyUsername, setPasskeyUsername] = useState("");
   const [error, setError] = useState<string>();
   const [methods, setMethods] = useState<AuthMethods>();
   const [methodsError, setMethodsError] = useState(false);
@@ -261,15 +260,12 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
     return () => controller.abort();
   }, [api]);
 
-  const signInWithPasskey = async (
-    event: JSX.TargetedSubmitEvent<HTMLFormElement>,
-  ) => {
-    event.preventDefault();
+  const signInWithPasskey = async () => {
     if (passkeyPending) return;
     setPasskeyPending(true);
     setError(undefined);
     try {
-      const challenge = await api.startPasskeyLogin(passkeyUsername.trim());
+      const challenge = await api.startPasskeyLogin();
       const credential = await startAuthentication({
         optionsJSON: challenge.options.publicKey,
       });
@@ -359,26 +355,10 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
             <p class="login-divider">or sign in with a passkey</p>
           )}
           {methods?.passkeyEnabled && (
-            <form
-              class="login-form"
-              onSubmit={(event) => void signInWithPasskey(event)}
-            >
-              <label for="passkey-username">
-                Email or username for passkey
-              </label>
-              <input
-                id="passkey-username"
-                type="text"
-                autocomplete="username webauthn"
-                value={passkeyUsername}
-                onInput={(event) =>
-                  setPasskeyUsername(event.currentTarget.value)
-                }
-                disabled={passkeyPending}
-                required
-              />
+            <div class="login-form">
               <Button
-                type="submit"
+                type="button"
+                onClick={() => void signInWithPasskey()}
                 busy={passkeyPending}
                 disabled={!browserSupportsWebAuthn()}
               >
@@ -387,7 +367,7 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
               {!browserSupportsWebAuthn() && (
                 <p class="muted">This browser does not support passkeys.</p>
               )}
-            </form>
+            </div>
           )}
           {methods?.passwordEnabled && methods.passkeyEnabled && (
             <p class="login-divider">or sign in with a password</p>
@@ -541,17 +521,17 @@ function AuthenticatedShell({
       )}
       <AppHeader>
         <div class="account-actions">
+          <span class="account-name">{session.user.displayName}</span>
           {session.user.pictureUrl && (
             <img
               class="account-avatar"
               src={session.user.pictureUrl}
-              alt={`Google profile photo of ${session.user.displayName}`}
+              alt={`Profile image for ${session.user.displayName}`}
               referrerPolicy="no-referrer"
               width="32"
               height="32"
             />
           )}
-          <span class="account-name">{session.user.displayName}</span>
           <TooltipButton
             label="Settings"
             aria-haspopup="dialog"

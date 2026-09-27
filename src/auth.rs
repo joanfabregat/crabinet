@@ -637,6 +637,13 @@ impl AuthService {
         let default_folder = self.inner.store.default_folder(username).await?;
         let default_folder =
             default_folder.filter(|folder| self.valid_default_folder(browse, username, folder));
+        let picture_url = picture_url.or_else(|| {
+            self.inner
+                .users
+                .get(username)
+                .and_then(|user| user.email.as_deref())
+                .map(gravatar_picture_url)
+        });
         Ok(SessionResponse {
             user: SessionUser {
                 id: username.to_owned(),
@@ -1208,6 +1215,13 @@ fn normalized_identifier_digest(username: &str) -> [u8; 32] {
         digest.update([byte.to_ascii_lowercase()]);
     }
     digest.finalize().into()
+}
+
+fn gravatar_picture_url(email: &str) -> String {
+    format!(
+        "https://www.gravatar.com/avatar/{}?s=64&d=identicon",
+        encode_hex(&normalized_identifier_digest(email))
+    )
 }
 
 fn is_plausible_username(username: &str) -> bool {
@@ -1879,6 +1893,45 @@ mod tests {
                 .as_str()
                 .is_some()
         );
+        assert_eq!(
+            challenge["options"]["publicKey"]["authenticatorSelection"]["residentKey"],
+            "required"
+        );
+        assert_eq!(
+            challenge["options"]["publicKey"]["authenticatorSelection"]["requireResidentKey"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn passkey_login_can_start_without_an_account_name() {
+        let mut test = test_auth(1, 5);
+        Arc::get_mut(&mut test.service.inner).unwrap().passkeys = Some(
+            passkeys::PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap())
+                .unwrap(),
+        );
+        let app = app_router(AppState::with_auth(true, test.service));
+        let response = app
+            .oneshot(
+                Request::post("/api/v1/auth/passkeys/login/start")
+                    .header(header::HOST, "files.example.test")
+                    .header(header::ORIGIN, "https://files.example.test")
+                    .header("sec-fetch-site", "same-origin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let challenge: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+        assert!(challenge["flowId"].as_str().is_some());
+        assert!(
+            challenge["options"]["publicKey"]["allowCredentials"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
     }
 
     #[tokio::test]
@@ -1966,6 +2019,43 @@ mod tests {
             .await
             .unwrap();
         assert!(session.picture_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_response_uses_gravatar_when_no_google_picture_is_present() {
+        let mut test = test_auth(1, 5);
+        Arc::get_mut(&mut test.service.inner)
+            .unwrap()
+            .users
+            .get_mut("Alice")
+            .unwrap()
+            .email = Some("Alice@Example.com".into());
+        let state = AppState::new(true);
+        let fallback = test
+            .service
+            .session_response(state.browse(), "Alice", "csrf".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            fallback.user.picture_url.as_deref(),
+            Some(
+                "https://www.gravatar.com/avatar/ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976?s=64&d=identicon"
+            )
+        );
+        let google = test
+            .service
+            .session_response(
+                state.browse(),
+                "Alice",
+                "csrf".into(),
+                Some("https://lh3.googleusercontent.com/a/avatar".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            google.user.picture_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/a/avatar")
+        );
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ import {
   browserSupportsWebAuthn,
   startRegistration,
 } from "@simplewebauthn/browser";
+import { Pencil, Trash2 } from "lucide-preact";
 
 import { ApiError, type ApiClient, type Passkey } from "./api";
 
@@ -22,7 +23,6 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
   const [name, setName] = useState("");
   const [editingId, setEditingId] = useState<string>();
   const [editedName, setEditedName] = useState("");
-  const [confirmRemove, setConfirmRemove] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -101,14 +101,17 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
     }
   };
 
-  const remove = async (id: string) => {
-    if (busy) return;
+  const remove = async (key: Passkey) => {
+    if (
+      busy ||
+      !window.confirm(`Remove passkey “${key.name}”? This cannot be undone.`)
+    )
+      return;
     setBusy(true);
     setError(undefined);
     try {
-      await api.removePasskey(id, csrfToken);
-      setKeys((current) => current.filter((key) => key.id !== id));
-      setConfirmRemove(undefined);
+      await api.removePasskey(key.id, csrfToken);
+      setKeys((current) => current.filter((item) => item.id !== key.id));
     } catch (cause) {
       failed(cause, "Could not remove the passkey. Try again.");
     } finally {
@@ -169,59 +172,40 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
                   </div>
                 ) : (
                   <>
-                    <strong>{key.name}</strong>
+                    <div class="passkey-row-header">
+                      <strong>{key.name}</strong>
+                      <div class="passkey-row-actions">
+                        <button
+                          class="icon-button tooltip-action"
+                          type="button"
+                          aria-label={`Rename ${key.name}`}
+                          data-tooltip="Rename"
+                          disabled={busy}
+                          onClick={() => {
+                            setEditingId(key.id);
+                            setEditedName(key.name);
+                          }}
+                        >
+                          <Pencil size={18} aria-hidden="true" />
+                        </button>
+                        <button
+                          class="icon-button icon-button-danger tooltip-action"
+                          type="button"
+                          aria-label={`Remove ${key.name}`}
+                          data-tooltip="Remove"
+                          disabled={busy}
+                          onClick={() => void remove(key)}
+                        >
+                          <Trash2 size={18} aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
                     <small>
                       Added {dateLabel(key.createdAt)}
                       {key.lastUsedAt
                         ? ` · Last used ${dateLabel(key.lastUsedAt)}`
                         : ""}
                     </small>
-                    <div class="passkey-actions">
-                      <button
-                        class="button button-secondary"
-                        type="button"
-                        disabled={busy}
-                        onClick={() => {
-                          setEditingId(key.id);
-                          setEditedName(key.name);
-                          setConfirmRemove(undefined);
-                        }}
-                      >
-                        Rename
-                      </button>
-                      {confirmRemove === key.id ? (
-                        <>
-                          <button
-                            class="button button-danger"
-                            type="button"
-                            disabled={busy}
-                            onClick={() => void remove(key.id)}
-                          >
-                            Confirm remove
-                          </button>
-                          <button
-                            class="button button-secondary"
-                            type="button"
-                            disabled={busy}
-                            onClick={() => setConfirmRemove(undefined)}
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          class="button button-secondary"
-                          type="button"
-                          disabled={busy}
-                          onClick={() => {
-                            setConfirmRemove(key.id);
-                            setEditingId(undefined);
-                          }}
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </div>
                   </>
                 )}
               </li>

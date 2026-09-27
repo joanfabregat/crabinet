@@ -64,7 +64,7 @@ pub fn has_index() -> bool {
 
 pub fn content_security_policy() -> HeaderValue {
     HeaderValue::from_static(
-        "default-src 'self'; img-src 'self' https://lh3.googleusercontent.com; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'",
+        "default-src 'self'; img-src 'self' https://lh3.googleusercontent.com https://www.gravatar.com; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'",
     )
 }
 
@@ -79,6 +79,7 @@ mod tests {
         assert!(value.contains("object-src 'none'"));
         assert!(value.contains("frame-ancestors 'none'"));
         assert!(value.contains("img-src 'self' https://lh3.googleusercontent.com"));
+        assert!(value.contains("https://www.gravatar.com"));
     }
 
     #[test]
