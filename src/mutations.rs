@@ -1814,7 +1814,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(fixture.upload_gate.available_permits(), 1);
         assert!(!fixture.root.path().join("stalled.txt").exists());
-        let staging = fixture.root.path().join(".index-staging");
+        let staging = fixture.root.path().join(".crabinet").join("staging");
         assert!(fs::read_dir(staging).unwrap().all(|entry| {
             !entry
                 .unwrap()

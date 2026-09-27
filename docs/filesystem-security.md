@@ -21,7 +21,7 @@ Each component is UTF-8 and NFC-normalized, at most 255 bytes, and excludes:
 
 The complete virtual path is at most 4096 bytes. Existing non-UTF-8 or non-NFC directory entries are omitted from listings and rejected by direct operations rather than lossily renamed or displayed. These restrictions intentionally trade access to a small set of legitimate host filenames for consistent security semantics across proxies, URL decoders, browsers, Linux, macOS, and Windows clients.
 
-`.index-staging`, `.index-tmp-<128-bit hex>`, and `.index-del-<128-bit hex>` names are reserved for internal use and cannot be expressed as virtual components. The match ignores ASCII case, so case-insensitive filesystems cannot alias them. Listings and quota measurement omit the staging directory.
+`.crabinet`, legacy `.index-staging`, and `.index-tmp-<128-bit hex>` names are reserved for internal use and cannot be expressed as virtual components. The match ignores ASCII case, so case-insensitive filesystems cannot alias them. The `.index-del-<128-bit hex>` namespace is private to staging. Listings and quota measurement omit the entire `.crabinet` tree and the legacy staging entry.
 
 ## Authorization contract
 
@@ -29,7 +29,7 @@ Only `AuthorizedShare` exposes request-time operations. It can be created only f
 
 Operations accept one authorized share and never accept an ambient source or destination path. Consequently, cross-share rename and move cannot be expressed through this API. A later mutation layer must preserve this constraint and must not expose raw `Dir` handles.
 
-Truncating a visible file in place can expose partial content after an interrupted or concurrent write. Writable shares instead retain a capability-opened mode-`0700` `.index-staging` directory. Staged files are streamed and synchronized there, then published with same-filesystem atomic no-replace or exchange renames. Both directory handles are synchronized after publication. The destination device is compared with staging before a write; nested mounts on another device fail with `CrossDevice` and never fall back to copying.
+Truncating a visible file in place can expose partial content after an interrupted or concurrent write. Writable shares instead retain a capability-opened mode-`0700` `.crabinet/staging` directory. Staged files are streamed and synchronized there, then published with same-filesystem atomic no-replace or exchange renames. Both directory handles are synchronized after publication. The destination device is compared with staging before a write; nested mounts on another device fail with `CrossDevice` and never fall back to copying.
 
 Startup recovery scans only direct staging children, is bounded before it removes anything, accepts only the exact random temporary-name grammar, and removes only regular files. It neither recursively traverses user content nor follows or removes malformed entries, links, directories, or special files. Delete-staged `.index-del-` entries are never removed by recovery: a delete moves the entry into staging before removing it, so a failed rollback or a crash leaves user data there for an operator to restore.
 

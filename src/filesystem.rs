@@ -26,7 +26,9 @@ use unicode_normalization::UnicodeNormalization;
 const MAX_COMPONENT_BYTES: usize = 255;
 const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
 const MAX_SHARE_ID_BYTES: usize = 64;
-const INTERNAL_STAGING_DIRECTORY: &str = ".index-staging";
+const INTERNAL_DIRECTORY: &str = ".crabinet";
+const INTERNAL_STAGING_DIRECTORY: &str = "staging";
+const LEGACY_STAGING_DIRECTORY: &str = ".index-staging";
 const INTERNAL_TEMP_PREFIX: &str = ".index-tmp-";
 /// Entries moved into staging by a delete use a distinct prefix so startup
 /// recovery never removes user data left behind by a failed rollback.
@@ -985,19 +987,28 @@ fn raw_file_metadata(file: &File) -> FsResult<EntryMetadata> {
 }
 
 fn open_staging_directory(root: &Dir) -> FsResult<Dir> {
-    let created =
-        match rustix::fs::mkdirat(root, INTERNAL_STAGING_DIRECTORY, rustix::fs::Mode::RWXU) {
-            Ok(()) => true,
-            Err(error)
-                if std::io::Error::from(error).kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                false
-            }
-            Err(error) => return Err(map_io(std::io::Error::from(error))),
-        };
+    // An old staging directory can contain data from a failed delete rollback.
+    // Refuse to start writable service until an operator has reviewed and moved it.
+    match root.symlink_metadata(LEGACY_STAGING_DIRECTORY) {
+        Ok(_) => return Err(FsError::new(FsErrorCode::Conflict)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(map_io(error)),
+    }
+    let internal = open_private_directory(root, INTERNAL_DIRECTORY)?;
+    open_private_directory(&internal, INTERNAL_STAGING_DIRECTORY)
+}
+
+fn open_private_directory(parent: &Dir, name: &str) -> FsResult<Dir> {
+    let created = match rustix::fs::mkdirat(parent, name, rustix::fs::Mode::RWXU) {
+        Ok(()) => true,
+        Err(error) if std::io::Error::from(error).kind() == std::io::ErrorKind::AlreadyExists => {
+            false
+        }
+        Err(error) => return Err(map_io(std::io::Error::from(error))),
+    };
     let descriptor = rustix::fs::openat(
-        root,
-        INTERNAL_STAGING_DIRECTORY,
+        parent,
+        name,
         rustix::fs::OFlags::RDONLY
             | rustix::fs::OFlags::DIRECTORY
             | rustix::fs::OFlags::NOFOLLOW
@@ -1007,17 +1018,15 @@ fn open_staging_directory(root: &Dir) -> FsResult<Dir> {
     .map_err(|error| map_io(std::io::Error::from(error)))?;
     rustix::fs::fchmod(&descriptor, rustix::fs::Mode::RWXU)
         .map_err(|error| map_io(std::io::Error::from(error)))?;
-    let staging = root
-        .open_dir_nofollow(INTERNAL_STAGING_DIRECTORY)
-        .map_err(map_io)?;
-    if !staging.dir_metadata().map_err(map_io)?.is_dir() {
+    let directory = parent.open_dir_nofollow(name).map_err(map_io)?;
+    if !directory.dir_metadata().map_err(map_io)?.is_dir() {
         return Err(FsError::new(FsErrorCode::UnsupportedEntry));
     }
     if created {
-        sync_directory(&staging)?;
-        sync_directory(root)?;
+        sync_directory(&directory)?;
+        sync_directory(parent)?;
     }
-    Ok(staging)
+    Ok(directory)
 }
 
 fn ensure_same_device(staging: &Dir, destination: &Dir) -> FsResult<()> {
@@ -1146,17 +1155,18 @@ fn is_internal_temp_name(name: &str) -> bool {
 /// Names this process creates, compared exactly. Quota traversal uses this so
 /// out-of-band user content is still counted.
 fn is_own_internal_name(name: &str) -> bool {
-    name == INTERNAL_STAGING_DIRECTORY || is_internal_temp_name(name)
+    name == INTERNAL_DIRECTORY || name == LEGACY_STAGING_DIRECTORY || is_internal_temp_name(name)
 }
 
 /// Listing filter. Compared ASCII-case-insensitively because a
-/// case-insensitive filesystem resolves `.INDEX-STAGING` to staging.
+/// case-insensitive filesystems can alias the reserved directories.
 fn is_internal_name(name: &str) -> bool {
     is_reserved_name(name)
 }
 
 fn is_reserved_name(value: &str) -> bool {
-    value.eq_ignore_ascii_case(INTERNAL_STAGING_DIRECTORY)
+    value.eq_ignore_ascii_case(INTERNAL_DIRECTORY)
+        || value.eq_ignore_ascii_case(LEGACY_STAGING_DIRECTORY)
         || starts_with_ignore_ascii_case(value, INTERNAL_TEMP_PREFIX)
 }
 
@@ -1711,9 +1721,14 @@ mod tests {
         drop(abandoned);
         assert!(!temporary.path().join("abandoned.txt").exists());
         assert!(
-            fs::read_dir(temporary.path().join(INTERNAL_STAGING_DIRECTORY))
-                .unwrap()
-                .all(|entry| !is_internal_temp_name(&entry.unwrap().file_name().to_string_lossy()))
+            fs::read_dir(
+                temporary
+                    .path()
+                    .join(INTERNAL_DIRECTORY)
+                    .join(INTERNAL_STAGING_DIRECTORY)
+            )
+            .unwrap()
+            .all(|entry| !is_internal_temp_name(&entry.unwrap().file_name().to_string_lossy()))
         );
     }
 
@@ -1843,7 +1858,10 @@ mod tests {
         fs::write(temporary.path().join("keep.txt"), b"keep").expect("regular file");
         let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
         fs::write(staging.join(&stale), b"partial").expect("stale staged file");
 
         assert_eq!(share.recover_staging_files(10).expect("recover"), 1);
@@ -1859,7 +1877,10 @@ mod tests {
         let temporary = TempDir::new().expect("temporary directory");
         let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
         let first = format!("{INTERNAL_TEMP_PREFIX}{}", "a".repeat(32));
         let second = format!("{INTERNAL_TEMP_PREFIX}{}", "b".repeat(32));
         fs::write(staging.join(&first), b"first").expect("first staged file");
@@ -1886,7 +1907,7 @@ mod tests {
             access: AccessLevel::ReadWrite,
         };
 
-        assert!(!temporary.path().join(INTERNAL_STAGING_DIRECTORY).exists());
+        assert!(!temporary.path().join(INTERNAL_DIRECTORY).exists());
         assert_eq!(
             share
                 .authorize(Some(&grant), GlobalPolicy::default())
@@ -1905,16 +1926,60 @@ mod tests {
         let temporary = TempDir::new().expect("temporary directory");
         ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        let metadata = fs::metadata(temporary.path().join(INTERNAL_STAGING_DIRECTORY))
-            .expect("staging metadata");
+        let internal =
+            fs::metadata(temporary.path().join(INTERNAL_DIRECTORY)).expect("internal metadata");
+        let metadata = fs::metadata(
+            temporary
+                .path()
+                .join(INTERNAL_DIRECTORY)
+                .join(INTERNAL_STAGING_DIRECTORY),
+        )
+        .expect("staging metadata");
 
+        assert_eq!(internal.permissions().mode() & 0o777, 0o700);
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
         assert_eq!(
-            EntryName::new(INTERNAL_STAGING_DIRECTORY)
-                .expect_err("reserved staging name")
+            EntryName::new(INTERNAL_DIRECTORY)
+                .expect_err("reserved internal name")
                 .code(),
             FsErrorCode::InvalidPath
         );
+        assert!(EntryName::new(INTERNAL_STAGING_DIRECTORY).is_ok());
+    }
+
+    #[test]
+    fn legacy_staging_blocks_writable_startup_without_moving_data() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let legacy = temporary.path().join(LEGACY_STAGING_DIRECTORY);
+        fs::create_dir(&legacy).expect("legacy directory");
+        fs::write(legacy.join("unrecovered"), b"user data").expect("legacy data");
+
+        assert_eq!(
+            ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+                .err()
+                .expect("legacy staging must block startup")
+                .code(),
+            FsErrorCode::Conflict
+        );
+        assert_eq!(fs::read(legacy.join("unrecovered")).unwrap(), b"user data");
+        assert!(!temporary.path().join(INTERNAL_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn existing_internal_trash_is_preserved() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let internal = temporary.path().join(INTERNAL_DIRECTORY);
+        fs::create_dir(&internal).expect("internal directory");
+        fs::create_dir(internal.join("trash")).expect("trash directory");
+        fs::write(internal.join("trash").join("keep"), b"user data").expect("trash data");
+
+        ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("open share");
+        assert_eq!(
+            fs::read(internal.join("trash").join("keep")).unwrap(),
+            b"user data"
+        );
+        assert!(internal.join(INTERNAL_STAGING_DIRECTORY).is_dir());
     }
 
     #[cfg(unix)]
@@ -1933,7 +1998,10 @@ mod tests {
         fs::write(outside.path().join("secret"), b"secret").expect("outside file");
         let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
         fs::write(staging.join(&stale), b"partial").expect("stale temp");
         symlink(outside.path().join("secret"), staging.join(&reserved_link))
             .expect("reserved symlink");
@@ -1969,7 +2037,10 @@ mod tests {
             .begin_write(&destination)
             .expect("temporary file");
         let temporary_name = pending.temporary_name.clone();
-        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
         fs::remove_file(staging.join(&temporary_name)).expect("unlink temp name");
         symlink(outside.path().join("secret"), staging.join(&temporary_name))
             .expect("replace temp with symlink");
@@ -2069,6 +2140,9 @@ mod tests {
     #[test]
     fn reserved_internal_names_are_case_insensitive() {
         for value in [
+            ".crabinet",
+            ".CRABINET",
+            ".Crabinet",
             ".index-staging",
             ".INDEX-STAGING",
             ".Index-Staging",
@@ -2158,6 +2232,7 @@ mod tests {
         // content now lives under the staging name and must survive drop.
         let staged = temporary
             .path()
+            .join(INTERNAL_DIRECTORY)
             .join(INTERNAL_STAGING_DIRECTORY)
             .join(temporary_name);
         assert_eq!(fs::read(staged).unwrap(), b"hello");
@@ -2172,7 +2247,10 @@ mod tests {
         let temporary = TempDir::new().expect("temporary directory");
         let share = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
             .expect("open share");
-        let staging = temporary.path().join(INTERNAL_STAGING_DIRECTORY);
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
         let deleted = format!("{INTERNAL_DELETE_PREFIX}{}", "d".repeat(32));
         fs::write(staging.join(&deleted), b"user data").expect("delete-staged file");
 
