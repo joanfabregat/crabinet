@@ -34,9 +34,9 @@ Start with the [threat model](docs/threat-model.md), [architecture decisions](do
 Release archives contain the executable, license, README, annotated configuration, and JSON Schema. Linux `x86_64` and `aarch64` are supported; other operating systems and libc targets are not release targets. The commands below describe Crabinet-branded releases; prereleases published before the rename retain their original `index` artifact names.
 
 ```sh
-curl -LO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/crabinet-v0.1.0-linux-amd64.tar.gz
-curl -LO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/SHA256SUMS-amd64
-sha256sum --check SHA256SUMS-amd64
+curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/crabinet-v0.1.0-linux-amd64.tar.gz
+curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf crabinet-v0.1.0-linux-amd64.tar.gz
 cd crabinet-linux-amd64
 ./crabinet --help
@@ -46,7 +46,9 @@ Replace `v0.1.0` with an existing release tag. Before trusting an artifact, also
 
 ```sh
 gh attestation verify crabinet-v0.1.0-linux-amd64.tar.gz \
-  --repo joanfabregat/crabinet
+  --repo joanfabregat/crabinet \
+  --signer-workflow joanfabregat/crabinet/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0
 ```
 
 Prepare paths outside every share, generate a session secret, and create a password hash interactively:

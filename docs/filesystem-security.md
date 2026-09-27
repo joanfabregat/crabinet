@@ -19,7 +19,7 @@ Each component is UTF-8 and NFC-normalized, at most 255 bytes, and excludes:
 - percent triplets such as `%2f`, which could be decoded inconsistently by another layer;
 - Windows device names, including superscript-digit `COM` and `LPT` variants.
 
-The complete virtual path is at most 4096 bytes. Existing non-UTF-8 or non-NFC directory entries are rejected rather than lossily renamed or displayed. These restrictions intentionally trade access to a small set of legitimate host filenames for consistent security semantics across proxies, URL decoders, browsers, Linux, macOS, and Windows clients.
+The complete virtual path is at most 4096 bytes. Existing non-UTF-8 or non-NFC directory entries are omitted from listings and rejected by direct operations rather than lossily renamed or displayed. These restrictions intentionally trade access to a small set of legitimate host filenames for consistent security semantics across proxies, URL decoders, browsers, Linux, macOS, and Windows clients.
 
 `.index-staging` and `.index-tmp-<128-bit hex>` names are reserved for internal use and cannot be expressed as virtual components. Listings and quota measurement omit the staging directory.
 
@@ -35,7 +35,7 @@ Startup recovery scans only direct staging children, is bounded before it remove
 
 ## Entry policy and errors
 
-Only directories and single-link regular files are supported. Symbolic links, sockets, FIFOs, devices, invalid UTF-8 names, non-NFC names, and hard-linked regular files are rejected. Directory listings fail closed if any unsupported entry is encountered, ensuring later UI actions cannot accidentally weaken the entry policy.
+Only directories and single-link regular files are supported. Symbolic links, sockets, FIFOs, devices, invalid UTF-8 names, non-NFC names, and hard-linked regular files are rejected. Directory listings omit unsupported entries instead of failing, and every direct operation that names one (read, preview, download, rename, delete, or traversal through it) is rejected, so the UI never offers an action the entry policy would refuse. Omitted entries still count toward the listing entry limit. If an entry disappears between enumeration and its metadata lookup, the resulting `NotFound` race skips that entry rather than failing the whole listing; any other metadata error still fails the listing.
 
 `FsError` exposes only stable categories. It never contains a configured host path, an OS error string, a filename, or file content. HTTP handlers may map these codes to status values but must not attach the underlying operating-system error to a response. Detailed operational diagnostics, if added, must be server-side and must still avoid configured root paths and user filenames unless explicitly enabled by the operator.
 
