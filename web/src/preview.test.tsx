@@ -104,6 +104,10 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     saveText: overrides.saveText ?? vi.fn(),
     moveEntry: overrides.moveEntry ?? vi.fn(),
     deleteEntry: overrides.deleteEntry ?? vi.fn(),
+    trash:
+      overrides.trash ?? vi.fn(async (shareId) => ({ shareId, items: [] })),
+    restoreTrash: overrides.restoreTrash ?? vi.fn(),
+    purgeTrash: overrides.purgeTrash ?? vi.fn(),
     uploadFile: overrides.uploadFile ?? vi.fn(),
   };
 }

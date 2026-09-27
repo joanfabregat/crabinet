@@ -1,4 +1,5 @@
-import { ChevronDown, ChevronRight, FolderPlus } from "lucide-preact";
+import { ChevronDown, ChevronRight, FolderPlus, Trash2 } from "lucide-preact";
+import { Fragment } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import {
@@ -9,7 +10,7 @@ import {
 } from "./api";
 import { EntryIcon } from "./file-icons";
 import { CopyPathButton } from "./copy-path-button";
-import { directoryUrl, type BrowserNavigation } from "./navigation";
+import { directoryUrl, trashUrl, type BrowserNavigation } from "./navigation";
 import { isValidPathComponent, isValidVirtualPath } from "./virtual-path";
 
 const dragType = "application/x-crabinet-entry";
@@ -46,6 +47,7 @@ function directories(page?: DirectoryPage, showHidden = true) {
     page?.entries.filter(
       (entry) =>
         entry.kind === "directory" &&
+        entry.name !== ".crabinet" &&
         (showHidden || !entry.name.startsWith(".")),
     ) ?? []
   );
@@ -119,6 +121,7 @@ interface ShareTreeProps {
   showHidden: boolean;
   activeShareId: string;
   activePath: string;
+  activeView?: "trash";
   navigation: BrowserNavigation;
   onMove: (
     entry: DirectoryEntry,
@@ -135,6 +138,7 @@ export function ShareTree({
   showHidden,
   activeShareId,
   activePath,
+  activeView,
   navigation,
   onMove,
   onSessionExpired,
@@ -258,23 +262,52 @@ export function ShareTree({
       <div class="tree-scroll">
         <ul class="tree-list tree-roots">
           {shares.map((share) => (
-            <TreeNode
-              key={share.id}
-              apiState={state}
-              showHidden={showHidden}
-              expanded={expanded}
-              level={0}
-              name={share.name}
-              path=""
-              share={share}
-              activeShareId={activeShareId}
-              activePath={activePath}
-              navigation={navigation}
-              onToggle={toggle}
-              onExpand={expand}
-              onLoadMore={load}
-              onDrop={drop}
-            />
+            <Fragment key={share.id}>
+              <TreeNode
+                apiState={state}
+                showHidden={showHidden}
+                expanded={expanded}
+                level={0}
+                name={share.name}
+                path=""
+                share={share}
+                activeShareId={activeShareId}
+                activePath={activePath}
+                activeView={activeView}
+                navigation={navigation}
+                onToggle={toggle}
+                onExpand={expand}
+                onLoadMore={load}
+                onDrop={drop}
+              />
+              <li class="tree-item">
+                <div
+                  class={`tree-row tree-trash-row${activeView === "trash" && activeShareId === share.id ? " is-selected" : ""}`}
+                  style={{ "--tree-level": 1 }}
+                >
+                  <a
+                    class="tree-link"
+                    href={trashUrl(share.id)}
+                    aria-current={
+                      activeView === "trash" && activeShareId === share.id
+                        ? "page"
+                        : undefined
+                    }
+                    onClick={(event) => {
+                      event.preventDefault();
+                      navigation.go({
+                        shareId: share.id,
+                        path: "",
+                        view: "trash",
+                      });
+                    }}
+                  >
+                    <Trash2 size={17} aria-hidden="true" />
+                    <span>Trash</span>
+                  </a>
+                </div>
+              </li>
+            </Fragment>
           ))}
         </ul>
       </div>
@@ -292,6 +325,7 @@ interface TreeNodeProps {
   share: Share;
   activeShareId: string;
   activePath: string;
+  activeView?: "trash";
   navigation: BrowserNavigation;
   onToggle: (shareId: string, path: string) => void;
   onExpand: (shareId: string, path: string) => void;
@@ -310,6 +344,7 @@ function TreeNode(props: TreeNodeProps) {
     share,
     activeShareId,
     activePath,
+    activeView,
     navigation,
     onToggle,
     onExpand,
@@ -319,7 +354,8 @@ function TreeNode(props: TreeNodeProps) {
   const nodeKey = key(share.id, path);
   const open = expanded.has(nodeKey);
   const nodeState = apiState[nodeKey];
-  const selected = activeShareId === share.id && activePath === path;
+  const selected =
+    activeView !== "trash" && activeShareId === share.id && activePath === path;
   const childDirectories = directories(nodeState?.page, showHidden);
 
   return (

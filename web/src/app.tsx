@@ -63,6 +63,7 @@ import {
 import { SafeMarkdown } from "./safe-markdown";
 import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
+import { TrashView } from "./trash";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 
 const defaultApi = createApiClient();
@@ -698,6 +699,14 @@ function DirectoryBrowser({
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
   const [previewOperationError, setPreviewOperationError] = useState<string>();
+  const [deleteError, setDeleteError] = useState<string>();
+  const [recentlyDeleted, setRecentlyDeleted] = useState<{
+    shareId: string;
+    id: string;
+    name: string;
+  }>();
+  const [deletingPath, setDeletingPath] = useState<string>();
+  const undoTimer = useRef<number>();
   const loadMoreController = useRef<AbortController>();
   const previewOperationController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -709,8 +718,67 @@ function DirectoryBrowser({
   const writable = share.access === "read-write";
   const visibleEntries =
     page?.entries.filter(
-      (entry) => showHiddenFiles || !entry.name.startsWith("."),
+      (entry) =>
+        entry.name !== ".crabinet" &&
+        (showHiddenFiles || !entry.name.startsWith(".")),
     ) ?? [];
+
+  useEffect(() => () => window.clearTimeout(undoTimer.current), []);
+
+  const deleteToTrash = async (entry: DirectoryEntry, path: string) => {
+    if (deletingPath || !writable) return;
+    setDeletingPath(path);
+    setDeleteError(undefined);
+    try {
+      const metadata = await api.metadata(share.id, path);
+      if (metadata.kind !== entry.kind)
+        throw new ApiError("conflict", "The item changed");
+      const result = await withCsrfRetry(
+        api,
+        csrfToken,
+        userId,
+        onSessionRefreshed,
+        (token) => api.deleteEntry(share.id, path, metadata.etag, token),
+      );
+      window.clearTimeout(undoTimer.current);
+      setRecentlyDeleted({
+        shareId: share.id,
+        id: result.trashId,
+        name: entry.name,
+      });
+      undoTimer.current = window.setTimeout(
+        () => setRecentlyDeleted(undefined),
+        8_000,
+      );
+      changed({ kind: "delete", entry, path });
+    } catch (cause) {
+      if (isUnauthorized(cause)) onSessionExpired();
+      else
+        setDeleteError(
+          cause instanceof ApiError && cause.kind === "conflict"
+            ? "This item changed. Reload the folder and try again."
+            : "Could not move this item to Trash. Try again.",
+        );
+    } finally {
+      setDeletingPath(undefined);
+    }
+  };
+
+  const undoDelete = async () => {
+    const deleted = recentlyDeleted;
+    if (!deleted) return;
+    try {
+      await withCsrfRetry(api, csrfToken, userId, onSessionRefreshed, (token) =>
+        api.restoreTrash(deleted.shareId, deleted.id, undefined, token),
+      );
+      window.clearTimeout(undoTimer.current);
+      setRecentlyDeleted(undefined);
+      setRefreshKey((value) => value + 1);
+    } catch (cause) {
+      if (isUnauthorized(cause)) onSessionExpired();
+      else setDeleteError("Could not undo. Open Trash to restore the item.");
+    }
+  };
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
@@ -829,6 +897,7 @@ function DirectoryBrowser({
   }, [route.path, share.id, writable]);
 
   useEffect(() => {
+    if (route.view === "trash") return;
     const controller = new AbortController();
     const location = `${share.id}\u0000${route.path}`;
     const shouldFocusHeading = focusedLocation.current !== location;
@@ -876,11 +945,13 @@ function DirectoryBrowser({
     onSessionExpired,
     refreshKey,
     route.path,
+    route.view,
     share.id,
     showHiddenFiles,
   ]);
 
   useEffect(() => {
+    if (route.view === "trash") return;
     if (typeof EventSource === "undefined") return;
     const events = new EventSource(directoryEventsUrl(share.id, route.path));
     let debounce: number | undefined;
@@ -924,7 +995,7 @@ function DirectoryBrowser({
       document.removeEventListener("visibilitychange", visibilityChanged);
       events.close();
     };
-  }, [route.path, share.id]);
+  }, [route.path, route.view, share.id]);
 
   const loadMore = async () => {
     if (!page?.nextCursor || loadingMore) return;
@@ -1012,6 +1083,10 @@ function DirectoryBrowser({
     );
     if (listedEntry) {
       if (kind === "edit" && listedEntry.kind !== "file") return;
+      if (kind === "delete") {
+        void deleteToTrash(listedEntry, previewPath);
+        return;
+      }
       setOperation({ kind, entry: listedEntry, path: previewPath });
       return;
     }
@@ -1030,6 +1105,13 @@ function DirectoryBrowser({
           return;
         if (kind === "edit" && metadata.kind !== "file") {
           setPreviewOperationError("Only files can be edited.");
+          return;
+        }
+        if (kind === "delete") {
+          void deleteToTrash(
+            { name: metadata.name, kind: metadata.kind },
+            previewPath,
+          );
           return;
         }
         setOperation({
@@ -1051,6 +1133,12 @@ function DirectoryBrowser({
     );
   };
 
+  const chooseOperation = (operation: EntryOperation) => {
+    if (operation.kind === "delete")
+      void deleteToTrash(operation.entry, operation.path);
+    else setOperation(operation);
+  };
+
   return (
     <div
       class={`browser-workspace${route.previewPath ? " has-preview" : ""}${route.previewMode === "full" ? " preview-full" : ""}`}
@@ -1062,134 +1150,160 @@ function DirectoryBrowser({
         showHidden={showHiddenFiles}
         activeShareId={share.id}
         activePath={route.path}
+        activeView={route.view}
         navigation={navigation}
         onMove={(entry, path, destinationDirectory) =>
           setOperation({ kind: "move", entry, path, destinationDirectory })
         }
         onSessionExpired={onSessionExpired}
       />
-      <section class="directory-panel" aria-labelledby="directory-title">
-        <nav class="breadcrumbs" aria-label="Breadcrumb">
-          <ol>
-            <li>
-              <a
-                href={directoryUrl(share.id, "")}
-                aria-current={route.path === "" ? "page" : undefined}
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigation.go({ shareId: share.id, path: "" });
-                }}
+      {route.view === "trash" ? (
+        <TrashView
+          api={api}
+          share={share}
+          csrfToken={csrfToken}
+          userId={userId}
+          onSessionExpired={onSessionExpired}
+          onSessionRefreshed={onSessionRefreshed}
+          onChanged={() => setRefreshKey((value) => value + 1)}
+        />
+      ) : (
+        <section class="directory-panel" aria-labelledby="directory-title">
+          {deleteError && <Notice tone="danger">{deleteError}</Notice>}
+          {recentlyDeleted && (
+            <div class="notice" role="status">
+              Moved {recentlyDeleted.name} to Trash.{" "}
+              <button
+                type="button"
+                class="entry-action"
+                onClick={() => void undoDelete()}
               >
-                {share.name}
-              </a>
-            </li>
-            {crumbs.map((crumb, index) => (
-              <li key={crumb.path}>
-                <span aria-hidden="true">/</span>
+                Undo
+              </button>
+            </div>
+          )}
+          <nav class="breadcrumbs" aria-label="Breadcrumb">
+            <ol>
+              <li>
                 <a
-                  href={directoryUrl(share.id, crumb.path)}
-                  aria-current={
-                    index === crumbs.length - 1 ? "page" : undefined
-                  }
+                  href={directoryUrl(share.id, "")}
+                  aria-current={route.path === "" ? "page" : undefined}
                   onClick={(event) => {
                     event.preventDefault();
-                    navigation.go({ shareId: share.id, path: crumb.path });
+                    navigation.go({ shareId: share.id, path: "" });
                   }}
                 >
-                  {crumb.name}
+                  {share.name}
                 </a>
               </li>
-            ))}
-          </ol>
-        </nav>
+              {crumbs.map((crumb, index) => (
+                <li key={crumb.path}>
+                  <span aria-hidden="true">/</span>
+                  <a
+                    href={directoryUrl(share.id, crumb.path)}
+                    aria-current={
+                      index === crumbs.length - 1 ? "page" : undefined
+                    }
+                    onClick={(event) => {
+                      event.preventDefault();
+                      navigation.go({ shareId: share.id, path: crumb.path });
+                    }}
+                  >
+                    {crumb.name}
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </nav>
 
-        <div class="directory-heading">
-          <div>
-            <p class="eyebrow">Current folder</p>
-            <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
-              {crumbs.at(-1)?.name ?? share.name}
-            </h1>
-          </div>
-          <div class="directory-heading-actions">
-            {writable && (
-              <WriteToolbar
-                onCreateFile={() => setOperation({ kind: "create-file" })}
-                onCreateFolder={() => setOperation({ kind: "create-folder" })}
-                onUpload={(files) =>
-                  setUploadSelection({ id: crypto.randomUUID(), files })
-                }
+          <div class="directory-heading">
+            <div>
+              <p class="eyebrow">Current folder</p>
+              <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
+                {crumbs.at(-1)?.name ?? share.name}
+              </h1>
+            </div>
+            <div class="directory-heading-actions">
+              {writable && (
+                <WriteToolbar
+                  onCreateFile={() => setOperation({ kind: "create-file" })}
+                  onCreateFolder={() => setOperation({ kind: "create-folder" })}
+                  onUpload={(files) =>
+                    setUploadSelection({ id: crypto.randomUUID(), files })
+                  }
+                />
+              )}
+              <CopyPathButton
+                value={`${share.id}${route.path ? `/${route.path}` : ""}`}
+                label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
               />
-            )}
-            <CopyPathButton
-              value={`${share.id}${route.path ? `/${route.path}` : ""}`}
-              label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
-            />
+            </div>
           </div>
-        </div>
 
-        <div class="sr-only" role="status" aria-live="polite">
-          {loading
-            ? "Loading folder"
-            : page
-              ? `${visibleEntries.length} items loaded`
-              : "Folder unavailable"}
-        </div>
+          <div class="sr-only" role="status" aria-live="polite">
+            {loading
+              ? "Loading folder"
+              : page
+                ? `${visibleEntries.length} items loaded`
+                : "Folder unavailable"}
+          </div>
 
-        {loading ? (
-          <DirectorySkeleton />
-        ) : error && !page ? (
-          <DirectoryError
-            error={error}
-            shareId={share.id}
-            path={route.path}
-            navigation={navigation}
-            retry={() => setRefreshKey((value) => value + 1)}
-          />
-        ) : page && visibleEntries.length === 0 ? (
-          <EmptyState
-            title={
-              showHiddenFiles
-                ? "This folder is empty"
-                : "No visible files or folders"
-            }
-            detail={
-              showHiddenFiles
-                ? "There are no files or folders here."
-                : "Turn on Show hidden files in Settings to include dotfiles and dotfolders."
-            }
-          />
-        ) : page ? (
-          <>
-            <EntryList
-              entries={visibleEntries}
+          {loading ? (
+            <DirectorySkeleton />
+          ) : error && !page ? (
+            <DirectoryError
+              error={error}
               shareId={share.id}
               path={route.path}
               navigation={navigation}
-              onOpenPreview={openPreview}
-              writable={writable}
-              onOperation={setOperation}
+              retry={() => setRefreshKey((value) => value + 1)}
             />
-            {error && (
-              <Notice tone="danger">
-                More items could not be loaded. The folder may have changed; use
-                Load more to try again.
-              </Notice>
-            )}
-            {page.nextCursor && (
-              <div class="load-more">
-                <Button
-                  variant="secondary"
-                  busy={loadingMore}
-                  onClick={loadMore}
-                >
-                  {loadingMore ? "Loading…" : "Load more"}
-                </Button>
-              </div>
-            )}
-          </>
-        ) : null}
-      </section>
-      {route.previewPath && (
+          ) : page && visibleEntries.length === 0 ? (
+            <EmptyState
+              title={
+                showHiddenFiles
+                  ? "This folder is empty"
+                  : "No visible files or folders"
+              }
+              detail={
+                showHiddenFiles
+                  ? "There are no files or folders here."
+                  : "Turn on Show hidden files in Settings to include dotfiles and dotfolders."
+              }
+            />
+          ) : page ? (
+            <>
+              <EntryList
+                entries={visibleEntries}
+                shareId={share.id}
+                path={route.path}
+                navigation={navigation}
+                onOpenPreview={openPreview}
+                writable={writable}
+                onOperation={chooseOperation}
+              />
+              {error && (
+                <Notice tone="danger">
+                  More items could not be loaded. The folder may have changed;
+                  use Load more to try again.
+                </Notice>
+              )}
+              {page.nextCursor && (
+                <div class="load-more">
+                  <Button
+                    variant="secondary"
+                    busy={loadingMore}
+                    onClick={loadMore}
+                  >
+                    {loadingMore ? "Loading…" : "Load more"}
+                  </Button>
+                </div>
+              )}
+            </>
+          ) : null}
+        </section>
+      )}
+      {route.view !== "trash" && route.previewPath && (
         <PreviewPanel
           key={`${share.id}:${route.previewPath}`}
           api={api}
@@ -1212,7 +1326,7 @@ function DirectoryBrowser({
           onSessionExpired={onSessionExpired}
         />
       )}
-      {operation && (
+      {route.view !== "trash" && operation && (
         <OperationDialog
           api={api}
           csrfToken={csrfToken}

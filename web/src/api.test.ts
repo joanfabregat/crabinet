@@ -599,7 +599,12 @@ describe("API client", () => {
         body?.destination ??
         body?.path ??
         new URL(url, "https://crabinet.test").searchParams.get("path")!;
-      return Response.json({ shareId: "work", path, outcome: "success" });
+      return Response.json({
+        shareId: "work",
+        path,
+        outcome: "success",
+        trashId: "trash-1",
+      });
     });
     const api = createApiClient({ fetch });
 
@@ -623,6 +628,43 @@ describe("API client", () => {
     expect(new Headers(fetch.mock.calls[4]?.[1]?.headers).get("If-Match")).toBe(
       'W/"v3"',
     );
+  });
+
+  it("lists Trash and sends CSRF for restore and permanent deletion", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      if (String(input) === "/api/v1/shares/work/trash")
+        return Response.json({
+          shareId: "work",
+          items: [
+            {
+              id: "id/1",
+              originalPath: "notes.txt",
+              kind: "file",
+              deletedAt: "2026-09-01T10:00:00Z",
+              deletedBy: "Joan",
+              expiresAt: "2026-10-01T10:00:00Z",
+            },
+          ],
+        });
+      return new Response(null, { status: 204 });
+    });
+    const api = createApiClient({ fetch });
+    expect((await api.trash("work")).items[0]?.id).toBe("id/1");
+    await api.restoreTrash("work", "id/1", "archive/notes.txt", "csrf");
+    await api.purgeTrash("work", "id/1", "csrf");
+    expect(fetch.mock.calls[1]?.[0]).toBe(
+      "/api/v1/shares/work/trash/id%2F1/restore",
+    );
+    expect(fetch.mock.calls[1]?.[1]?.body).toBe(
+      JSON.stringify({ destination: "archive/notes.txt" }),
+    );
+    expect(
+      new Headers(fetch.mock.calls[1]?.[1]?.headers).get("X-CSRF-Token"),
+    ).toBe("csrf");
+    expect(fetch.mock.calls[2]?.[0]).toBe("/api/v1/shares/work/trash/id%2F1");
+    expect(
+      new Headers(fetch.mock.calls[2]?.[1]?.headers).get("X-CSRF-Token"),
+    ).toBe("csrf");
   });
 
   it("rejects malformed mutation success and metadata responses", async () => {

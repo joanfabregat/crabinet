@@ -151,7 +151,12 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         shareId,
         path,
         outcome: "success" as const,
+        trashId: "trash-1",
       })),
+    trash:
+      overrides.trash ?? vi.fn(async (shareId) => ({ shareId, items: [] })),
+    restoreTrash: overrides.restoreTrash ?? vi.fn(async () => undefined),
+    purgeTrash: overrides.purgeTrash ?? vi.fn(async () => undefined),
     uploadFile:
       overrides.uploadFile ??
       vi.fn(async (shareId, directory, file) => ({
@@ -1110,7 +1115,7 @@ describe("writable file operations", () => {
     ).toBeVisible();
   });
 
-  it("requires an exact destructive confirmation and reports non-empty folders honestly", async () => {
+  it("moves folders to Trash without confirmation and reports conflicts", async () => {
     const deleteEntry = vi
       .fn<ApiClient["deleteEntry"]>()
       .mockRejectedValue(
@@ -1137,23 +1142,12 @@ describe("writable file operations", () => {
     fireEvent.click(
       within(actions).getByRole("button", { name: "Delete empty" }),
     );
-    const confirmation = screen.getByLabelText("Type empty to confirm");
-    fireEvent.input(confirmation, { target: { value: "wrong" } });
-    fireEvent.submit(confirmation.closest("form")!);
-    expect(await screen.findByRole("alert")).toHaveTextContent("exactly");
-    expect(deleteEntry).not.toHaveBeenCalled();
-
-    fireEvent.input(confirmation, { target: { value: "empty" } });
-    fireEvent.submit(confirmation.closest("form")!);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "item changed or the destination already exists",
-    );
-    expect(
-      screen.getByText(/non-empty folders are never deleted/i),
-    ).toBeInTheDocument();
+    await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("changed");
   });
 
-  it("uses a checkbox for files and closes only the deleted file's active preview", async () => {
+  it("offers Undo after deleting a file and closes its active preview", async () => {
     const navigation = writableNavigation();
     navigation.restore({
       shareId: "work",
@@ -1161,7 +1155,12 @@ describe("writable file operations", () => {
       previewPath: "projects/notes.txt",
     });
     const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
-      async (shareId, path) => ({ shareId, path, outcome: "success" }),
+      async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+        trashId: "trash-1",
+      }),
     );
     render(
       <App
@@ -1181,25 +1180,9 @@ describe("writable file operations", () => {
       within(preview).getByRole("button", { name: "Delete notes.txt" }),
     );
 
-    const dialog = await screen.findByRole("dialog", {
-      name: "Delete file notes.txt",
-    });
-    expect(
-      within(dialog).queryByLabelText(/Type notes\.txt to confirm/),
-    ).not.toBeInTheDocument();
-    const confirmation = within(dialog).getByRole("checkbox", {
-      name: "I understand that notes.txt will be permanently deleted",
-    });
-    const deleteButton = within(dialog).getByRole("button", {
-      name: "Delete",
-      exact: true,
-    });
-    expect(deleteButton).toBeDisabled();
-    fireEvent.click(confirmation);
-    await waitFor(() => expect(deleteButton).toBeEnabled());
-    fireEvent.click(deleteButton);
-
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Undo" })).toBeVisible();
     expect(
       screen.queryByRole("heading", { name: "notes.txt" }),
     ).not.toBeInTheDocument();
@@ -1207,6 +1190,87 @@ describe("writable file operations", () => {
       route: { shareId: "work", path: "projects" },
       replace: true,
     });
+  });
+
+  it("restores a just-deleted item by its Trash ID when Undo is clicked", async () => {
+    const restoreTrash = vi.fn<ApiClient["restoreTrash"]>(
+      async () => undefined,
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          restoreTrash,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    fireEvent.click(
+      within(await screen.findByLabelText("Actions for notes.txt")).getByRole(
+        "button",
+        { name: "Delete notes.txt" },
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() =>
+      expect(restoreTrash).toHaveBeenCalledWith(
+        "work",
+        "trash-1",
+        undefined,
+        "csrf-in-memory",
+      ),
+    );
+  });
+
+  it("shows per-share Trash independently of hidden files and confirms permanent deletion", async () => {
+    const item = {
+      id: "deleted-1",
+      originalPath: "projects/notes.txt",
+      kind: "file" as const,
+      deletedAt: "2026-09-01T10:00:00Z",
+      deletedBy: "Joan",
+      expiresAt: "2026-10-01T10:00:00Z",
+    };
+    const purgeTrash = vi.fn<ApiClient["purgeTrash"]>(async () => undefined);
+    const navigation = writableNavigation();
+    render(
+      <App
+        api={fakeApi({
+          trash: vi.fn(async (shareId) => ({ shareId, items: [item] })),
+          purgeTrash,
+        })}
+        navigation={navigation}
+      />,
+    );
+    const sidebar = await screen.findByRole("complementary", {
+      name: "Shared folders",
+    });
+    const trashLinks = within(sidebar).getAllByRole("link", { name: "Trash" });
+    expect(trashLinks).toHaveLength(2);
+    fireEvent.click(trashLinks[1]!);
+    expect(navigation.current()).toEqual({
+      shareId: "work",
+      path: "",
+      view: "trash",
+    });
+    expect(
+      await screen.findByText("Original path: projects/notes.txt"),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Permanently delete notes.txt",
+    });
+    expect(purgeTrash).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    await waitFor(() =>
+      expect(purgeTrash).toHaveBeenCalledWith(
+        "work",
+        "deleted-1",
+        "csrf-in-memory",
+      ),
+    );
   });
 
   it("keeps another active preview open when a different file is deleted", async () => {
@@ -1232,23 +1296,7 @@ describe("writable file operations", () => {
         { name: "Delete notes.txt" },
       ),
     );
-    const dialog = screen.getByRole("dialog", {
-      name: "Delete file notes.txt",
-    });
-    fireEvent.click(
-      within(dialog).getByRole("checkbox", {
-        name: "I understand that notes.txt will be permanently deleted",
-      }),
-    );
-    await waitFor(() =>
-      expect(
-        within(dialog).getByRole("button", { name: "Delete", exact: true }),
-      ).toBeEnabled(),
-    );
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Delete", exact: true }),
-    );
-
+    await screen.findByRole("button", { name: "Undo" });
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "other.txt" })).toBeVisible(),
     );
@@ -1628,7 +1676,7 @@ describe("security review regressions", () => {
     fireEvent(target, event);
   }
 
-  it("resolves a deep-linked preview's kind before offering deletion", async () => {
+  it("resolves a deep-linked preview's kind before moving it to Trash", async () => {
     const navigation = projects();
     navigation.restore({
       shareId: "work",
@@ -1643,7 +1691,12 @@ describe("security review regressions", () => {
       etag: 'W/"folder"',
     }));
     const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
-      async (shareId, path) => ({ shareId, path, outcome: "success" }),
+      async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+        trashId: "trash-1",
+      }),
     );
     render(
       <App
@@ -1658,32 +1711,18 @@ describe("security review regressions", () => {
     fireEvent.click(
       within(preview).getByRole("button", { name: "Delete archive" }),
     );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Delete folder archive",
-    });
-    expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
-    const confirmation = within(dialog).getByLabelText(
-      "Type archive to confirm",
-    );
-    fireEvent.input(confirmation, { target: { value: "archive" } });
-    const button = within(dialog).getByRole("button", {
-      name: "Delete",
-      exact: true,
-    });
-    await waitFor(() => expect(button).toBeEnabled());
-    fireEvent.click(button);
     await waitFor(() =>
       expect(deleteEntry).toHaveBeenCalledWith(
         "work",
         "archive",
         'W/"folder"',
         "csrf-in-memory",
-        expect.any(AbortSignal),
       ),
     );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("deletes with the validator captured when the dialog opened", async () => {
+  it("deletes with a freshly fetched validator", async () => {
     const etags = ['W/"reviewed"', 'W/"changed-later"'];
     const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
       shareId,
@@ -1693,7 +1732,12 @@ describe("security review regressions", () => {
       etag: etags.shift() ?? 'W/"unexpected"',
     }));
     const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
-      async (shareId, path) => ({ shareId, path, outcome: "success" }),
+      async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+        trashId: "trash-1",
+      }),
     );
     render(
       <App
@@ -1708,25 +1752,12 @@ describe("security review regressions", () => {
         { name: "Delete notes.txt" },
       ),
     );
-    const dialog = screen.getByRole("dialog", {
-      name: "Delete file notes.txt",
-    });
-    expect(within(dialog).getByRole("status")).toHaveTextContent(
-      "Checking the current version",
-    );
-    fireEvent.click(within(dialog).getByRole("checkbox"));
-    const button = within(dialog).getByRole("button", {
-      name: "Delete",
-      exact: true,
-    });
-    await waitFor(() => expect(button).toBeEnabled());
-    fireEvent.click(button);
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
     expect(deleteEntry.mock.calls[0]?.[2]).toBe('W/"reviewed"');
     expect(metadata).toHaveBeenCalledOnce();
   });
 
-  it("blocks an operation when the item's kind changed since it was listed", async () => {
+  it("blocks deletion when the item's kind changed since it was listed", async () => {
     const deleteEntry = vi.fn<ApiClient["deleteEntry"]>();
     render(
       <App
@@ -1751,17 +1782,7 @@ describe("security review regressions", () => {
         { name: "Delete notes.txt" },
       ),
     );
-    const dialog = screen.getByRole("dialog", {
-      name: "Delete file notes.txt",
-    });
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "This item is now a folder",
-    );
-    fireEvent.click(within(dialog).getByRole("checkbox"));
-    expect(
-      within(dialog).getByRole("button", { name: "Delete", exact: true }),
-    ).toBeDisabled();
-    fireEvent.submit(within(dialog).getByRole("checkbox").closest("form")!);
+    expect(await screen.findByRole("alert")).toHaveTextContent("changed");
     expect(deleteEntry).not.toHaveBeenCalled();
   });
 
