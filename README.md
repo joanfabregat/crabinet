@@ -1,5 +1,10 @@
 # Crabinet
 
+[![CI](https://github.com/joanfabregat/crabinet/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/joanfabregat/crabinet/actions/workflows/ci.yml)
+[![Weekly security scan](https://github.com/joanfabregat/crabinet/actions/workflows/security-weekly.yml/badge.svg?branch=main)](https://github.com/joanfabregat/crabinet/actions/workflows/security-weekly.yml)
+[![Latest release](https://img.shields.io/github/v/release/joanfabregat/crabinet?sort=semver)](https://github.com/joanfabregat/crabinet/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 <img src="web/public/crabinet.png" alt="Crabinet logo: a crab on a filing cabinet" width="128">
 
 Crabinet is a security-focused, low-memory file browser for a small server or Podman pod. It provides configuration-defined users, per-share read or write grants, normal filesystem-backed storage, drag-and-drop uploads, file operations, and bounded previews from one self-contained Rust executable with an embedded Preact interface.
@@ -10,7 +15,7 @@ Crabinet is a security-focused, low-memory file browser for a small server or Po
 
 ## What it provides
 
-- Multiple local users with password and/or OpenID Connect sign-in, verified-email account mapping, and configuration-defined per-share `read` or `write` grants.
+- Multiple local users with password, OpenID Connect, and discoverable passkey sign-in, verified-email account mapping, and configuration-defined per-share `read` or `write` grants.
 - Capability-scoped filesystem access: configured roots are opened once, request paths stay relative, and symlinks, hard-link aliases, special files, ambiguous paths, and traversal are rejected.
 - A lazy share/folder tree, touch-friendly folder picker, file-type icons, copyable virtual paths, folder-first browsing, metadata, conditional and ranged downloads, create/rename/move/delete operations, UTF-8 text editing, and streaming multipart uploads.
 - Bounded syntax-highlighted code and text previews, safe Markdown rendering without raw HTML, signature-validated raster image previews, and rendered/source HTML tabs with isolated new-tab views. Rendered HTML is protected by a deny-by-default response CSP and, in-panel, an additional empty iframe sandbox, so uploaded scripts, forms, navigation, and network requests cannot run.
@@ -27,6 +32,8 @@ The Axum/Tokio backend owns authentication, authorization, bounded streaming, an
 
 Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files preference is also in Settings and remains local to each browser.
 
+Account pictures use an accepted Google profile image when available or, when an operator enables `auth.gravatar_enabled`, a Gravatar image keyed by the configured email address. These are browser requests to external hosts; see [authentication and account pictures](docs/authentication.md#account-pictures).
+
 Start with the [threat model](docs/threat-model.md), [architecture decisions](docs/architecture-decisions.md), and [filesystem invariants](docs/filesystem-security.md) before changing a security boundary. The HTTP behavior used by the frontend is documented in [browse](docs/browse-api.md), [mutation](docs/mutations.md), [preview](docs/previews.md), and [frontend contract](docs/frontend-api-contract.md) notes; these describe the current first-party API, not a stable third-party compatibility promise.
 
 ## Direct-binary quick start
@@ -37,19 +44,16 @@ Release archives contain the executable, license, README, annotated configuratio
 curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/crabinet-v0.1.0-linux-amd64.tar.gz
 curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify crabinet-v0.1.0-linux-amd64.tar.gz \
+  --repo joanfabregat/crabinet \
+  --signer-workflow joanfabregat/crabinet/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0
 tar -xzf crabinet-v0.1.0-linux-amd64.tar.gz
 cd crabinet-linux-amd64
 ./crabinet --help
 ```
 
-Replace `v0.1.0` with an existing release tag. Before trusting an artifact, also verify its GitHub build attestation:
-
-```sh
-gh attestation verify crabinet-v0.1.0-linux-amd64.tar.gz \
-  --repo joanfabregat/crabinet \
-  --signer-workflow joanfabregat/crabinet/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.0
-```
+Replace `v0.1.0` with an existing release tag in every command. The release publishes one combined `SHA256SUMS` file; `--ignore-missing` checks the archive you downloaded without requiring every release asset. The attestation check pins the signing workflow and tag, so an artifact built by any other workflow or ref is rejected.
 
 Prepare paths outside every share, generate a session secret, and create a password hash interactively:
 
@@ -113,7 +117,7 @@ The `.index-staging` name remains reserved so existing writable shares can be us
 
 ## Rootless Podman pod
 
-The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. The image is `scratch`-based, runs without root, and contains the executable and the bundled CA data license; it has no shell or package manager.
+The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. The image is `scratch`-based, runs without root, and contains the executable and required dependency license notices; it has no shell or package manager.
 
 The following rootless example maps the invoking host user into the pod, keeps the container root filesystem read-only, drops capabilities, and mounts state separately. Adjust SELinux labels for your host. Use `:ro` for every share that does not need writes.
 
@@ -172,7 +176,7 @@ Do not publish the backend port beyond the proxy. Apply conservative request-bod
 Back up these as separate classes with restrictive permissions:
 
 - `config.toml`, the session-secret file, and deployment metadata;
-- the SQLite file and its `-wal`/`-shm` companions when present;
+- the SQLite file, which holds sessions, start-folder preferences, and passkeys, plus its `-wal`/`-shm` companions when present;
 - every share directory, preserving ownership, modes, timestamps, and extended attributes relevant to your workload.
 
 For a simple consistent backup, stop the Crabinet container, snapshot/copy SQLite and writable shares, then restart. A live filesystem copy is not transactionally consistent with concurrent file mutations; use a storage-level snapshot that covers all writable shares and state together, or accept that they represent different instants. Read-only shares may be copied live according to the underlying application's rules.
@@ -188,7 +192,7 @@ Restore while Crabinet is stopped. Restore configuration, secret, SQLite state, 
 
 For rollback, stop the new process before starting the old one. Restore the pre-upgrade SQLite/config snapshot if release notes describe a state or schema change. Never run old and new versions concurrently against a writable share or the same SQLite database.
 
-The start-folder feature migrates the SQLite schema from version 1 to 2 at startup. A version 1 binary cannot open a migrated database; restore its matching pre-upgrade SQLite snapshot before rolling back.
+The start-folder and passkey features migrate the SQLite schema through versions 2 and 4. Crabinet v0.1.0 uses schema version 4, even when passkeys are disabled. An older binary cannot open a newer schema; restore its matching pre-upgrade SQLite snapshot before rolling back.
 
 ## Troubleshooting and logs
 

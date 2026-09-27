@@ -17,6 +17,7 @@ test("capture the deterministic authenticated browser", async ({ page }) => {
     page.getByRole("heading", { name: "README.md", level: 2 }),
   ).toBeFocused();
   await expect(page.getByTestId("markdown-document")).toBeVisible();
+  await page.mouse.move(650, 700);
 
   await page.screenshot({
     path: "../docs/images/crabinet-browser.png",

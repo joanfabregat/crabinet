@@ -2,14 +2,14 @@
 
 ## Scope
 
-Crabinet is an authenticated file browser for explicitly mounted filesystem roots. Operators define users, enabled sign-in methods, optional Argon2id password hashes and verified-email OIDC bindings, shares, and per-share grants in an immutable TOML file. The application serves one embedded browser client, stores sessions and audit records in SQLite, and reads or modifies mounted files only through authenticated API operations.
+Crabinet is an authenticated file browser for explicitly mounted filesystem roots. Operators define users, enabled sign-in methods, optional Argon2id password hashes and verified-email OIDC bindings, shares, and per-share grants in an immutable TOML file. The application serves one embedded browser client, stores sessions and passkey state in SQLite, emits audit records to structured logs, and reads or modifies mounted files only through authenticated API operations.
 
 This model covers the application, its OCI image, its configuration and secret mounts, and the browser security boundary. TLS termination, host filesystem administration, container-engine security, backup storage, and the reverse proxy are operator-controlled dependencies.
 
 ## Assets
 
 - File contents and metadata inside configured shares.
-- Password hashes, session secrets, session records, and CSRF tokens.
+- Password hashes, session secrets, session records, CSRF tokens, and passkey credentials and user handles.
 - Configuration, audit records, and security logs.
 - Integrity of read-only shares and authorization grants.
 - Availability within the configured CPU, memory, storage, and request limits.
@@ -50,6 +50,7 @@ Configuration and mounted share roots are operator-trusted at startup. Filenames
 12. Code and text render as inert text. Markdown disallows raw HTML and is sanitized. HTML preview has both iframe and HTTP CSP sandboxes and cannot execute scripts, submit forms, navigate, open popups, use application storage, or contact external origins.
 13. Logs, errors, test artifacts, and CI output exclude passwords, hashes, cookies, session IDs, secret contents, and file contents.
 14. Release images package the same tested binaries attached to the release; dependency and provenance evidence accompanies releases.
+15. Passkey registration requires CSRF proof and a session that signed in within the last 10 minutes. Authentication binds a single-use challenge to the configured HTTPS origin and relying party, requires user verification, and maps the credential to an enabled local user before creating a session.
 
 The concrete path grammar, capability lifecycle, alias policy, platform assumptions, and authorization contract are specified in [Filesystem security boundary](filesystem-security.md). Preview formats, size limits, response headers, and the source-only HTML decision are specified in [Preview security contract](previews.md).
 
@@ -63,6 +64,7 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 | Password cracking | Argon2id with enforced parameters and salts; protected configuration | PHC policy tests and release benchmarks |
 | Login denial of service | Rate limiting and bounded concurrent Argon2 operations | Concurrency and memory tests |
 | Session theft/fixation | Random opaque IDs, hashed server records, rotation, expiry, secure cookies | HTTP integration tests |
+| Passkey account confusion or replay | Discoverable credential and user-handle mapping, origin and relying-party checks, user verification, single-use expiring challenges | WebAuthn unit and router tests |
 | CSRF | CSRF token plus Origin/Referer validation and SameSite cookies | Cross-origin request tests |
 | Stored XSS/active HTML | Inert rendering, sanitizer, CSP sandbox, iframe sandbox | Real-browser hostile fixtures |
 | Upload exhaustion | Streaming, request/file/count/quota limits, private per-share staging, bounded non-recursive recovery, cleanup, bounded concurrency | Multipart failure, staging recovery, and resource tests |
