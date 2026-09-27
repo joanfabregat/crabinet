@@ -966,7 +966,38 @@ function DirectoryBrowser({
             onSessionExpired();
             return;
           }
-          setError(asApiError(cause));
+          const error = asApiError(cause);
+          // A link may end in a file name: open its folder and preview it.
+          if (error.kind === "not-found" && route.path && !route.previewPath) {
+            void api.metadata(share.id, route.path, controller.signal).then(
+              (entry) => {
+                if (controller.signal.aborted) return;
+                if (entry?.kind !== "file") {
+                  setError(error);
+                  setLoading(false);
+                  return;
+                }
+                navigation.go(
+                  {
+                    shareId: share.id,
+                    path: parentPath(route.path),
+                    previewPath: route.path,
+                    ...(route.previewMode === "full"
+                      ? { previewMode: "full" as const }
+                      : {}),
+                  },
+                  { replace: true },
+                );
+              },
+              () => {
+                if (controller.signal.aborted) return;
+                setError(error);
+                setLoading(false);
+              },
+            );
+            return;
+          }
+          setError(error);
           setLoading(false);
         },
       );
@@ -977,6 +1008,7 @@ function DirectoryBrowser({
     };
   }, [
     api,
+    navigation,
     onSessionExpired,
     refreshKey,
     route.path,
@@ -1182,7 +1214,7 @@ function DirectoryBrowser({
 
   return (
     <div
-      class={`browser-workspace${route.previewPath ? " has-preview" : ""}${route.previewMode === "full" ? " preview-full" : ""}`}
+      class={`browser-workspace${route.previewPath ? " has-preview" : ""}${route.previewPath && route.previewMode === "full" ? " preview-full" : ""}`}
     >
       <ShareTree
         api={api}

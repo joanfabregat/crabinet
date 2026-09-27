@@ -8,7 +8,7 @@ test("capture the deterministic authenticated browser", async ({ page }) => {
     "run npm run screenshot:readme to update the checked-in image",
   );
   await page.setViewportSize({ width: 1440, height: 960 });
-  await openSignedIn(page, "/browse/writable", "writer");
+  await openSignedIn(page, "/writable", "writer");
   const icon = await page.request.get("/crabinet.png");
   expect(icon.ok()).toBe(true);
   expect(icon.headers()["content-type"]).toContain("image/png");

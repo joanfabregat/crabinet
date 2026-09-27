@@ -935,8 +935,13 @@ describe("directory browser", () => {
       }
       return { shareId: "read-only", path, entries: [] };
     });
+    const metadata = vi
+      .fn<ApiClient["metadata"]>()
+      .mockRejectedValue(new ApiError("not-found", "gone", { status: 404 }));
 
-    render(<App api={fakeApi({ directory })} navigation={navigation} />);
+    render(
+      <App api={fakeApi({ directory, metadata })} navigation={navigation} />,
+    );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "This folder is no longer available",
     );
@@ -947,6 +952,50 @@ describe("directory browser", () => {
     expect(
       await screen.findByRole("heading", { name: "This folder is empty" }),
     ).toBeVisible();
+  });
+
+  it("opens a link that ends in a file name as that file's preview", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "read-only",
+      path: "docs/readme.md",
+      previewMode: "full",
+    });
+    const directory = vi.fn<ApiClient["directory"]>(async (_shareId, path) => {
+      if (path === "docs/readme.md") {
+        throw new ApiError("not-found", "not a directory", { status: 404 });
+      }
+      return { shareId: "read-only", path, entries: [] };
+    });
+    const metadata = vi.fn<ApiClient["metadata"]>(
+      async () =>
+        ({
+          name: "readme.md",
+          kind: "file" as const,
+        }) as Awaited<ReturnType<ApiClient["metadata"]>>,
+    );
+
+    render(
+      <App api={fakeApi({ directory, metadata })} navigation={navigation} />,
+    );
+    await waitFor(() =>
+      expect(navigation.visits.at(-1)).toEqual({
+        route: {
+          shareId: "read-only",
+          path: "docs",
+          previewPath: "docs/readme.md",
+          previewMode: "full",
+        },
+        replace: true,
+      }),
+    );
+    expect(metadata).toHaveBeenCalledWith(
+      "read-only",
+      "docs/readme.md",
+      expect.any(AbortSignal),
+    );
+    expect(
+      screen.queryByText("This folder is no longer available"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a recoverable generic error and retries the current folder", async () => {

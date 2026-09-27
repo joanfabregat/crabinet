@@ -14,7 +14,7 @@ test.describe("writable share operations", () => {
   test("creates, edits, moves, trashes, and restores without crossing shares or overwriting", async ({
     page,
   }) => {
-    await openSignedIn(page, "/browse/writable", "writer");
+    await openSignedIn(page, "/writable", "writer");
 
     await createEntry(page, "New folder", "Folder name", "e2e-folder");
     await expect(
@@ -70,7 +70,7 @@ test.describe("writable share operations", () => {
       page.getByRole("heading", { name: "note-renamed.md" }),
     ).toBeVisible();
     await expect(page.getByRole("tab", { name: "Readable" })).toBeVisible();
-    await expect(page).toHaveURL(/preview=e2e-folder%2Fnote-renamed\.md/);
+    await expect(page).toHaveURL(/e2e-folder(\/|%2F)note-renamed\.md/);
 
     const originalDestination = await readText(
       page,
@@ -116,7 +116,7 @@ test.describe("writable share operations", () => {
     await expect(
       page.getByRole("heading", { name: "example.toml" }),
     ).toHaveCount(0);
-    await expect(page).not.toHaveURL(/preview=/);
+    await expect(page).not.toHaveURL(/preview=|example\.toml/);
 
     await page.goto("/trash/writable");
     const deletedFile = page.getByRole("listitem").filter({
@@ -126,7 +126,7 @@ test.describe("writable share operations", () => {
     await deletedFile.getByRole("button", { name: "Restore" }).click();
     await expect(deletedFile).toHaveCount(0);
 
-    await page.goto("/browse/writable");
+    await page.goto("/writable");
     await entryAction(page, "e2e-folder", "Delete").click();
     await expect(
       directoryListing(page).getByRole("link", { name: "e2e-folder" }),
@@ -139,7 +139,7 @@ test.describe("writable share operations", () => {
     await expect(deletedFolder).toBeVisible();
     await deletedFolder.getByRole("button", { name: "Restore" }).click();
     await expect(deletedFolder).toHaveCount(0);
-    await page.goto("/browse/writable");
+    await page.goto("/writable");
     await expect(
       directoryListing(page).getByRole("link", { name: "Projects" }),
     ).toBeVisible();
@@ -157,9 +157,9 @@ test.describe("writable share operations", () => {
     context,
     page,
   }) => {
-    await openSignedIn(page, "/browse/writable", "writer");
+    await openSignedIn(page, "/writable", "writer");
     const competingPage = await context.newPage();
-    await competingPage.goto("/browse/writable");
+    await competingPage.goto("/writable");
     await expect(
       competingPage.getByLabel("Shared folders", { exact: true }),
     ).toBeVisible();
@@ -203,7 +203,7 @@ test.describe("writable share operations", () => {
   test("refreshes the current directory after an out-of-band filesystem mutation", async ({
     page,
   }) => {
-    await openSignedIn(page, "/browse/writable", "writer");
+    await openSignedIn(page, "/writable", "writer");
     await expect(page.getByRole("link", { name: "README.md" })).toBeVisible();
     await page.waitForTimeout(500);
 
@@ -230,7 +230,7 @@ test.describe("writable share operations", () => {
   test("uploads by native drop and file picker with partial limits, conflict, and explicit replacement", async ({
     page,
   }) => {
-    await openSignedIn(page, "/browse/writable", "writer");
+    await openSignedIn(page, "/writable", "writer");
     await createEntry(page, "New file", "File name", "replace-me.txt");
 
     await dropFiles(
@@ -329,7 +329,7 @@ test.describe("writable share operations", () => {
   test("shows upload progress, survives a disconnect retry, and cancels explicitly", async ({
     page,
   }) => {
-    await openSignedIn(page, "/browse/writable", "writer");
+    await openSignedIn(page, "/writable", "writer");
     let attempts = 0;
     await page.route("**/api/v1/shares/writable/uploads?**", async (route) => {
       attempts += 1;
@@ -394,9 +394,9 @@ test.describe("writable share operations", () => {
   test("aborts an upload when browser history changes its destination", async ({
     page,
   }) => {
-    await openSignedIn(page, "/browse/writable", "writer");
+    await openSignedIn(page, "/writable", "writer");
     await page.getByRole("link", { name: "Projects" }).click();
-    await expect(page).toHaveURL(/\/browse\/writable\/Projects$/);
+    await expect(page).toHaveURL(/\/writable\/Projects$/);
     await expect(
       page.getByRole("link", { name: "example.toml" }),
     ).toBeVisible();
@@ -424,7 +424,7 @@ test.describe("writable share operations", () => {
 
     await page.goBack();
     releaseUpload();
-    await expect(page).toHaveURL(/\/browse\/writable$/);
+    await expect(page).toHaveURL(/\/writable$/);
     await expect(page.getByRole("dialog", { name: "Uploads" })).toHaveCount(0);
     const cancelled = await page.request.get(
       "/api/v1/shares/writable/metadata?path=Projects%2Fcancel-on-navigation.txt",

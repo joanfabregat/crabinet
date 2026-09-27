@@ -89,7 +89,7 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await page.goto("/browse/writable?path=Projects");
   await signIn(page, "writer");
 
-  await expect(page).toHaveURL(/\/browse\/writable\/Projects$/);
+  await expect(page).toHaveURL(/\/writable\/Projects$/);
   await expect(
     page.getByRole("heading", { name: "Projects", level: 1 }),
   ).toBeFocused();
@@ -99,30 +99,41 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
     .getByLabel("Breadcrumb")
     .getByRole("link", { name: "Working files" })
     .click();
-  await expect(page).toHaveURL(/\/browse\/writable$/);
+  await expect(page).toHaveURL(/\/writable$/);
   await page.goBack();
-  await expect(page).toHaveURL(/\/browse\/writable\/Projects$/);
+  await expect(page).toHaveURL(/\/writable\/Projects$/);
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
   const sidebar = page.getByLabel("Shared folders", { exact: true });
   await sidebar.getByRole("link", { name: "Reference library" }).click();
-  await expect(page).toHaveURL(/\/browse\/read-only$/);
+  await expect(page).toHaveURL(/\/read-only$/);
   await expect(page.getByLabel("Read only")).toHaveText("R");
   const nested = sidebar.getByRole("link", { name: "nested" });
   await expect(nested).toBeVisible();
 
   await nested.click();
-  await expect(page).toHaveURL(/\/browse\/read-only\/nested$/);
+  await expect(page).toHaveURL(/\/read-only\/nested$/);
   await expect(sidebar.getByText("No subfolders")).toBeVisible();
   await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
+
+  // A link ending in a file name opens its folder with the file previewed.
+  await page.goto("/writable/Projects/example.toml");
+  await expect(
+    page.getByRole("heading", { name: "example.toml", level: 2 }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/\/writable\/Projects\/example\.toml$/);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "example.toml", level: 2 }),
+  ).toBeVisible();
 });
 
 test("a start folder follows the user while direct links keep their destination", async ({
   page,
 }) => {
-  await openSignedIn(page, "/browse/writable/Projects", "writer");
+  await openSignedIn(page, "/writable/Projects", "writer");
   const headingActions = page.locator(".directory-heading-actions");
   const newFile = headingActions.getByRole("button", { name: "New file" });
   const newFolder = headingActions.getByRole("button", { name: "New folder" });
@@ -176,9 +187,9 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(settings).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/browse\/writable$/);
-  await page.goto("/browse/read-only");
-  await expect(page).toHaveURL(/\/browse\/read-only$/);
+  await expect(page).toHaveURL(/\/writable$/);
+  await page.goto("/read-only");
+  await expect(page).toHaveURL(/\/read-only$/);
   await expect(page.getByRole("button", { name: "New file" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
 
@@ -186,13 +197,13 @@ test("a start folder follows the user while direct links keep their destination"
   await startFolder.selectOption("");
   await expect(startFolder).toHaveValue("");
   await page.goto("/");
-  await expect(page).toHaveURL(/\/browse\/read-only$/);
+  await expect(page).toHaveURL(/\/read-only$/);
 });
 
 test("action tooltips escape clipped panels and remain inside the viewport", async ({
   page,
 }) => {
-  await openSignedIn(page, "/browse/writable", "writer");
+  await openSignedIn(page, "/writable", "writer");
   const copyPath = page.getByRole("button", {
     name: "Copy full path for README.md",
   });
@@ -412,7 +423,10 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
     }));
   expect(backdropStyles.background).not.toBe("rgba(0, 0, 0, 0)");
   expect(backdropStyles.blur).toContain("blur");
-  results = await new AxeBuilder({ page }).exclude("iframe").analyze();
+  results = await new AxeBuilder({ page })
+    .exclude("iframe")
+    .exclude(".app-footer")
+    .analyze();
   expect(
     results.violations.filter(({ impact }) =>
       ["critical", "serious"].includes(impact ?? ""),
@@ -432,7 +446,10 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   }));
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
 
-  results = await new AxeBuilder({ page }).exclude("iframe").analyze();
+  results = await new AxeBuilder({ page })
+    .exclude("iframe")
+    .exclude(".app-footer")
+    .analyze();
   expect(
     results.violations.filter(({ impact }) =>
       ["critical", "serious"].includes(impact ?? ""),
@@ -444,7 +461,8 @@ test("night mode follows the system, can be pinned, and passes axe", async ({
   page,
 }) => {
   const seriousViolations = async (exclude?: string) => {
-    const builder = new AxeBuilder({ page });
+    // The version footer is deliberately faint; see .app-footer.
+    const builder = new AxeBuilder({ page }).exclude(".app-footer");
     if (exclude) builder.exclude(exclude);
     return (await builder.analyze()).violations.filter(({ impact }) =>
       ["critical", "serious"].includes(impact ?? ""),

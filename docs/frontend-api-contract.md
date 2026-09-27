@@ -28,7 +28,7 @@ An anonymous or expired session returns `401`. `csrfToken` is held in memory and
 
 `user.pictureUrl` is optional. When present, it is an accepted Google profile image or, when `auth.gravatar_enabled` is set, a Gravatar URL derived from the configured email address; the browser loads that external image. See [account pictures](authentication.md#account-pictures).
 
-`defaultFolder` is `null` when no start folder is selected or the saved folder is no longer accessible. Opening `/` goes to this folder when present; a direct `/browse/*` link keeps its own destination. `PUT /api/v1/preferences` accepts `{ "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" } }` or `{ "defaultFolder": null }`, with same-origin and session-bound CSRF checks. The server accepts only an existing directory in a share granted to the current user, stores its virtual share ID and path in SQLite, and returns the new `defaultFolder` value. Passwords and host filesystem paths are not stored in this preference.
+`defaultFolder` is `null` when no start folder is selected or the saved folder is no longer accessible. Opening `/` goes to this folder when present; a direct `/{shareId}/…` link keeps its own destination. `PUT /api/v1/preferences` accepts `{ "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" } }` or `{ "defaultFolder": null }`, with same-origin and session-bound CSRF checks. The server accepts only an existing directory in a share granted to the current user, stores its virtual share ID and path in SQLite, and returns the new `defaultFolder` value. Passwords and host filesystem paths are not stored in this preference.
 
 `GET /api/v1/auth/methods` reports the enabled sign-in methods, including `passkeyEnabled`. `POST /api/v1/auth/login` accepts `{ "username": string, "password": string }`, where `username` may be a configured username or email address. It rotates the session identifier and returns the same session shape. Login failures return a generic `401` response. The server validates `Origin`/`Sec-Fetch-Site`, rate-limits attempts, and never includes credential details in responses or logs. When OIDC is enabled, the browser starts at `GET /api/v1/auth/oidc/start`; the server handles the fixed callback and creates the same local session after verifying the provider identity. The sign-in page is always shown before choosing a method.
 
@@ -47,8 +47,17 @@ Trash is a separate per-share view, not a virtual `.crabinet` folder. `GET /api/
   "shareId": "docs",
   "path": "projects/crabinet",
   "entries": [
-    { "name": "src", "kind": "directory", "modifiedAt": "2026-09-16T18:30:00Z" },
-    { "name": "README.md", "kind": "file", "size": 2048, "modifiedAt": "2026-09-16T18:30:00Z" }
+    {
+      "name": "src",
+      "kind": "directory",
+      "modifiedAt": "2026-09-16T18:30:00Z"
+    },
+    {
+      "name": "README.md",
+      "kind": "file",
+      "size": 2048,
+      "modifiedAt": "2026-09-16T18:30:00Z"
+    }
   ],
   "nextCursor": "opaque-or-omitted"
 }
@@ -81,7 +90,7 @@ Trash is a separate per-share view, not a virtual `.crabinet` folder. `GET /api/
 
 ## Browser routes
 
-Directory links use `/browse/{encodedShareId}?path={encodedRelativePath}`. The backend should serve the embedded application shell for `/` and `/browse/*`, while reserving `/api/v1/*` for JSON responses. Browser history and direct navigation therefore work without client-side routing dependencies.
+Directory links use `/{encodedShareId}/{encodedSegment}/…`, one encoded segment per folder name. A file previewed from its own folder is addressed by its own path, such as `/docs/projects/README.md`; the app lists that path, and when the server reports it missing it asks for the path's metadata and, for a file, opens the parent folder with the file previewed. The resolved route is kept in `history.state`, so reloads and back/forward do not repeat the lookup. `?view=full` selects the full-screen preview, and `?preview={encodedPath}` remains for a file outside the listed folder. Former `/browse/{shareId}?path=…&preview=…` links still resolve and are rewritten in place. The backend serves the embedded application shell for every non-asset path outside `/api/` and `/health/`, so share IDs that would shadow a top-level URL (`api`, `assets`, `browse`, `health`, `trash`, `src`, `node_modules`, `index.html`, `favicon.ico`, `crabinet.png`, `google-g.png`) are rejected at startup. Browser history and direct navigation therefore work without client-side routing dependencies.
 
 ## Previews
 

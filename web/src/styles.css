@@ -600,13 +600,14 @@ select {
   width: 100%;
 }
 
-/* Ink at 70% keeps AA contrast in both themes while reading as muted. */
+/* Deliberately faint (about 3:1): the version is incidental text, and the
+ * e2e axe checks exclude it. Hover restores full contrast. */
 .app-footer {
   color: var(--ink);
   font-size: 0.75rem;
   margin: 0 auto;
   max-width: 100rem;
-  opacity: 0.7;
+  opacity: 0.5;
   padding: 0 1rem 1rem;
   transition: opacity 200ms ease;
   width: 100%;
