@@ -350,11 +350,11 @@ async fn finish_login(
     else {
         return Err(AppError::AuthenticationFailed);
     };
-    if !auth
+    if auth
         .inner
         .users
         .get(&username)
-        .is_some_and(|user| !user.disabled)
+        .is_none_or(|user| user.disabled)
     {
         return Err(AppError::AuthenticationFailed);
     }
