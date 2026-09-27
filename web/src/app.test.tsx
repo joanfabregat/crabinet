@@ -560,6 +560,34 @@ describe("directory browser", () => {
     expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull();
   });
 
+  it("shows the server version in a footer only once signed in", async () => {
+    const guest = render(
+      <App
+        api={fakeApi({
+          session: vi
+            .fn<ApiClient["session"]>()
+            .mockRejectedValue(new ApiError("unauthorized", "anonymous")),
+        })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Sign in to Crabinet" });
+    expect(screen.queryByRole("contentinfo")).toBeNull();
+    guest.unmount();
+
+    render(
+      <App
+        api={fakeApi({
+          session: vi.fn(async () => ({ ...session, version: "9.8.7" })),
+        })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+    expect(await screen.findByRole("contentinfo")).toHaveTextContent(
+      "Crabinet 9.8.7",
+    );
+  });
+
   it("places a browser-wide appearance choice in Settings and applies it", async () => {
     const first = render(
       <App api={fakeApi()} navigation={new MemoryNavigation()} />,

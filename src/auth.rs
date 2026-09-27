@@ -263,6 +263,8 @@ struct SessionResponse {
     shares: Vec<EffectiveShare>,
     default_folder: Option<DefaultFolder>,
     csrf_token: String,
+    /// The running server release, shown to signed-in users only.
+    version: &'static str,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -692,6 +694,7 @@ impl AuthService {
             shares: self.effective_shares(username),
             default_folder,
             csrf_token,
+            version: env!("CARGO_PKG_VERSION"),
         })
     }
 
@@ -1743,6 +1746,7 @@ mod tests {
         let session_body = to_bytes(session.into_body(), 16_384).await.unwrap();
         let session_json: serde_json::Value = serde_json::from_slice(&session_body).unwrap();
         assert_eq!(session_json["csrfToken"], csrf);
+        assert_eq!(session_json["version"], env!("CARGO_PKG_VERSION"));
 
         let rejected_logout = app_router(AppState::with_auth(true, auth.service.clone()))
             .oneshot(post("/api/v1/auth/logout", ""))

@@ -550,7 +550,7 @@ function AuthenticatedShell({
   };
 
   return (
-    <div class="app-frame">
+    <div class="app-frame app-shell">
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
           Development preview · revision{" "}
@@ -692,6 +692,9 @@ function AuthenticatedShell({
           <p role="status">Opening a shared folder…</p>
         )}
       </main>
+      {session.version && (
+        <footer class="app-footer">Crabinet {session.version}</footer>
+      )}
       <TooltipLayer />
     </div>
   );

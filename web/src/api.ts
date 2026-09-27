@@ -27,6 +27,8 @@ export interface Session {
   defaultFolder?: DefaultFolder | null;
   /** An opaque CSRF value held in memory only. This is not the session ID. */
   csrfToken: string;
+  /** The running server release, e.g. "0.3.0". */
+  version?: string;
 }
 
 export interface DefaultFolder {
@@ -913,6 +915,7 @@ function parseSession(value: unknown): Session {
     (value.user.pictureUrl !== undefined &&
       typeof value.user.pictureUrl !== "string") ||
     typeof value.csrfToken !== "string" ||
+    (value.version !== undefined && typeof value.version !== "string") ||
     !Array.isArray(value.shares) ||
     !value.shares.every(isShare) ||
     !isOptionalDefaultFolder(value.defaultFolder)
