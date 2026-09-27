@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -101,19 +104,56 @@ async fn main() -> Result<()> {
         .with_browse(browse)
         .with_preview_policy(preview_policy)
         .with_mutations(mutation_state)
+        .with_trash_retention_days(config.server().trash_retention_days())
         .with_auth_service(auth);
     if let Some(oidc) = oidc {
         state = state.with_oidc_service(oidc);
     }
+    let gc_state = state.clone();
     let app = router(state);
+    let gc_task = tokio::spawn(async move { trash_gc_loop(gc_state).await });
 
     tracing::info!(%listen, config = %config.source().display(), "server listening");
-    axum::serve(
+    let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
+    .await;
+    gc_task.abort();
+    result?;
     Ok(())
+}
+
+async fn trash_gc_loop(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        for (share_id, filesystem) in state.browse().trash_gc_targets() {
+            let commit = state.mutations().commit_lock(&share_id).await;
+            let result = tokio::task::spawn_blocking(move || {
+                let _commit = commit;
+                filesystem.gc_expired_trash(SystemTime::now(), 1_000)
+            })
+            .await;
+            match result {
+                Ok(Ok(removed)) if removed > 0 => {
+                    tracing::info!(
+                        share_id = share_id.as_str(),
+                        removed,
+                        "expired trash items purged"
+                    );
+                }
+                Ok(Err(_)) | Err(_) => {
+                    tracing::warn!(
+                        share_id = share_id.as_str(),
+                        "trash cleanup failed; will retry later"
+                    );
+                }
+                Ok(Ok(_)) => {}
+            }
+        }
+    }
 }
 
 fn browse_state(config: &Config) -> Result<BrowseState> {
@@ -131,6 +171,9 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
             let recovered = filesystem
                 .recover_staging_files(100_000)
                 .context("cannot recover interrupted staged writes")?;
+            filesystem
+                .recover_trash(100_000)
+                .context("cannot recover interrupted trash operations")?;
             if recovered > 0 {
                 tracing::warn!(
                     share_id = share.id(),

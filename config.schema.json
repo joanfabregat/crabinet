@@ -207,6 +207,14 @@
         "session_secret_file": {
           "description": "File containing 32 to 4096 random bytes. Its contents are never printed.",
           "type": "string"
+        },
+        "trash_retention_days": {
+          "description": "Number of days before an item in Trash is eligible for permanent removal.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 30,
+          "maximum": 3650,
+          "minimum": 1
         }
       },
       "additionalProperties": false,

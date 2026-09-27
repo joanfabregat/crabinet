@@ -21,7 +21,7 @@ use axum::{
     extract::{DefaultBodyLimit, FromRequestParts, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
-    routing::{delete, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, sync::OwnedMutexGuard, time::timeout};
@@ -31,8 +31,8 @@ use crate::{
     browse::{AuthenticatedIdentity, SubjectGate, run_blocking},
     error::AppError,
     filesystem::{
-        AccessLevel, AuthorizedShare, EntryMetadata, EntryName, FsError, FsErrorCode,
-        OwnedAuthorizedShare, PendingWrite, ShareId, VirtualPath,
+        AccessLevel, AuthorizedShare, EntryKind, EntryMetadata, EntryName, FsError, FsErrorCode,
+        OwnedAuthorizedShare, PendingWrite, ShareId, TrashEntry, VirtualPath,
     },
 };
 
@@ -148,7 +148,7 @@ impl MutationState {
         self
     }
 
-    async fn commit_lock(&self, share_id: &ShareId) -> OwnedMutexGuard<()> {
+    pub async fn commit_lock(&self, share_id: &ShareId) -> OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self
                 .commit_locks
@@ -193,9 +193,21 @@ pub fn router(http_body_limit: usize) -> Router<AppState> {
         .route("/shares/{share_id}/move", post(move_entry))
         .route("/shares/{share_id}/entry", delete(delete_entry))
         .route(
+            "/shares/{share_id}/trash/{item_id}/restore",
+            post(restore_trash_item),
+        )
+        .route(
+            "/shares/{share_id}/trash/{item_id}",
+            delete(purge_trash_item),
+        )
+        .route(
             "/shares/{share_id}/uploads",
             post(upload_files).layer(DefaultBodyLimit::max(http_body_limit)),
         )
+}
+
+pub fn read_router() -> Router<AppState> {
+    Router::new().route("/shares/{share_id}/trash", get(list_trash_items))
 }
 
 #[derive(Deserialize)]
@@ -215,6 +227,12 @@ struct PathQuery {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreTrashBody {
+    destination: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct UploadQuery {
     path: Option<String>,
     #[serde(default)]
@@ -227,6 +245,49 @@ struct MutationResponse {
     share_id: String,
     path: String,
     outcome: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashedResponse {
+    share_id: String,
+    path: String,
+    outcome: &'static str,
+    trash_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashListResponse {
+    share_id: String,
+    items: Vec<TrashItemResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashItemResponse {
+    id: String,
+    original_path: String,
+    kind: &'static str,
+    deleted_at: String,
+    deleted_by: String,
+    expires_at: String,
+}
+
+impl From<TrashEntry> for TrashItemResponse {
+    fn from(entry: TrashEntry) -> Self {
+        Self {
+            id: entry.id,
+            original_path: entry.original_path.to_string(),
+            kind: match entry.kind {
+                EntryKind::Directory => "directory",
+                EntryKind::File => "file",
+            },
+            deleted_at: entry.deleted_at,
+            deleted_by: entry.deleted_by,
+            expires_at: entry.expires_at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -503,15 +564,152 @@ async fn delete_entry_inner(
     require_if_match(state, &share_id, &path, current, headers)?;
     let commit = state.mutations().commit_lock(&share_id).await;
     let target = path.clone();
+    let subject = identity.subject().to_owned();
+    let retention_days = state.trash_retention_days();
     let result = run_blocking(move || {
         let _commit = commit;
         authorized
             .view()
-            .delete_entry(&target, current)
+            .move_to_trash(&target, current, &subject, retention_days)
             .map_err(Rejection::from)
     })
     .await?;
-    finish_mutation(identity, &share_id, &path, "delete", result, StatusCode::OK)
+    let trashed = result?;
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation = "move_to_trash",
+        path = %path,
+        outcome = "success"
+    );
+    Ok(inert_json(
+        StatusCode::OK,
+        TrashedResponse {
+            share_id: share_id.to_string(),
+            path: path.to_string(),
+            outcome: "success",
+            trash_id: trashed.id,
+        },
+    ))
+}
+
+async fn list_trash_items(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    Path(raw_share_id): Path<String>,
+) -> Result<Response, AppError> {
+    let share_id = parse_share_id(&raw_share_id)?;
+    let authorized = state.browse().authorize_owned(&identity, &share_id)?;
+    let entries = run_blocking(move || authorized.view().list_trash(10_000)).await?;
+    let entries = entries.map_err(map_mutation_fs_error)?;
+    Ok(inert_json(
+        StatusCode::OK,
+        TrashListResponse {
+            share_id: share_id.to_string(),
+            items: entries.into_iter().map(TrashItemResponse::from).collect(),
+        },
+    ))
+}
+
+async fn restore_trash_item(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    _csrf: CsrfVerified,
+    Path((raw_share_id, item_id)): Path<(String, String)>,
+    Json(body): Json<RestoreTrashBody>,
+) -> Result<Response, AppError> {
+    let result = restore_trash_item_inner(&state, &identity, &raw_share_id, &item_id, body).await;
+    audited(&identity, &raw_share_id, "restore_trash", result)
+}
+
+async fn restore_trash_item_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    item_id: &str,
+    body: RestoreTrashBody,
+) -> MutationResult<Response> {
+    let share_id = parse_share_id(raw_share_id)?;
+    let authorized = state.browse().authorize_owned(identity, &share_id)?;
+    require_write_access(authorized.access())?;
+    let destination = body
+        .destination
+        .map(|raw| VirtualPath::parse(&raw))
+        .transpose()?;
+    if let Some(path) = &destination {
+        ensure_creatable(path)?;
+    }
+    let item_id = item_id.to_owned();
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let result = run_blocking(move || {
+        let _commit = commit;
+        authorized
+            .view()
+            .restore_trash(&item_id, destination.as_ref())
+            .map_err(Rejection::from)
+    })
+    .await?;
+    let restored = result?;
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation = "restore_trash",
+        path = %restored,
+        outcome = "success"
+    );
+    Ok(inert_json(
+        StatusCode::OK,
+        MutationResponse {
+            share_id: share_id.to_string(),
+            path: restored.to_string(),
+            outcome: "success",
+        },
+    ))
+}
+
+async fn purge_trash_item(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    _csrf: CsrfVerified,
+    Path((raw_share_id, item_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let result = purge_trash_item_inner(&state, &identity, &raw_share_id, &item_id).await;
+    audited(&identity, &raw_share_id, "purge_trash", result)
+}
+
+async fn purge_trash_item_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+    item_id: &str,
+) -> MutationResult<Response> {
+    let share_id = parse_share_id(raw_share_id)?;
+    let authorized = state.browse().authorize_owned(identity, &share_id)?;
+    require_write_access(authorized.access())?;
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let item_id = item_id.to_owned();
+    let result = run_blocking(move || {
+        let _commit = commit;
+        authorized
+            .view()
+            .purge_trash(&item_id, 1_000)
+            .map_err(Rejection::from)
+    })
+    .await?;
+    result?;
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation = "purge_trash",
+        outcome = "success"
+    );
+    Ok(inert_json(
+        StatusCode::ACCEPTED,
+        serde_json::json!({"outcome": "accepted"}),
+    ))
 }
 
 async fn upload_files(
@@ -1142,6 +1340,14 @@ mod tests {
                 .header(header::IF_MATCH, "W/\"attacker\"")
                 .body(Body::empty())
                 .unwrap(),
+            json_request(
+                "POST",
+                "/api/v1/shares/documents/trash/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/restore",
+                json!({}),
+            ),
+            Request::delete("/api/v1/shares/documents/trash/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .body(Body::empty())
+                .unwrap(),
             Request::post("/api/v1/shares/documents/uploads")
                 .header(
                     header::CONTENT_TYPE,
@@ -1270,7 +1476,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn move_and_delete_require_current_validators_and_never_recurse() {
+    async fn move_and_trash_require_current_validators_and_allow_nonempty_folders() {
         let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
         let etag = metadata_etag(&fixture, "existing.txt").await;
         let moved = send(
@@ -1314,8 +1520,105 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(fixture.root.path().join("nonempty/child.txt").exists());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!fixture.root.path().join("nonempty").exists());
+        let listing = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            Request::get("/api/v1/shares/documents/trash")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listing.status(), StatusCode::OK);
+        let body = to_bytes(listing.into_body(), 65_536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["items"][0]["originalPath"], "nonempty");
+        assert_eq!(value["items"][0]["kind"], "directory");
+    }
+
+    #[tokio::test]
+    async fn trash_restore_preserves_conflicting_destination_and_purge_requires_csrf() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+        let deleted = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::delete("/api/v1/shares/documents/entry?path=existing.txt")
+                .header(header::IF_MATCH, etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let body = to_bytes(deleted.into_body(), 65_536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let trash_id = value["trashId"].as_str().unwrap();
+        assert!(!fixture.root.path().join("existing.txt").exists());
+
+        fs::write(fixture.root.path().join("existing.txt"), b"new").unwrap();
+        let restore_url = format!("/api/v1/shares/documents/trash/{trash_id}/restore");
+        let conflict = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            json_request("POST", &restore_url, json!({})),
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            fs::read(fixture.root.path().join("existing.txt")).unwrap(),
+            b"new"
+        );
+
+        let restored = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            json_request("POST", &restore_url, json!({"destination":"restored.txt"})),
+        )
+        .await;
+        assert_eq!(restored.status(), StatusCode::OK);
+        assert_eq!(
+            fs::read(fixture.root.path().join("restored.txt")).unwrap(),
+            b"original"
+        );
+
+        let etag = metadata_etag(&fixture, "restored.txt").await;
+        let deleted = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::delete("/api/v1/shares/documents/entry?path=restored.txt")
+                .header(header::IF_MATCH, etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let body = to_bytes(deleted.into_body(), 65_536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let purge_url = format!(
+            "/api/v1/shares/documents/trash/{}",
+            value["trashId"].as_str().unwrap()
+        );
+        let rejected = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            Request::delete(&purge_url).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        let purged = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::delete(&purge_url).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(purged.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]

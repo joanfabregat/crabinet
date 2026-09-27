@@ -21,7 +21,7 @@ Each component is UTF-8 and NFC-normalized, at most 255 bytes, and excludes:
 
 The complete virtual path is at most 4096 bytes. Existing non-UTF-8 or non-NFC directory entries are omitted from listings and rejected by direct operations rather than lossily renamed or displayed. These restrictions intentionally trade access to a small set of legitimate host filenames for consistent security semantics across proxies, URL decoders, browsers, Linux, macOS, and Windows clients.
 
-`.crabinet`, legacy `.index-staging`, and `.index-tmp-<128-bit hex>` names are reserved for internal use and cannot be expressed as virtual components. The match ignores ASCII case, so case-insensitive filesystems cannot alias them. The `.index-del-<128-bit hex>` namespace is private to staging. Listings and quota measurement omit the entire `.crabinet` tree and the legacy staging entry.
+`.crabinet`, legacy `.index-staging`, and `.index-tmp-<128-bit hex>` names are reserved for internal use and cannot be expressed as virtual components. The match ignores ASCII case, so case-insensitive filesystems cannot alias them. The `.index-del-<128-bit hex>` namespace is private to staging. Ordinary listings omit the entire `.crabinet` tree and the legacy staging entry. Quota measurement counts published Trash payloads separately while omitting temporary staging files.
 
 ## Authorization contract
 

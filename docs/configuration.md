@@ -28,6 +28,8 @@ Paths under `server` may be relative to the directory containing the configurati
 
 Sizes use a positive integer and one binary unit: `B`, `KiB`, `MiB`, or `GiB`. The preview limit cannot exceed the upload limit.
 
+`server.trash_retention_days` defaults to 30 and accepts 1–3650 days. Expired items are eligible for bounded background cleanup at startup and about once daily. Trash is shared within each writable share; its content counts toward that share's quota.
+
 Usernames and share IDs are case-sensitive, stable identifiers containing 1–64 ASCII letters, digits, dots, underscores, or hyphens. A share's required `name` is a separate user-facing label of 1–128 characters; changing it does not change URLs or identity. Display names cannot contain control characters or leading/trailing whitespace. Duplicate identifiers, duplicate grants, and grants naming an absent user are rejected. A user absent from a share's grants has no access. Permissions are `read` and `write`; `read_only = true` on a share always reduces write grants to read access. Crabinet creates private mode-`0700` `.crabinet` and `.crabinet/staging` directories at the root of every share with an effective write grant. `.crabinet` and the legacy `.index-staging` name are reserved and hidden from the file API; `staging` remains an ordinary name elsewhere. A writable share refuses startup while `.index-staging` exists. Read-only shares create no staging state.
 
 See [`config.example.toml`](../config.example.toml) for an annotated configuration and run `crabinet print-config-schema` for a machine-readable schema.

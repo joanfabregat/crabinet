@@ -29,6 +29,7 @@ pub struct AppState {
     auth: Option<auth::AuthService>,
     oidc: Option<oidc::OidcService>,
     mutations: Arc<mutations::MutationState>,
+    trash_retention_days: u16,
 }
 
 impl AppState {
@@ -40,6 +41,7 @@ impl AppState {
             auth: None,
             oidc: None,
             mutations: Arc::new(mutations::MutationState::default()),
+            trash_retention_days: 30,
         }
     }
 
@@ -100,6 +102,17 @@ impl AppState {
         &self.mutations
     }
 
+    #[must_use]
+    pub fn with_trash_retention_days(mut self, days: u16) -> Self {
+        self.trash_retention_days = days;
+        self
+    }
+
+    #[must_use]
+    pub const fn trash_retention_days(&self) -> u16 {
+        self.trash_retention_days
+    }
+
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Release);
     }
@@ -139,7 +152,9 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Health>, error::App
 }
 
 pub fn router(state: AppState) -> Router {
-    let reads = browse::router().merge(preview::router());
+    let reads = browse::router()
+        .merge(preview::router())
+        .merge(mutations::read_router());
     let writes = mutations::router(state.mutations().http_body_limit());
     let (reads, writes) = if state.auth().is_some() {
         (

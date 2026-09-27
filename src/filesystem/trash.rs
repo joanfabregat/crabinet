@@ -100,7 +100,8 @@ fn gc_batch(trash: &Dir, cookie: &mut u64, max_entries: usize) -> FsResult<Vec<S
         rustix::fs::Mode::empty(),
     )
     .map_err(|error| map_io(error.into()))?;
-    if *cookie != 0 && rustix::fs::seek(&descriptor, rustix::fs::SeekFrom::Start(*cookie)).is_err() {
+    if *cookie != 0 && rustix::fs::seek(&descriptor, rustix::fs::SeekFrom::Start(*cookie)).is_err()
+    {
         *cookie = 0;
     }
     let mut buffer = [MaybeUninit::uninit(); 4096];
