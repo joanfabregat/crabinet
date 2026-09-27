@@ -1,8 +1,7 @@
 **
 !Containerfile
-!LICENSE-CCADB
-!LICENSE-Apache-2.0
-!LICENSE-MPL-2.0
+!LICENSE
+!THIRD_PARTY_LICENSES.md
 !release/
 !release/crabinet-linux-amd64/
 !release/crabinet-linux-amd64/crabinet
