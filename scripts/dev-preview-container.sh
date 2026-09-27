@@ -141,14 +141,14 @@ oidc_enabled = true
 issuer = "https://accounts.google.com"
 client_id = "$(cat "$oidc_dir/client-id")"
 client_secret_file = "$oidc_dir/client-secret"
-redirect_uri = "https://files-dev.jf.ffwip.com/api/v1/auth/oidc/callback"
+redirect_uri = "https://files-dev.jbox.ffwip.com/api/v1/auth/oidc/callback"
 EOF
 fi
 
 cat >> "$state_dir/config.toml" <<'EOF'
 
 [auth.passkeys]
-origin = "https://files-dev.jf.ffwip.com"
+origin = "https://files-dev.jbox.ffwip.com"
 EOF
 
 printf 'Preview password for reader and writer (this run only): %s\n' "$preview_password" >&2
@@ -160,7 +160,7 @@ backend_pid=$!
 running_binary=$(stat -c '%Y %s' "$binary")
 
 export CRABINET_DEV_BACKEND_URL=http://127.0.0.1:8080
-export CRABINET_DEV_PUBLIC_HOST=files-dev.jf.ffwip.com
+export CRABINET_DEV_PUBLIC_HOST=files-dev.jbox.ffwip.com
 export CRABINET_DEV_GIT_DIR=/workspace/.git
 export CRABINET_VITE_CACHE_DIR=/tmp/vite-cache
 cd "$repo_root/web"
