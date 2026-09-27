@@ -1,3 +1,4 @@
+import type { ThemePreference } from "./theme";
 import { isValidPathComponent, isValidVirtualPath } from "./virtual-path";
 import type {
   AuthenticationResponseJSON,
@@ -25,6 +26,8 @@ export interface Session {
   user: User;
   shares: Share[];
   defaultFolder?: DefaultFolder | null;
+  /** Display settings saved on the server, so they follow the account. */
+  preferences: UserPreferences;
   /** An opaque CSRF value held in memory only. This is not the session ID. */
   csrfToken: string;
   /** The running server release, e.g. "0.3.0". */
@@ -35,6 +38,16 @@ export interface DefaultFolder {
   shareId: string;
   path: string;
 }
+
+export interface UserPreferences {
+  showHiddenFiles: boolean;
+  theme: ThemePreference;
+}
+
+export const defaultUserPreferences: UserPreferences = {
+  showHiddenFiles: true,
+  theme: "system",
+};
 
 export interface LoginCredentials {
   username: string;
@@ -224,6 +237,11 @@ export interface ApiClient {
     folder: DefaultFolder | null,
     csrfToken: string,
   ): Promise<DefaultFolder | null>;
+  /** Saves only the given settings and returns every saved display setting. */
+  updatePreferences(
+    update: Partial<UserPreferences>,
+    csrfToken: string,
+  ): Promise<UserPreferences>;
   directory(
     shareId: string,
     path: string,
@@ -491,6 +509,18 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         throw invalidResponse();
       }
       return result.defaultFolder as DefaultFolder | null;
+    },
+    updatePreferences: async (update, csrfToken) => {
+      const result = await request<unknown>("/api/v1/preferences/display", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify(update),
+      });
+      if (!isUserPreferences(result)) throw invalidResponse();
+      return { showHiddenFiles: result.showHiddenFiles, theme: result.theme };
     },
     directory: async (shareId, path, cursor, signal, showHidden = true) => {
       if (!isValidVirtualPath(path)) {
@@ -918,12 +948,17 @@ function parseSession(value: unknown): Session {
     (value.version !== undefined && typeof value.version !== "string") ||
     !Array.isArray(value.shares) ||
     !value.shares.every(isShare) ||
-    !isOptionalDefaultFolder(value.defaultFolder)
+    !isOptionalDefaultFolder(value.defaultFolder) ||
+    !isUserPreferences(value.preferences)
   ) {
     throw invalidResponse();
   }
   const { pictureUrl, ...user } = value.user as unknown as User;
   const session = { ...value, user } as unknown as Session;
+  session.preferences = {
+    showHiddenFiles: value.preferences.showHiddenFiles,
+    theme: value.preferences.theme,
+  };
   // Only avatar hosts allowed by the page CSP are rendered; anything else
   // falls back to no picture rather than attempting a blocked request.
   if (pictureUrl !== undefined && isAllowedPictureUrl(pictureUrl)) {
@@ -1090,6 +1125,16 @@ export async function withCsrfRetry<T>(
     onSessionRefreshed(refreshed);
     return await mutate(refreshed.csrfToken);
   }
+}
+
+function isUserPreferences(value: unknown): value is UserPreferences {
+  return (
+    isRecord(value) &&
+    typeof value.showHiddenFiles === "boolean" &&
+    (value.theme === "system" ||
+      value.theme === "light" ||
+      value.theme === "dark")
+  );
 }
 
 function isOptionalDefaultFolder(value: unknown): boolean {

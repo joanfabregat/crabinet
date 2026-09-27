@@ -20,7 +20,7 @@ Crabinet is a security-focused, low-memory file browser for a small server or Po
 - A lazy share/folder tree, touch-friendly folder picker, file-type icons, copyable virtual paths, folder-first browsing, metadata, conditional and ranged downloads, create/rename/move/delete operations, UTF-8 text editing, and streaming multipart uploads.
 - Bounded syntax-highlighted code and text previews, safe Markdown rendering without raw HTML, signature-validated raster image previews, and rendered/source HTML tabs with isolated new-tab views. Rendered HTML is protected by a deny-by-default response CSP and, in-panel, an additional empty iframe sandbox, so uploaded scripts, forms, navigation, and network requests cannot run.
 - Event-driven refreshes for the open directory through a bounded authenticated server-sent-events stream backed by a non-recursive kernel watch; Crabinet does not scan the share to detect changes.
-- Opaque server-side sessions and per-user start-folder preferences in SQLite, session-bound CSRF protection, same-origin enforcement, bounded login attempts, and `Secure; HttpOnly; SameSite=Strict` cookies.
+- Opaque server-side sessions and per-user start-folder and display preferences in SQLite, session-bound CSRF protection, same-origin enforcement, bounded login attempts, and `Secure; HttpOnly; SameSite=Strict` cookies.
 - A single statically linked Linux binary for `amd64` and `arm64`, plus a `scratch`-based non-root OCI image published to GHCR.
 - CI-enforced Rust and frontend tests, dependency policy, Semgrep, Trivy, weekly scans, SBOMs, checksums, and build-provenance attestations.
 
@@ -30,7 +30,7 @@ Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem l
 
 The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores runtime sessions and each user's chosen start folder. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
 
-Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files preference is also in Settings and remains local to each browser.
+Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files and Appearance settings in Settings follow the account across devices as well.
 
 Account pictures use an accepted Google profile image when available or, when an operator enables `auth.gravatar_enabled`, a Gravatar image keyed by the configured email address. These are browser requests to external hosts; see [authentication and account pictures](docs/authentication.md#account-pictures).
 
@@ -176,7 +176,7 @@ Do not publish the backend port beyond the proxy. Apply conservative request-bod
 Back up these as separate classes with restrictive permissions:
 
 - `config.toml`, the session-secret file, and deployment metadata;
-- the SQLite file, which holds sessions, start-folder preferences, and passkeys, plus its `-wal`/`-shm` companions when present;
+- the SQLite file, which holds sessions, per-user preferences, and passkeys, plus its `-wal`/`-shm` companions when present;
 - every share directory, preserving ownership, modes, timestamps, and extended attributes relevant to your workload.
 
 For a simple consistent backup, stop the Crabinet container, snapshot/copy SQLite and writable shares, then restart. A live filesystem copy is not transactionally consistent with concurrent file mutations; use a storage-level snapshot that covers all writable shares and state together, or accept that they represent different instants. Read-only shares may be copied live according to the underlying application's rules.

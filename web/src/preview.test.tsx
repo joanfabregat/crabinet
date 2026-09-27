@@ -20,6 +20,7 @@ import type { BrowserNavigation, BrowserRoute } from "./navigation";
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
   shares: [{ id: "docs", name: "Documents", access: "read" }],
+  preferences: { showHiddenFiles: true, theme: "system" },
   csrfToken: "memory-only-csrf",
 };
 
@@ -94,6 +95,9 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     removePasskey: overrides.removePasskey ?? vi.fn(),
     updateDefaultFolder:
       overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
+    updatePreferences:
+      overrides.updatePreferences ??
+      vi.fn(async (update) => ({ ...session.preferences, ...update })),
     directory: overrides.directory ?? vi.fn(async () => files),
     preview:
       overrides.preview ?? vi.fn(async () => previewDocument("plain text")),

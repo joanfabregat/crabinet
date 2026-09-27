@@ -4,10 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   applyThemePreference,
+  readLegacyThemePreference,
   readThemePreference,
   saveThemePreference,
   subscribeThemePreference,
   themePreferenceKey,
+  themeSyncedKey,
 } from "./theme";
 
 describe("theme preference", () => {
@@ -55,6 +57,17 @@ describe("theme preference", () => {
     );
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith("dark");
+    applyThemePreference("system");
+  });
+
+  it("reports only a pinned copy that predates account settings as legacy", () => {
+    expect(readLegacyThemePreference()).toBeNull();
+    window.localStorage.setItem(themePreferenceKey, "light");
+    expect(readLegacyThemePreference()).toBe("light");
+
+    saveThemePreference("dark");
+    expect(window.localStorage.getItem(themeSyncedKey)).toBe("1");
+    expect(readLegacyThemePreference()).toBeNull();
     applyThemePreference("system");
   });
 });

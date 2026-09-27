@@ -502,9 +502,18 @@ test("night mode follows the system, can be pinned, and passes axe", async ({
   await page.getByRole("button", { name: "Settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Settings" });
   expect(await seriousViolations("iframe")).toEqual([]);
+  const savedAppearance = (theme: string) =>
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/preferences/display") &&
+        response.request().postDataJSON()?.theme === theme &&
+        response.ok(),
+    );
+  const savedLight = savedAppearance("light");
   await dialog.getByLabel("Appearance").selectOption("light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   expect(await pageBackground()).toContain("rgb(242, 244, 239)");
+  await savedLight;
 
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
@@ -513,6 +522,14 @@ test("night mode follows the system, can be pinned, and passes axe", async ({
     "border-top-color",
     "rgb(174, 184, 176)",
   );
+
+  // The choice is saved to the account, so later tests signing in as the
+  // same user would inherit it; restore the default.
+  await page.getByRole("button", { name: "Settings" }).click();
+  const savedSystem = savedAppearance("system");
+  await dialog.getByLabel("Appearance").selectOption("system");
+  await savedSystem;
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
 });
 
 test("connection failure can recover and an expired session returns to login", async ({

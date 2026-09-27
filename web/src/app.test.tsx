@@ -5,13 +5,15 @@ import {
   waitFor,
   within,
 } from "@testing-library/preact";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   ApiError,
   type ApiClient,
   type DirectoryPage,
   type Session,
+  type UserPreferences,
+  defaultUserPreferences,
 } from "./api";
 import { App } from "./app";
 import type { BrowserNavigation, BrowserRoute } from "./navigation";
@@ -22,6 +24,7 @@ const session: Session = {
     { id: "read-only", name: "Reference", access: "read" },
     { id: "work", name: "Working files", access: "read-write" },
   ],
+  preferences: { showHiddenFiles: true, theme: "system" },
   csrfToken: "csrf-in-memory",
 };
 
@@ -88,6 +91,9 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     removePasskey: overrides.removePasskey ?? vi.fn(),
     updateDefaultFolder:
       overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
+    updatePreferences:
+      overrides.updatePreferences ??
+      vi.fn(async (update) => ({ ...session.preferences, ...update })),
     directory: overrides.directory ?? vi.fn(async () => emptyPage),
     preview:
       overrides.preview ??
@@ -169,6 +175,32 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         ],
       })),
   };
+}
+
+interface FakeAccount {
+  saved: UserPreferences;
+  api: Pick<ApiClient, "session"> & {
+    updatePreferences: Mock<ApiClient["updatePreferences"]>;
+  };
+}
+
+/** A fake account whose display settings persist across sessions. */
+function accountPreferences(
+  initial: Partial<UserPreferences> = {},
+): FakeAccount {
+  const account: FakeAccount = {
+    saved: { ...defaultUserPreferences, ...initial },
+    api: {
+      session: vi.fn(async () => ({ ...session, preferences: account.saved })),
+      updatePreferences: vi.fn<ApiClient["updatePreferences"]>(
+        async (update) => {
+          account.saved = { ...account.saved, ...update };
+          return account.saved;
+        },
+      ),
+    },
+  };
+  return account;
 }
 
 describe("authentication", () => {
@@ -492,7 +524,7 @@ describe("directory browser", () => {
     ).toBeDisabled();
   });
 
-  it("places a per-user hidden-file toggle in Settings and persists it", async () => {
+  it("loads the hidden-file toggle from the account and saves it there", async () => {
     const entries = [
       { name: ".private", kind: "directory" as const },
       { name: "public", kind: "directory" as const },
@@ -511,7 +543,8 @@ describe("directory browser", () => {
             : [],
       }),
     );
-    const api = fakeApi({ directory });
+    const account = accountPreferences();
+    const api = fakeApi({ ...account.api, directory });
     const navigation = new MemoryNavigation();
     const first = render(<App api={api} navigation={navigation} />);
 
@@ -521,6 +554,11 @@ describe("directory browser", () => {
       name: "Show hidden files",
     });
     expect(toggle).toBeChecked();
+    expect(
+      within(dialog).getAllByText(
+        "This setting follows your account across devices.",
+      ),
+    ).toHaveLength(2);
     expect(
       await screen.findByRole("link", { name: ".secret.txt" }),
     ).toBeVisible();
@@ -543,8 +581,18 @@ describe("directory browser", () => {
       expect.any(AbortSignal),
       false,
     );
+    expect(account.api.updatePreferences).toHaveBeenCalledWith(
+      { showHiddenFiles: false },
+      "csrf-in-memory",
+    );
+    await waitFor(() =>
+      expect(account.saved).toEqual({
+        showHiddenFiles: false,
+        theme: "system",
+      }),
+    );
     expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
-      "false",
+      null,
     );
 
     first.unmount();
@@ -558,6 +606,7 @@ describe("directory browser", () => {
     ).not.toBeChecked();
     await screen.findByRole("link", { name: "notes.txt" });
     expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull();
+    expect(account.api.updatePreferences).toHaveBeenCalledTimes(1);
   });
 
   it("shows the server version in a footer only once signed in", async () => {
@@ -588,33 +637,275 @@ describe("directory browser", () => {
     );
   });
 
-  it("places a browser-wide appearance choice in Settings and applies it", async () => {
+  it("reverts the hidden-file toggle and explains when saving fails", async () => {
+    let rejectSave: (error: unknown) => void = () => undefined;
+    const updatePreferences = vi.fn<ApiClient["updatePreferences"]>(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    render(
+      <App
+        api={fakeApi({ updatePreferences })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const toggle = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("checkbox", { name: "Show hidden files" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(updatePreferences).toHaveBeenCalledWith(
+      { showHiddenFiles: false },
+      "csrf-in-memory",
+    );
+
+    rejectSave(new ApiError("server", "unavailable", { status: 503 }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not save your hidden files choice. Try again.",
+    );
+    expect(toggle).toBeChecked();
+  });
+
+  it("applies the account's appearance and saves changes there", async () => {
+    const account = accountPreferences({ theme: "dark" });
     const first = render(
-      <App api={fakeApi()} navigation={new MemoryNavigation()} />,
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     const appearance = within(
       screen.getByRole("dialog", { name: "Settings" }),
     ).getByRole("combobox", { name: "Appearance" });
-    expect(appearance).toHaveValue("system");
-    expect(document.documentElement).not.toHaveAttribute("data-theme");
-
-    fireEvent.change(appearance, { target: { value: "dark" } });
+    expect(appearance).toHaveValue("dark");
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    // The browser-wide copy keeps the sign-in page and first paint in step.
     expect(window.localStorage.getItem("crabinet.theme")).toBe("dark");
+    expect(account.api.updatePreferences).not.toHaveBeenCalled();
+
+    fireEvent.change(appearance, { target: { value: "light" } });
+    await waitFor(() =>
+      expect(document.documentElement).toHaveAttribute("data-theme", "light"),
+    );
+    expect(window.localStorage.getItem("crabinet.theme")).toBe("light");
+    expect(account.api.updatePreferences).toHaveBeenCalledWith(
+      { theme: "light" },
+      "csrf-in-memory",
+    );
+    await waitFor(() => expect(account.saved.theme).toBe("light"));
+
+    // Another tab saved a different choice and updated the shared copy.
+    window.localStorage.setItem("crabinet.theme", "dark");
+    window.dispatchEvent(
+      new StorageEvent("storage", { key: "crabinet.theme" }),
+    );
+    await waitFor(() => expect(appearance).toHaveValue("dark"));
+    await waitFor(() =>
+      expect(document.documentElement).toHaveAttribute("data-theme", "dark"),
+    );
+    expect(account.api.updatePreferences).toHaveBeenCalledTimes(1);
 
     first.unmount();
-    render(<App api={fakeApi()} navigation={new MemoryNavigation()} />);
+    window.localStorage.clear();
+    render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     const reopened = within(
       screen.getByRole("dialog", { name: "Settings" }),
     ).getByRole("combobox", { name: "Appearance" });
-    expect(reopened).toHaveValue("dark");
+    expect(reopened).toHaveValue("light");
+    await waitFor(() =>
+      expect(document.documentElement).toHaveAttribute("data-theme", "light"),
+    );
 
     fireEvent.change(reopened, { target: { value: "system" } });
-    expect(document.documentElement).not.toHaveAttribute("data-theme");
+    await waitFor(() =>
+      expect(document.documentElement).not.toHaveAttribute("data-theme"),
+    );
     expect(window.localStorage.getItem("crabinet.theme")).toBeNull();
+    await waitFor(() => expect(account.saved.theme).toBe("system"));
+  });
+
+  it("reverts the appearance and explains when saving fails", async () => {
+    const updatePreferences = vi.fn<ApiClient["updatePreferences"]>(
+      async () => {
+        throw new ApiError("network", "offline");
+      },
+    );
+    render(
+      <App
+        api={fakeApi({ updatePreferences })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const appearance = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("combobox", { name: "Appearance" });
+    fireEvent.change(appearance, { target: { value: "dark" } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not save your appearance choice. Try again.",
+    );
+    expect(appearance).toHaveValue("system");
+    await waitFor(() =>
+      expect(document.documentElement).not.toHaveAttribute("data-theme"),
+    );
+    expect(window.localStorage.getItem("crabinet.theme")).toBeNull();
+  });
+
+  it("carries a browser-only hidden-files choice over to the account once", async () => {
+    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "false");
+    const account = accountPreferences();
+    const first = render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
+
+    await waitFor(() =>
+      expect(account.api.updatePreferences).toHaveBeenCalledWith(
+        { showHiddenFiles: false },
+        "csrf-in-memory",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        window.localStorage.getItem("crabinet.showHiddenFiles.u-1"),
+      ).toBeNull(),
+    );
+    expect(account.saved.showHiddenFiles).toBe(false);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(
+      within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
+        "checkbox",
+        { name: "Show hidden files" },
+      ),
+    ).not.toBeChecked();
+
+    first.unmount();
+    render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
+    await screen.findByRole("button", { name: "Settings" });
+    expect(account.api.updatePreferences).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps browser-only choices for a later visit when carrying them over fails", async () => {
+    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "false");
+    window.localStorage.setItem("crabinet.theme", "dark");
+    const updatePreferences = vi.fn<ApiClient["updatePreferences"]>(
+      async () => {
+        throw new ApiError("network", "offline");
+      },
+    );
+    render(
+      <App
+        api={fakeApi({ updatePreferences })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(updatePreferences).toHaveBeenCalledWith(
+        { showHiddenFiles: false, theme: "dark" },
+        "csrf-in-memory",
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(
+      within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
+        "checkbox",
+        { name: "Show hidden files" },
+      ),
+    ).not.toBeChecked();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
+      "false",
+    );
+    expect(
+      within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
+        "combobox",
+        { name: "Appearance" },
+      ),
+    ).toHaveValue("dark");
+    await waitFor(() =>
+      expect(document.documentElement).toHaveAttribute("data-theme", "dark"),
+    );
+    expect(window.localStorage.getItem("crabinet.theme")).toBe("dark");
+    expect(window.localStorage.getItem("crabinet.theme.synced")).toBeNull();
+  });
+
+  it("drops a browser-only hidden-files choice that the account already covers", async () => {
+    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "true");
+    const account = accountPreferences();
+    render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
+
+    await screen.findByRole("button", { name: "Settings" });
+    await waitFor(() =>
+      expect(
+        window.localStorage.getItem("crabinet.showHiddenFiles.u-1"),
+      ).toBeNull(),
+    );
+    expect(account.api.updatePreferences).not.toHaveBeenCalled();
+  });
+
+  it("carries a browser-only theme over to the account once", async () => {
+    window.localStorage.setItem("crabinet.theme", "dark");
+    const account = accountPreferences();
+    const first = render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
+
+    await waitFor(() =>
+      expect(account.api.updatePreferences).toHaveBeenCalledWith(
+        { theme: "dark" },
+        "csrf-in-memory",
+      ),
+    );
+    await waitFor(() => expect(account.saved.theme).toBe("dark"));
+    await waitFor(() =>
+      expect(window.localStorage.getItem("crabinet.theme.synced")).toBe("1"),
+    );
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(window.localStorage.getItem("crabinet.theme")).toBe("dark");
+
+    // The account later chose to match the system on another device; the
+    // copy in this browser now mirrors the account and is not pushed again.
+    first.unmount();
+    account.saved = { ...account.saved, theme: "system" };
+    render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
+    await screen.findByRole("button", { name: "Settings" });
+    await waitFor(() =>
+      expect(document.documentElement).not.toHaveAttribute("data-theme"),
+    );
+    expect(window.localStorage.getItem("crabinet.theme")).toBeNull();
+    expect(account.api.updatePreferences).toHaveBeenCalledTimes(1);
+  });
+
+  it("never carries a theme synced from one account into another", async () => {
+    window.localStorage.setItem("crabinet.theme", "dark");
+    window.localStorage.setItem("crabinet.theme.synced", "1");
+    const account = accountPreferences();
+    render(
+      <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
+    );
+
+    await screen.findByRole("button", { name: "Settings" });
+    await waitFor(() =>
+      expect(document.documentElement).not.toHaveAttribute("data-theme"),
+    );
+    await waitFor(() =>
+      expect(window.localStorage.getItem("crabinet.theme")).toBeNull(),
+    );
+    expect(account.api.updatePreferences).not.toHaveBeenCalled();
   });
 
   it("places create and upload actions beside Copy path outside the sidebar", async () => {

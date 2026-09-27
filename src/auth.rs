@@ -43,7 +43,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SESSION_COOKIE: &str = "__Host-crabinet_session";
 const TOKEN_BYTES: usize = 32;
-const SESSION_SCHEMA_VERSION: i64 = 4;
+const SESSION_SCHEMA_VERSION: i64 = 5;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
@@ -262,6 +262,7 @@ struct SessionResponse {
     user: SessionUser,
     shares: Vec<EffectiveShare>,
     default_folder: Option<DefaultFolder>,
+    preferences: DisplayPreferences,
     csrf_token: String,
     /// The running server release, shown to signed-in users only.
     version: &'static str,
@@ -284,6 +285,69 @@ struct PreferencesUpdate {
 #[serde(rename_all = "camelCase")]
 struct PreferencesResponse {
     default_folder: Option<DefaultFolder>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    fn from_column(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
+
+/// Per-account display settings that follow the user across devices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayPreferences {
+    show_hidden_files: bool,
+    theme: ThemePreference,
+}
+
+impl Default for DisplayPreferences {
+    fn default() -> Self {
+        Self {
+            show_hidden_files: true,
+            theme: ThemePreference::System,
+        }
+    }
+}
+
+/// A partial update: absent fields keep their saved value, `null` is rejected.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DisplayPreferencesUpdate {
+    #[serde(default, deserialize_with = "present_value")]
+    show_hidden_files: Option<bool>,
+    #[serde(default, deserialize_with = "present_value")]
+    theme: Option<ThemePreference>,
+}
+
+fn present_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize)]
@@ -676,6 +740,7 @@ impl AuthService {
         let default_folder = self.inner.store.default_folder(username).await?;
         let default_folder =
             default_folder.filter(|folder| self.valid_default_folder(browse, username, folder));
+        let preferences = self.inner.store.display_preferences(username).await?;
         let picture_url = picture_url.or_else(|| {
             self.inner
                 .users
@@ -693,6 +758,7 @@ impl AuthService {
             },
             shares: self.effective_shares(username),
             default_folder,
+            preferences,
             csrf_token,
             version: env!("CARGO_PKG_VERSION"),
         })
@@ -723,6 +789,40 @@ impl AuthService {
                 .metadata(&path)
                 .is_ok_and(|metadata| metadata.kind == EntryKind::Directory)
     }
+}
+
+fn read_display_preferences(
+    connection: &Connection,
+    username: &str,
+) -> Result<DisplayPreferences, rusqlite::Error> {
+    let saved = connection
+        .query_row(
+            "SELECT show_hidden_files, theme FROM user_preferences WHERE username = ?1",
+            params![username],
+            |row| {
+                let theme: String = row.get(1)?;
+                Ok(DisplayPreferences {
+                    show_hidden_files: row.get(0)?,
+                    theme: ThemePreference::from_column(&theme).unwrap_or_default(),
+                })
+            },
+        )
+        .optional()?;
+    Ok(saved.unwrap_or_default())
+}
+
+/// Drops a row that no longer differs from the defaults of a new account.
+fn delete_default_preferences(
+    connection: &Connection,
+    username: &str,
+) -> Result<(), rusqlite::Error> {
+    connection.execute(
+        "DELETE FROM user_preferences
+         WHERE username = ?1 AND default_share_id = '' AND show_hidden_files = 1
+           AND theme = 'system'",
+        params![username],
+    )?;
+    Ok(())
 }
 
 fn create_database_if_missing(path: &std::path::Path) -> Result<(), std::io::Error> {
@@ -821,6 +921,20 @@ impl SessionStore {
                  COMMIT;",
             )?;
         }
+        if version < 5 {
+            // Rows now also exist for users without a start folder; such rows
+            // store an empty `default_share_id`, which is never a valid share.
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE user_preferences
+                   ADD COLUMN show_hidden_files INTEGER NOT NULL DEFAULT 1;
+                 ALTER TABLE user_preferences
+                   ADD COLUMN theme TEXT NOT NULL DEFAULT 'system'
+                   CHECK (theme IN ('system', 'light', 'dark'));
+                 PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -864,7 +978,8 @@ impl SessionStore {
         self.with_connection(move |connection| {
             connection
                 .query_row(
-                    "SELECT default_share_id, default_path FROM user_preferences WHERE username = ?1",
+                    "SELECT default_share_id, default_path FROM user_preferences
+                     WHERE username = ?1 AND default_share_id <> ''",
                     params![username],
                     |row| {
                         Ok(DefaultFolder {
@@ -895,12 +1010,54 @@ impl SessionStore {
                     params![username, folder.share_id, folder.path],
                 )?;
             } else {
-                connection.execute(
-                    "DELETE FROM user_preferences WHERE username = ?1",
+                // Clearing the start folder keeps the account's other settings.
+                let transaction = connection.transaction()?;
+                transaction.execute(
+                    "UPDATE user_preferences SET default_share_id = '', default_path = ''
+                     WHERE username = ?1",
                     params![username],
                 )?;
+                delete_default_preferences(&transaction, &username)?;
+                transaction.commit()?;
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn display_preferences(&self, username: &str) -> Result<DisplayPreferences, AuthError> {
+        let username = username.to_owned();
+        self.with_connection(move |connection| read_display_preferences(connection, &username))
+            .await
+    }
+
+    /// Applies a partial update without touching the start folder or any
+    /// field the update leaves out, and returns the saved settings.
+    async fn update_display_preferences(
+        &self,
+        username: &str,
+        update: DisplayPreferencesUpdate,
+    ) -> Result<DisplayPreferences, AuthError> {
+        let username = username.to_owned();
+        self.with_connection(move |connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "INSERT INTO user_preferences
+                   (username, default_share_id, default_path, show_hidden_files, theme)
+                 VALUES (?1, '', '', COALESCE(?2, 1), COALESCE(?3, 'system'))
+                 ON CONFLICT(username) DO UPDATE SET
+                   show_hidden_files = COALESCE(?2, show_hidden_files),
+                   theme = COALESCE(?3, theme)",
+                params![
+                    username,
+                    update.show_hidden_files,
+                    update.theme.map(ThemePreference::as_str)
+                ],
+            )?;
+            let saved = read_display_preferences(&transaction, &username)?;
+            delete_default_preferences(&transaction, &username)?;
+            transaction.commit()?;
+            Ok(saved)
         })
         .await
     }
@@ -1069,6 +1226,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/session", get(current_session))
         .route("/preferences", put(update_preferences))
+        .route("/preferences/display", put(update_display_preferences))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
         .merge(passkeys::router())
@@ -1151,6 +1309,28 @@ async fn update_preferences(
         default_folder: payload.default_folder,
     })
     .into_response();
+    no_store(response.headers_mut());
+    Ok(response)
+}
+
+async fn update_display_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<DisplayPreferencesUpdate>, JsonRejection>,
+) -> Result<Response, AppError> {
+    validate_same_origin(&headers)?;
+    let auth = state.auth().ok_or(AppError::Internal)?;
+    let session = auth.authenticate(&headers).await?;
+    if !auth.verify_csrf(&session, &headers) {
+        return Err(AppError::Forbidden);
+    }
+    let Json(payload) = payload.map_err(|_| AppError::InvalidRequest)?;
+    let saved = auth
+        .inner
+        .store
+        .update_display_preferences(session.principal.username(), payload)
+        .await?;
+    let mut response = Json(saved).into_response();
     no_store(response.headers_mut());
     Ok(response)
 }
@@ -1927,6 +2107,316 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn display_preferences_are_validated_csrf_protected_and_in_the_session() {
+        let auth = test_auth(1, 5);
+        let documents = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        let app = protected_app(auth.service, documents.path(), private.path());
+        let (alice_cookie, alice_csrf) =
+            login_as(&app, "Alice", "a very long unicode password 🙂").await;
+
+        let put = |path: &str, csrf: Option<&str>, body: &str| {
+            let mut request = Request::put(path)
+                .header(header::HOST, "files.example.test")
+                .header(header::ORIGIN, "https://files.example.test")
+                .header("sec-fetch-site", "same-origin")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &alice_cookie);
+            if let Some(csrf) = csrf {
+                request = request.header("x-csrf-token", csrf);
+            }
+            request.body(Body::from(body.to_owned())).unwrap()
+        };
+        let session_body = |cookie: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::get("/api/v1/session")
+                            .header(header::COOKIE, cookie)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let path = "/api/v1/preferences/display";
+
+        assert_eq!(
+            session_body(alice_cookie.clone()).await["preferences"],
+            serde_json::json!({"showHiddenFiles": true, "theme": "system"})
+        );
+
+        let forbidden = app
+            .clone()
+            .oneshot(put(path, None, r#"{"theme":"dark"}"#))
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        for invalid in [
+            r#"{"theme":"sepia"}"#,
+            r#"{"theme":"Dark"}"#,
+            r#"{"theme":null}"#,
+            r#"{"showHiddenFiles":"false"}"#,
+            r#"{"showHiddenFiles":null}"#,
+            r#"{"theme":"dark","defaultFolder":null}"#,
+            r#"{"fontSize":12}"#,
+            "not json",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(put(path, Some(&alice_csrf), invalid))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{invalid}");
+            let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "invalid_request", "{invalid}");
+        }
+        assert_eq!(
+            session_body(alice_cookie.clone()).await["preferences"],
+            serde_json::json!({"showHiddenFiles": true, "theme": "system"})
+        );
+
+        let folder = app
+            .clone()
+            .oneshot(put(
+                "/api/v1/preferences",
+                Some(&alice_csrf),
+                r#"{"defaultFolder":{"shareId":"documents","path":""}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(folder.status(), StatusCode::OK);
+
+        let saved = app
+            .clone()
+            .oneshot(put(path, Some(&alice_csrf), r#"{"theme":"dark"}"#))
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(saved.headers()[header::CACHE_CONTROL], "no-store");
+        let body = to_bytes(saved.into_body(), 16_384).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"showHiddenFiles": true, "theme": "dark"})
+        );
+
+        let saved = app
+            .clone()
+            .oneshot(put(path, Some(&alice_csrf), r#"{"showHiddenFiles":false}"#))
+            .await
+            .unwrap();
+        let body = to_bytes(saved.into_body(), 16_384).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"showHiddenFiles": false, "theme": "dark"})
+        );
+
+        let session = session_body(alice_cookie.clone()).await;
+        assert_eq!(
+            session["preferences"],
+            serde_json::json!({"showHiddenFiles": false, "theme": "dark"})
+        );
+        assert_eq!(session["defaultFolder"]["shareId"], "documents");
+
+        let (bob_cookie, _) = login_as(&app, "Bob", "bob password").await;
+        assert_eq!(
+            session_body(bob_cookie).await["preferences"],
+            serde_json::json!({"showHiddenFiles": true, "theme": "system"})
+        );
+    }
+
+    #[tokio::test]
+    async fn display_preferences_and_start_folder_update_independently() {
+        let auth = test_auth(1, 5);
+        let store = &auth.service.inner.store;
+        let folder = DefaultFolder {
+            share_id: "documents".to_owned(),
+            path: "nested".to_owned(),
+        };
+        let row_count = || {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM user_preferences WHERE username = 'Alice'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+
+        store
+            .set_default_folder("Alice", Some(folder.clone()))
+            .await
+            .unwrap();
+        let saved = store
+            .update_display_preferences(
+                "Alice",
+                DisplayPreferencesUpdate {
+                    theme: Some(ThemePreference::Light),
+                    ..DisplayPreferencesUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            DisplayPreferences {
+                show_hidden_files: true,
+                theme: ThemePreference::Light,
+            }
+        );
+        assert_eq!(store.default_folder("Alice").await.unwrap(), Some(folder));
+
+        store
+            .update_display_preferences(
+                "Alice",
+                DisplayPreferencesUpdate {
+                    show_hidden_files: Some(false),
+                    ..DisplayPreferencesUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        let other = DefaultFolder {
+            share_id: "documents".to_owned(),
+            path: String::new(),
+        };
+        store
+            .set_default_folder("Alice", Some(other.clone()))
+            .await
+            .unwrap();
+        assert_eq!(store.default_folder("Alice").await.unwrap(), Some(other));
+        assert_eq!(
+            store.display_preferences("Alice").await.unwrap(),
+            DisplayPreferences {
+                show_hidden_files: false,
+                theme: ThemePreference::Light,
+            }
+        );
+
+        store.set_default_folder("Alice", None).await.unwrap();
+        assert_eq!(store.default_folder("Alice").await.unwrap(), None);
+        assert_eq!(
+            store.display_preferences("Alice").await.unwrap(),
+            DisplayPreferences {
+                show_hidden_files: false,
+                theme: ThemePreference::Light,
+            }
+        );
+        assert_eq!(row_count(), 1);
+
+        let reset = store
+            .update_display_preferences(
+                "Alice",
+                DisplayPreferencesUpdate {
+                    show_hidden_files: Some(true),
+                    theme: Some(ThemePreference::System),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset, DisplayPreferences::default());
+        assert_eq!(row_count(), 0);
+        assert_eq!(
+            store.display_preferences("Bob").await.unwrap(),
+            DisplayPreferences::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn version_four_database_gains_display_defaults_and_keeps_start_folders() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                   session_key BLOB PRIMARY KEY NOT NULL CHECK(length(session_key) = 32),
+                   username TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_seen_at INTEGER NOT NULL,
+                   expires_at INTEGER NOT NULL,
+                   picture_url TEXT
+                 ) WITHOUT ROWID;
+                 CREATE INDEX sessions_expiration ON sessions(expires_at);
+                 CREATE TABLE user_preferences (
+                   username TEXT PRIMARY KEY NOT NULL,
+                   default_share_id TEXT NOT NULL,
+                   default_path TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 CREATE TABLE passkey_users (
+                   username TEXT PRIMARY KEY NOT NULL,
+                   user_handle BLOB NOT NULL UNIQUE CHECK(length(user_handle) = 16)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE passkeys (
+                   id TEXT PRIMARY KEY NOT NULL,
+                   username TEXT NOT NULL,
+                   credential_id BLOB NOT NULL UNIQUE,
+                   name TEXT NOT NULL,
+                   credential_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_used_at INTEGER
+                 ) WITHOUT ROWID;
+                 CREATE INDEX passkeys_user ON passkeys(username);
+                 INSERT INTO user_preferences VALUES
+                   ('Alice', 'documents', 'nested'), ('Bob', 'private', '');
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SessionStore::open(&path).unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            let version: i64 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 5);
+            let rejected = connection.execute(
+                "UPDATE user_preferences SET theme = 'sepia' WHERE username = 'Alice'",
+                [],
+            );
+            assert!(rejected.is_err());
+        }
+        assert_eq!(
+            store.default_folder("Alice").await.unwrap(),
+            Some(DefaultFolder {
+                share_id: "documents".to_owned(),
+                path: "nested".to_owned(),
+            })
+        );
+        assert_eq!(
+            store.default_folder("Bob").await.unwrap(),
+            Some(DefaultFolder {
+                share_id: "private".to_owned(),
+                path: String::new(),
+            })
+        );
+        for username in ["Alice", "Bob", "Carol"] {
+            assert_eq!(
+                store.display_preferences(username).await.unwrap(),
+                DisplayPreferences::default()
+            );
+        }
+        drop(store);
+
+        // Reopening a current database is a no-op.
+        let store = SessionStore::open(&path).unwrap();
+        assert!(store.default_folder("Alice").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn version_one_session_database_migrates_without_losing_sessions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.sqlite3");
@@ -1954,7 +2444,7 @@ mod tests {
         let sessions: i64 = connection
             .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, SESSION_SCHEMA_VERSION);
         assert_eq!(sessions, 1);
         let picture: Option<String> = connection
             .query_row("SELECT picture_url FROM sessions", [], |row| row.get(0))

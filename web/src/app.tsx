@@ -39,6 +39,7 @@ import {
   type PreviewDocument,
   type Session,
   type Share,
+  type UserPreferences,
 } from "./api";
 import {
   EntryActionButtons,
@@ -66,7 +67,8 @@ import { beginEntryDrag, ShareTree } from "./tree";
 import { TrashView } from "./trash";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 import {
-  readThemePreference,
+  applyThemePreference,
+  readLegacyThemePreference,
   saveThemePreference,
   subscribeThemePreference,
   type ThemePreference,
@@ -75,18 +77,39 @@ import {
 const defaultApi = createApiClient();
 declare const __CRABINET_DEV_REVISION__: string | null;
 
-function hiddenFilesPreferenceKey(userId: string): string {
+// Before settings followed the account, this per-browser key held the
+// hidden-files choice. It is read once to carry the choice over, then removed.
+function legacyHiddenFilesKey(userId: string): string {
   return `crabinet.showHiddenFiles.${userId}`;
 }
 
-function readShowHiddenFiles(userId: string): boolean {
+function readLegacyHiddenFiles(userId: string): string | null {
   try {
-    return (
-      window.localStorage.getItem(hiddenFilesPreferenceKey(userId)) !== "false"
-    );
+    return window.localStorage.getItem(legacyHiddenFilesKey(userId));
   } catch {
-    return true;
+    return null;
   }
+}
+
+function removeLegacyHiddenFiles(userId: string): void {
+  try {
+    window.localStorage.removeItem(legacyHiddenFilesKey(userId));
+  } catch {
+    // Nothing to clean up when storage is blocked.
+  }
+}
+
+/** The saved values of the settings named in `update`. */
+function pickPreferences(
+  preferences: UserPreferences,
+  update: Partial<UserPreferences>,
+): Partial<UserPreferences> {
+  const picked: Partial<UserPreferences> = {};
+  if (update.showHiddenFiles !== undefined) {
+    picked.showHiddenFiles = preferences.showHiddenFiles;
+  }
+  if (update.theme !== undefined) picked.theme = preferences.theme;
+  return picked;
 }
 
 type AuthState =
@@ -113,6 +136,21 @@ export function App({
   );
   const handleSignedOut = useCallback(
     () => setAuth({ status: "guest", reason: "signed_out" }),
+    [],
+  );
+  const handlePreferencesChanged = useCallback(
+    (update: Partial<UserPreferences>) =>
+      setAuth((current) =>
+        current.status === "authenticated"
+          ? {
+              ...current,
+              session: {
+                ...current.session,
+                preferences: { ...current.session.preferences, ...update },
+              },
+            }
+          : current,
+      ),
     [],
   );
 
@@ -193,6 +231,7 @@ export function App({
             : current,
         )
       }
+      onPreferencesChanged={handlePreferencesChanged}
       onSessionRefreshed={(session) =>
         setAuth((current) =>
           current.status === "authenticated" &&
@@ -426,6 +465,8 @@ interface AuthenticatedShellProps {
   onSessionExpired: () => void;
   onSignedOut: () => void;
   onDefaultFolderChanged: (folder: DefaultFolder | null) => void;
+  /** Merges display settings into the session without saving them. */
+  onPreferencesChanged: (update: Partial<UserPreferences>) => void;
   onSessionRefreshed: (session: Session) => void;
 }
 
@@ -437,6 +478,7 @@ function AuthenticatedShell({
   onSessionExpired,
   onSignedOut,
   onDefaultFolderChanged,
+  onPreferencesChanged,
   onSessionRefreshed,
 }: AuthenticatedShellProps) {
   const [signingOut, setSigningOut] = useState(false);
@@ -445,11 +487,9 @@ function AuthenticatedShell({
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string>();
-  const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
-    readShowHiddenFiles(session.user.id),
-  );
-  const [themePreference, setThemePreference] =
-    useState<ThemePreference>(readThemePreference);
+  const { showHiddenFiles, theme: themePreference } = session.preferences;
+  const legacyCheckedUser = useRef<string>();
+  const carryingTheme = useRef<ThemePreference>();
   const selectedShare = session.shares.find(
     (share) => share.id === route.shareId,
   );
@@ -469,35 +509,108 @@ function AuthenticatedShell({
       : defaultFolder.shareId
     : "";
 
-  useEffect(() => {
-    const key = hiddenFilesPreferenceKey(session.user.id);
-    setShowHiddenFiles(readShowHiddenFiles(session.user.id));
-    const syncPreference = (event: StorageEvent) => {
-      if (event.key === key || event.key === null) {
-        setShowHiddenFiles(readShowHiddenFiles(session.user.id));
+  /**
+   * Applies `update` at once and saves it to the account. A failed save of a
+   * Settings change is reverted and reported; a failed carry-over of an
+   * earlier browser-only choice (`carryOver`) stays applied and is retried on
+   * the next visit.
+   */
+  const savePreferences = async (
+    update: Partial<UserPreferences>,
+    { carryOver = false } = {},
+  ): Promise<boolean> => {
+    const previous = pickPreferences(session.preferences, update);
+    onPreferencesChanged(update);
+    if (!carryOver) setPreferencesError(undefined);
+    try {
+      const saved = await withCsrfRetry(
+        api,
+        session.csrfToken,
+        session.user.id,
+        onSessionRefreshed,
+        (token) => api.updatePreferences(update, token),
+      );
+      // Only the fields sent here: another change may still be in flight.
+      onPreferencesChanged(pickPreferences(saved, update));
+      return true;
+    } catch (error) {
+      if (carryOver) return false;
+      onPreferencesChanged(previous);
+      if (isUnauthorized(error)) {
+        onSessionExpired();
+      } else if (
+        error instanceof ApiError &&
+        error.code === accountChangedCode
+      ) {
+        setPreferencesError(
+          "A different account is now signed in. Reload the page to continue.",
+        );
+      } else {
+        setPreferencesError(
+          update.theme !== undefined
+            ? "Could not save your appearance choice. Try again."
+            : "Could not save your hidden files choice. Try again.",
+        );
       }
-    };
-    window.addEventListener("storage", syncPreference);
-    return () => window.removeEventListener("storage", syncPreference);
-  }, [session.user.id]);
+      return false;
+    }
+  };
 
-  useEffect(() => subscribeThemePreference(setThemePreference), []);
+  useEffect(() => {
+    let carryOver: Partial<UserPreferences> | undefined;
+    if (legacyCheckedUser.current !== session.user.id) {
+      legacyCheckedUser.current = session.user.id;
+      carryOver = {};
+      const legacyHidden = readLegacyHiddenFiles(session.user.id);
+      if (legacyHidden === "false" && session.preferences.showHiddenFiles) {
+        carryOver.showHiddenFiles = false;
+      } else if (legacyHidden !== null) {
+        removeLegacyHiddenFiles(session.user.id);
+      }
+      const legacyTheme = readLegacyThemePreference();
+      if (legacyTheme && session.preferences.theme === "system") {
+        carryOver.theme = legacyTheme;
+        carryingTheme.current = legacyTheme;
+      }
+    }
+    // Until the account has an earlier browser-only theme, leave that copy
+    // unmarked so a failed carry-over is retried on the next visit.
+    if (carryingTheme.current === undefined) {
+      saveThemePreference(themePreference);
+    } else {
+      applyThemePreference(themePreference);
+    }
+    if (carryOver && Object.keys(carryOver).length > 0) {
+      const update = carryOver;
+      void savePreferences(update, { carryOver: true }).then((saved) => {
+        if (!saved) return;
+        if (update.showHiddenFiles !== undefined) {
+          removeLegacyHiddenFiles(session.user.id);
+        }
+        if (update.theme !== undefined && carryingTheme.current) {
+          carryingTheme.current = undefined;
+          saveThemePreference(update.theme);
+        }
+      });
+    }
+    // savePreferences reads the current session; rerunning on its identity
+    // would repeat the carry-over check on every render.
+  }, [session.user.id, themePreference]);
+
+  // Another tab saved a new theme and updated the shared copy.
+  useEffect(
+    () => subscribeThemePreference((theme) => onPreferencesChanged({ theme })),
+    [onPreferencesChanged],
+  );
 
   const updateThemePreference = (value: ThemePreference) => {
-    setThemePreference(value);
-    saveThemePreference(value);
+    // A choice made here replaces any earlier browser-only theme.
+    carryingTheme.current = undefined;
+    void savePreferences({ theme: value });
   };
 
   const updateShowHiddenFiles = (value: boolean) => {
-    setShowHiddenFiles(value);
-    try {
-      window.localStorage.setItem(
-        hiddenFilesPreferenceKey(session.user.id),
-        String(value),
-      );
-    } catch {
-      // The display preference still works for this tab if storage is blocked.
-    }
+    void savePreferences({ showHiddenFiles: value });
   };
 
   const saveDefaultFolder = async (folder: DefaultFolder | null) => {
@@ -632,7 +745,9 @@ function AuthenticatedShell({
               />
               Show hidden files
             </label>
-            <p class="muted">Saved in this browser for your account.</p>
+            <p class="muted">
+              This setting follows your account across devices.
+            </p>
             <label class="settings-subsection" for="theme-preference">
               Appearance
             </label>
@@ -649,7 +764,9 @@ function AuthenticatedShell({
               <option value="light">Light</option>
               <option value="dark">Dark</option>
             </select>
-            <p class="muted">Saved in this browser.</p>
+            <p class="muted">
+              This setting follows your account across devices.
+            </p>
             {preferencesError && (
               <Notice tone="danger">{preferencesError}</Notice>
             )}
