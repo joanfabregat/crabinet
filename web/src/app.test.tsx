@@ -671,7 +671,7 @@ describe("directory browser", () => {
       "read-only",
       "Photos",
       undefined,
-      undefined,
+      expect.any(AbortSignal),
       true,
     );
   });
@@ -1006,9 +1006,12 @@ describe("writable file operations", () => {
     fireEvent.click(
       within(preview).getByRole("button", { name: "Rename notes.txt" }),
     );
-    fireEvent.input(screen.getByLabelText("New name"), {
+    fireEvent.input(await screen.findByLabelText("New name"), {
       target: { value: "renamed.md" },
     });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Confirm" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() =>
       expect(moveEntry).toHaveBeenCalledWith(
@@ -1070,9 +1073,16 @@ describe("writable file operations", () => {
     fireEvent.click(
       within(preview).getByRole("button", { name: "Move notes.txt" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "Move notes.txt" });
+    const dialog = await screen.findByRole("dialog", {
+      name: "Move notes.txt",
+    });
     fireEvent.click(
       await within(dialog).findByRole("button", { name: "Shared folder" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", { name: "Move here" }),
+      ).toBeEnabled(),
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "Move here" }));
     await waitFor(() =>
@@ -1171,7 +1181,7 @@ describe("writable file operations", () => {
       within(preview).getByRole("button", { name: "Delete notes.txt" }),
     );
 
-    const dialog = screen.getByRole("dialog", {
+    const dialog = await screen.findByRole("dialog", {
       name: "Delete file notes.txt",
     });
     expect(
@@ -1186,7 +1196,7 @@ describe("writable file operations", () => {
     });
     expect(deleteButton).toBeDisabled();
     fireEvent.click(confirmation);
-    expect(deleteButton).toBeEnabled();
+    await waitFor(() => expect(deleteButton).toBeEnabled());
     fireEvent.click(deleteButton);
 
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
@@ -1229,6 +1239,11 @@ describe("writable file operations", () => {
       within(dialog).getByRole("checkbox", {
         name: "I understand that notes.txt will be permanently deleted",
       }),
+    );
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", { name: "Delete", exact: true }),
+      ).toBeEnabled(),
     );
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Delete", exact: true }),
@@ -1569,5 +1584,483 @@ describe("writable file operations", () => {
         "Your session expired. Sign in again to continue.",
       ),
     ).toBeVisible();
+  });
+});
+
+describe("security review regressions", () => {
+  const projectEntries: DirectoryPage["entries"] = [
+    { name: "notes.txt", kind: "file", size: 3 },
+    { name: "empty", kind: "directory" },
+  ];
+  const listing = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
+    shareId,
+    path,
+    entries:
+      path === "projects"
+        ? projectEntries
+        : path === ""
+          ? [{ name: "projects", kind: "directory" }]
+          : [],
+  }));
+  const projects = () =>
+    new MemoryNavigation({ shareId: "work", path: "projects" });
+
+  function dragTransfer(initial: Record<string, string> = {}) {
+    const data = new Map(Object.entries(initial));
+    return {
+      data,
+      types: [] as string[],
+      files: [] as File[],
+      effectAllowed: "",
+      dropEffect: "",
+      setData: (type: string, value: string) => data.set(type, value),
+      getData: (type: string) => data.get(type) ?? "",
+    };
+  }
+
+  function fireDrag(
+    type: "dragstart" | "drop",
+    target: Element,
+    dataTransfer: ReturnType<typeof dragTransfer>,
+  ) {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+    fireEvent(target, event);
+  }
+
+  it("resolves a deep-linked preview's kind before offering deletion", async () => {
+    const navigation = projects();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "archive",
+    });
+    const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      name: "archive",
+      kind: "directory",
+      etag: 'W/"folder"',
+    }));
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
+      async (shareId, path) => ({ shareId, path, outcome: "success" }),
+    );
+    render(
+      <App
+        api={fakeApi({ directory: listing, metadata, deleteEntry })}
+        navigation={navigation}
+      />,
+    );
+
+    const preview = await screen.findByRole("complementary", {
+      name: "archive",
+    });
+    fireEvent.click(
+      within(preview).getByRole("button", { name: "Delete archive" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete folder archive",
+    });
+    expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+    const confirmation = within(dialog).getByLabelText(
+      "Type archive to confirm",
+    );
+    fireEvent.input(confirmation, { target: { value: "archive" } });
+    const button = within(dialog).getByRole("button", {
+      name: "Delete",
+      exact: true,
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(deleteEntry).toHaveBeenCalledWith(
+        "work",
+        "archive",
+        'W/"folder"',
+        "csrf-in-memory",
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
+  it("deletes with the validator captured when the dialog opened", async () => {
+    const etags = ['W/"reviewed"', 'W/"changed-later"'];
+    const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      name: "notes.txt",
+      kind: "file",
+      etag: etags.shift() ?? 'W/"unexpected"',
+    }));
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
+      async (shareId, path) => ({ shareId, path, outcome: "success" }),
+    );
+    render(
+      <App
+        api={fakeApi({ directory: listing, metadata, deleteEntry })}
+        navigation={projects()}
+      />,
+    );
+
+    fireEvent.click(
+      within(await screen.findByLabelText("Actions for notes.txt")).getByRole(
+        "button",
+        { name: "Delete notes.txt" },
+      ),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete file notes.txt",
+    });
+    expect(within(dialog).getByRole("status")).toHaveTextContent(
+      "Checking the current version",
+    );
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    const button = within(dialog).getByRole("button", {
+      name: "Delete",
+      exact: true,
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
+    expect(deleteEntry.mock.calls[0]?.[2]).toBe('W/"reviewed"');
+    expect(metadata).toHaveBeenCalledOnce();
+  });
+
+  it("blocks an operation when the item's kind changed since it was listed", async () => {
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>();
+    render(
+      <App
+        api={fakeApi({
+          directory: listing,
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "notes.txt",
+            kind: "directory" as const,
+            etag: 'W/"now-a-folder"',
+          })),
+          deleteEntry,
+        })}
+        navigation={projects()}
+      />,
+    );
+
+    fireEvent.click(
+      within(await screen.findByLabelText("Actions for notes.txt")).getByRole(
+        "button",
+        { name: "Delete notes.txt" },
+      ),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete file notes.txt",
+    });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "This item is now a folder",
+    );
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    expect(
+      within(dialog).getByRole("button", { name: "Delete", exact: true }),
+    ).toBeDisabled();
+    fireEvent.submit(within(dialog).getByRole("checkbox").closest("form")!);
+    expect(deleteEntry).not.toHaveBeenCalled();
+  });
+
+  it("refuses to move a folder into itself", async () => {
+    const moveEntry = vi.fn<ApiClient["moveEntry"]>();
+    render(
+      <App
+        api={fakeApi({
+          directory: listing,
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "empty",
+            kind: "directory" as const,
+            etag: 'W/"folder"',
+          })),
+          moveEntry,
+        })}
+        navigation={projects()}
+      />,
+    );
+
+    fireEvent.click(
+      within(await screen.findByLabelText("Actions for empty")).getByRole(
+        "button",
+        { name: "Move empty" },
+      ),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Move empty" });
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Expand projects" }),
+    );
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "empty" }),
+    );
+    expect(
+      within(dialog).getByText("Choose a different folder outside this item."),
+    ).toBeVisible();
+    expect(
+      within(dialog).getByRole("button", { name: "Move here" }),
+    ).toBeDisabled();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it("stops retrying a failed destination listing until asked", async () => {
+    let rootFailures = 0;
+    const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => {
+      if (path === "" && rootFailures++ < 1) {
+        throw new ApiError("server", "unavailable", { status: 500 });
+      }
+      return listing(shareId, path);
+    });
+    render(<App api={fakeApi({ directory })} navigation={projects()} />);
+
+    fireEvent.click(
+      within(await screen.findByLabelText("Actions for notes.txt")).getByRole(
+        "button",
+        { name: "Move notes.txt" },
+      ),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Move notes.txt" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Folders could not be loaded.",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const rootCalls = () =>
+      directory.mock.calls.filter(([, path]) => path === "").length;
+    expect(rootCalls()).toBe(1);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Try again" }));
+    expect(
+      await within(dialog).findByRole("button", { name: "projects" }),
+    ).toBeVisible();
+    expect(rootCalls()).toBe(2);
+  });
+
+  it("keeps the newest sidebar listing when an older request finishes last", async () => {
+    let releaseStale: (page: DirectoryPage) => void = () => undefined;
+    const signals: AbortSignal[] = [];
+    let treeCalls = 0;
+    const directory = vi.fn<ApiClient["directory"]>(
+      async (shareId, path, _cursor, signal) => {
+        if (shareId !== "read-only") return listing(shareId, path);
+        if (signal) signals.push(signal);
+        treeCalls += 1;
+        if (treeCalls === 1) {
+          return await new Promise<DirectoryPage>((resolve) => {
+            releaseStale = resolve;
+          });
+        }
+        return {
+          shareId,
+          path,
+          entries: [{ name: "Fresh", kind: "directory" }],
+        };
+      },
+    );
+    render(<App api={fakeApi({ directory })} navigation={projects()} />);
+    const sidebar = within(
+      await screen.findByRole("complementary", { name: "Shared folders" }),
+    );
+
+    fireEvent.click(sidebar.getByRole("button", { name: "Expand Reference" }));
+    fireEvent.click(
+      sidebar.getByRole("button", { name: "Collapse Reference" }),
+    );
+    fireEvent.click(sidebar.getByRole("button", { name: "Expand Reference" }));
+    expect(await sidebar.findByRole("link", { name: "Fresh" })).toBeVisible();
+
+    releaseStale({
+      shareId: "read-only",
+      path: "",
+      entries: [{ name: "Stale", kind: "directory" }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(signals[0]?.aborted).toBe(true);
+    expect(sidebar.queryByRole("link", { name: "Stale" })).toBeNull();
+    expect(sidebar.getByRole("link", { name: "Fresh" })).toBeVisible();
+  });
+
+  it("accepts only entry drags produced by this page", async () => {
+    render(
+      <App api={fakeApi({ directory: listing })} navigation={projects()} />,
+    );
+    const row = (
+      await screen.findByRole("link", { name: "notes.txt" })
+    ).closest<HTMLElement>(".entry-row")!;
+    const sidebar = within(
+      screen.getByRole("complementary", { name: "Shared folders" }),
+    );
+    const target = sidebar
+      .getByRole("link", { name: "Working files" })
+      .closest<HTMLElement>(".tree-row")!;
+    const type = "application/x-crabinet-entry";
+
+    const forged = dragTransfer({
+      [type]: JSON.stringify({
+        shareId: "work",
+        path: "projects/notes.txt",
+        entry: { name: "notes.txt", kind: "file" },
+      }),
+    });
+    fireDrag("drop", target, forged);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    const genuine = dragTransfer();
+    fireDrag("dragstart", row, genuine);
+    const payload = JSON.parse(genuine.getData(type)) as {
+      entry: { name: string };
+    };
+    const tampered = dragTransfer({
+      [type]: JSON.stringify({
+        ...payload,
+        entry: { ...payload.entry, name: "other.txt" },
+      }),
+    });
+    fireDrag("drop", target, tampered);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    fireDrag("drop", target, genuine);
+    expect(
+      await screen.findByRole("dialog", { name: "Move notes.txt" }),
+    ).toBeVisible();
+  });
+
+  it("replaces an upload only with the version shown in the conflict", async () => {
+    const etags = ['W/"shown"', 'W/"changed-later"'];
+    const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      name: "exists.txt",
+      kind: "file",
+      etag: etags.shift() ?? 'W/"unexpected"',
+    }));
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      async (shareId, directory, file, _csrf, options) => ({
+        shareId,
+        outcomes: [
+          {
+            path: `${directory}/${file.name}`,
+            outcome: options?.replace ? "replaced" : "conflict",
+          },
+        ],
+      }),
+    );
+    render(
+      <App
+        api={fakeApi({ directory: listing, metadata, uploadFile })}
+        navigation={projects()}
+      />,
+    );
+
+    fireEvent.change(await screen.findByLabelText("Choose files to upload"), {
+      target: { files: [new File(["new"], "exists.txt")] },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Replace existing file" }),
+    );
+    expect(await screen.findByText("Replaced")).toBeVisible();
+    expect(metadata).toHaveBeenCalledOnce();
+    expect(uploadFile).toHaveBeenLastCalledWith(
+      "work",
+      "projects",
+      expect.objectContaining({ name: "exists.txt" }),
+      "csrf-in-memory",
+      expect.objectContaining({ replace: true, etag: 'W/"shown"' }),
+    );
+  });
+
+  it("offers no replacement when the conflicting name is a folder", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: listing,
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "empty",
+            kind: "directory" as const,
+            etag: 'W/"folder"',
+          })),
+          uploadFile: vi.fn(async (shareId, directory, file) => ({
+            shareId,
+            outcomes: [
+              {
+                path: `${directory}/${file.name}`,
+                outcome: "conflict" as const,
+              },
+            ],
+          })),
+        })}
+        navigation={projects()}
+      />,
+    );
+
+    fireEvent.change(await screen.findByLabelText("Choose files to upload"), {
+      target: { files: [new File(["new"], "empty")] },
+    });
+    expect(
+      await screen.findByText("A folder with this name already exists."),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Replace existing file" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("retries a start-folder save once after another tab rotated the session", async () => {
+    const updateDefaultFolder = vi
+      .fn<ApiClient["updateDefaultFolder"]>()
+      .mockRejectedValueOnce(
+        new ApiError("forbidden", "stale", { status: 403, code: "forbidden" }),
+      )
+      .mockImplementation(async (folder) => folder);
+    const sessionRequest = vi
+      .fn<ApiClient["session"]>()
+      .mockResolvedValueOnce(session)
+      .mockResolvedValue({ ...session, csrfToken: "rotated" });
+    render(
+      <App
+        api={fakeApi({ session: sessionRequest, updateDefaultFolder })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const select = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("combobox", { name: "Start folder" });
+    fireEvent.change(select, { target: { value: "work" } });
+    await waitFor(() => expect(select).toHaveValue("work"));
+    expect(updateDefaultFolder.mock.calls.map((call) => call[1])).toEqual([
+      "csrf-in-memory",
+      "rotated",
+    ]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows a saved start folder that is no longer shared instead of the default", async () => {
+    render(
+      <App
+        api={fakeApi({
+          session: vi.fn(async () => ({
+            ...session,
+            defaultFolder: { shareId: "revoked", path: "" },
+          })),
+        })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const select = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("combobox", { name: "Start folder" });
+    expect(select).toHaveValue("/");
+    expect(
+      within(select).getByRole("option", {
+        name: "Current: a folder you can no longer access",
+      }),
+    ).toBeDisabled();
   });
 });

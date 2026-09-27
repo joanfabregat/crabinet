@@ -31,7 +31,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 
   const cookies = await context.cookies();
   const sessionCookie = cookies.find(
-    (cookie) => cookie.name === "crabinet_session",
+    (cookie) => cookie.name === "__Host-crabinet_session",
   );
   expect(sessionCookie).toMatchObject({
     httpOnly: true,
@@ -77,7 +77,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   ).toBeVisible();
   expect(
     (await context.cookies()).some(
-      (cookie) => cookie.name === "crabinet_session",
+      (cookie) => cookie.name === "__Host-crabinet_session",
     ),
   ).toBe(false);
 });

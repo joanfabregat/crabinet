@@ -14,7 +14,7 @@ Thank you for improving Crabinet. Security-sensitive changes need evidence: a cl
 
 The supported toolchains are pinned in CI: Rust 1.90 and Node 24. Do not execute project Rust, JavaScript, TypeScript, build scripts, or package lifecycle scripts directly on an untrusted host. Use the repository's approved constrained container runner or an equivalent locked-down rootless Podman environment.
 
-On Joan's dev-vm, use the shared runners described by the `run-rust`, `run-node`, and `run-playwright` skills. A typical frontend check deliberately installs without scripts, audits, then enables reviewed lifecycle scripts:
+On Joan's dev-vm, use the shared runners described by the `run-rust`, `run-node`, and `run-playwright` skills. `web/.npmrc` sets `ignore-scripts=true`, so installs never run lifecycle scripts implicitly. A typical frontend check installs without scripts, audits, then runs only esbuild's reviewed install script, the one package the build needs:
 
 ```sh
 cd web
@@ -30,7 +30,7 @@ cd web
     set -eu
     npm ci --ignore-scripts
     npm audit --audit-level=high
-    npm rebuild
+    npm rebuild esbuild --ignore-scripts=false
     npm run format:check
     npm run lint
     npm run typecheck
