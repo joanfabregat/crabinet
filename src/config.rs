@@ -58,6 +58,7 @@ struct RawAuthConfig {
     #[serde(default)]
     oidc_enabled: bool,
     oidc: Option<RawOidcConfig>,
+    passkeys: Option<RawPasskeyConfig>,
 }
 
 impl Default for RawAuthConfig {
@@ -66,8 +67,16 @@ impl Default for RawAuthConfig {
             password_enabled: true,
             oidc_enabled: false,
             oidc: None,
+            passkeys: None,
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawPasskeyConfig {
+    /// Public HTTPS origin where browsers access Crabinet.
+    origin: String,
 }
 
 const fn default_true() -> bool {
@@ -182,6 +191,7 @@ pub struct Config {
 pub struct AuthConfig {
     password_enabled: bool,
     oidc: Option<OidcConfig>,
+    passkeys_origin: Option<url::Url>,
 }
 
 #[derive(Clone)]
@@ -211,6 +221,7 @@ impl fmt::Debug for AuthConfig {
             .debug_struct("AuthConfig")
             .field("password_enabled", &self.password_enabled)
             .field("oidc", &self.oidc)
+            .field("passkeys_origin", &self.passkeys_origin)
             .finish()
     }
 }
@@ -367,6 +378,19 @@ impl Config {
                 "auth.oidc is required exactly when OIDC sign-in is enabled".into(),
             ));
         }
+        let passkeys_origin = raw
+            .auth
+            .passkeys
+            .map(|value| {
+                let origin = validate_https_url(&value.origin, "auth.passkeys.origin")?;
+                if origin.path() != "/" {
+                    return Err(ConfigError::Validation(
+                        "auth.passkeys.origin must have no path".into(),
+                    ));
+                }
+                Ok(origin)
+            })
+            .transpose()?;
         let oidc = raw.auth.oidc.map(|value| {
             validate_https_url(&value.issuer, "auth.oidc.issuer")?;
             let redirect_uri = validate_https_url(&value.redirect_uri, "auth.oidc.redirect_uri")?;
@@ -524,6 +548,7 @@ impl Config {
             auth: AuthConfig {
                 password_enabled: raw.auth.password_enabled,
                 oidc,
+                passkeys_origin,
             },
             server: ServerConfig {
                 listen,
@@ -643,6 +668,9 @@ impl AuthConfig {
     }
     pub fn oidc(&self) -> Option<&OidcConfig> {
         self.oidc.as_ref()
+    }
+    pub fn passkeys_origin(&self) -> Option<&url::Url> {
+        self.passkeys_origin.as_ref()
     }
 }
 
@@ -1155,6 +1183,44 @@ permission = "write"
                 .unwrap_err()
                 .to_string()
                 .contains("auth.oidc is required")
+        );
+    }
+
+    #[test]
+    fn passkeys_require_an_exact_https_origin_and_a_recovery_method() {
+        let tree = TestTree::new();
+        let with_origin = |origin: &str| {
+            tree.valid_text().replace(
+                "[server]",
+                &format!("[auth.passkeys]\norigin = {origin:?}\n[server]"),
+            )
+        };
+        let config = tree
+            .load(&with_origin("https://files.example.com:8443"))
+            .unwrap();
+        assert_eq!(
+            config.auth().passkeys_origin().unwrap().as_str(),
+            "https://files.example.com:8443/"
+        );
+        for origin in [
+            "http://files.example.com",
+            "https://files.example.com/path",
+            "https://files.example.com?x=1",
+        ] {
+            assert!(
+                tree.load(&with_origin(origin)).is_err(),
+                "accepted {origin}"
+            );
+        }
+        let disabled = with_origin("https://files.example.com").replace(
+            "[auth.passkeys]",
+            "[auth]\npassword_enabled = false\noidc_enabled = false\n[auth.passkeys]",
+        );
+        assert!(
+            tree.load(&disabled)
+                .unwrap_err()
+                .to_string()
+                .contains("both password and OIDC")
         );
     }
 

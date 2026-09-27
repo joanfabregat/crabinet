@@ -1,5 +1,6 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { browserSupportsWebAuthn, startAuthentication } from "@simplewebauthn/browser";
 import {
   Code2,
   Download,
@@ -57,9 +58,9 @@ import {
 import { SafeMarkdown } from "./safe-markdown";
 import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
+import { PasskeySettings } from "./passkey-settings";
 
 const defaultApi = createApiClient();
-const defaultOidcRedirect = (url: string) => window.location.assign(url);
 declare const __CRABINET_DEV_REVISION__: string | null;
 
 function hiddenFilesPreferenceKey(userId: string): string {
@@ -85,13 +86,11 @@ type AuthState =
 export interface AppProps {
   api?: ApiClient;
   navigation?: BrowserNavigation;
-  onOidcRedirect?: (url: string) => void;
 }
 
 export function App({
   api = defaultApi,
   navigation = browserNavigation,
-  onOidcRedirect = defaultOidcRedirect,
 }: AppProps) {
   const [auth, setAuth] = useState<AuthState>({ status: "loading" });
   const [route, setRoute] = useState<BrowserRoute>(() => navigation.current());
@@ -156,7 +155,6 @@ export function App({
     return (
       <LoginScreen
         api={api}
-        onOidcRedirect={onOidcRedirect}
         reason={auth.reason}
         onAuthenticated={(session) =>
           setAuth({ status: "authenticated", session })
@@ -237,18 +235,18 @@ function SessionErrorScreen({ onRetry }: { onRetry: () => void }) {
 
 interface LoginScreenProps {
   api: ApiClient;
-  onOidcRedirect: (url: string) => void;
   reason?: "expired" | "signed_out";
   onAuthenticated: (session: Session) => void;
 }
 
 function LoginScreen({
   api,
-  onOidcRedirect,
   reason,
   onAuthenticated,
 }: LoginScreenProps) {
   const [pending, setPending] = useState(false);
+  const [passkeyPending, setPasskeyPending] = useState(false);
+  const [passkeyUsername, setPasskeyUsername] = useState("");
   const [error, setError] = useState<string>();
   const [methods, setMethods] = useState<AuthMethods>();
   const [methodsError, setMethodsError] = useState(false);
@@ -259,21 +257,29 @@ function LoginScreen({
   useEffect(() => {
     const controller = new AbortController();
     api.authMethods(controller.signal).then(
-      (available) => {
-        setMethods(available);
-        if (
-          available.oidcEnabled &&
-          !available.passwordEnabled &&
-          !oidcError &&
-          reason !== "signed_out"
-        ) {
-          onOidcRedirect("/api/v1/auth/oidc/start");
-        }
-      },
+      setMethods,
       () => setMethodsError(true),
     );
     return () => controller.abort();
-  }, [api, onOidcRedirect, oidcError, reason]);
+  }, [api]);
+
+  const signInWithPasskey = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (passkeyPending) return;
+    setPasskeyPending(true);
+    setError(undefined);
+    try {
+      const challenge = await api.startPasskeyLogin(passkeyUsername.trim());
+      const credential = await startAuthentication({ optionsJSON: challenge.options.publicKey });
+      onAuthenticated(await api.finishPasskeyLogin(challenge.flowId, credential));
+    } catch (cause) {
+      if (!isAborted(cause)) {
+        setError("Passkey sign-in failed. Check your account and try again.");
+      }
+    } finally {
+      setPasskeyPending(false);
+    }
+  };
 
   const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -339,16 +345,32 @@ function LoginScreen({
               Sign-in options could not be loaded. Refresh to try again.
             </Notice>
           )}
-          {methods?.oidcEnabled &&
-            (methods.passwordEnabled ||
-              oidcError ||
-              reason === "signed_out") && (
+          {methods?.oidcEnabled && (
               <a class="google-signin" href="/api/v1/auth/oidc/start">
                 <img src="/google-g.png" width="20" height="20" alt="" />
                 <span>Sign in with Google</span>
               </a>
             )}
-          {methods?.oidcEnabled && methods.passwordEnabled && (
+          {methods?.oidcEnabled && methods.passkeyEnabled && (
+            <p class="login-divider">or sign in with a passkey</p>
+          )}
+          {methods?.passkeyEnabled && (
+            <form class="login-form" onSubmit={(event) => void signInWithPasskey(event)}>
+              <label for="passkey-username">Email or username for passkey</label>
+              <input id="passkey-username" type="text" autocomplete="username webauthn"
+                value={passkeyUsername} onInput={(event) => setPasskeyUsername(event.currentTarget.value)}
+                disabled={passkeyPending} required />
+              <Button type="submit" busy={passkeyPending}
+                disabled={!browserSupportsWebAuthn()}>
+                {passkeyPending ? "Signing in…" : "Sign in with a passkey"}
+              </Button>
+              {!browserSupportsWebAuthn() && <p class="muted">This browser does not support passkeys.</p>}
+            </form>
+          )}
+          {methods?.passwordEnabled && methods.passkeyEnabled && (
+            <p class="login-divider">or sign in with a password</p>
+          )}
+          {methods?.passwordEnabled && methods.oidcEnabled && !methods.passkeyEnabled && (
             <p class="login-divider">or sign in with a password</p>
           )}
           {methods?.passwordEnabled && (
@@ -570,6 +592,11 @@ function AuthenticatedShell({
             {preferencesError && (
               <Notice tone="danger">{preferencesError}</Notice>
             )}
+            <PasskeySettings
+              api={api}
+              csrfToken={session.csrfToken}
+              onSessionExpired={onSessionExpired}
+            />
           </div>
         </Modal>
       )}

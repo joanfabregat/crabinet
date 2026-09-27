@@ -116,6 +116,12 @@ redirect_uri = "https://files-dev.jf.ffwip.com/api/v1/auth/oidc/callback"
 EOF
 fi
 
+cat >> "$state_dir/config.toml" <<'EOF'
+
+[auth.passkeys]
+origin = "https://files-dev.jf.ffwip.com"
+EOF
+
 export RUST_LOG=crabinet=debug
 binary=$repo_root/target/debug/crabinet
 "$binary" --config "$state_dir/config.toml" &

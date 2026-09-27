@@ -16,6 +16,7 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "14.0.0",
     "@shikijs/langs": "4.4.3",
     "@shikijs/themes": "4.4.3",
     "lucide-preact": "1.47.0",

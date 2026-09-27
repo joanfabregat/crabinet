@@ -25,7 +25,7 @@ max_sessions_total = 4096
 
 [auth]
 # Password sign-in remains enabled by default. Enable OIDC to show both methods.
-# Set password_enabled = false to send anonymous visitors directly to the provider.
+# The sign-in page is shown even when Google is the only initial method.
 password_enabled = true
 oidc_enabled = false
 
@@ -36,6 +36,11 @@ oidc_enabled = false
 # client_id = "crabinet"
 # client_secret_file = "secrets/oidc-client-secret"
 # redirect_uri = "https://files.example.com/api/v1/auth/oidc/callback"
+
+# Optional passkeys. Use the exact public origin (including a nondefault port).
+# An initial password or OIDC method is still required to enroll and recover keys.
+# [auth.passkeys]
+# origin = "https://files.example.com"
 
 # Generate a hash with `crabinet hash-password`. Never put a clear-text password here.
 [[users]]

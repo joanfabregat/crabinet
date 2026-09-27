@@ -320,6 +320,73 @@ select {
   padding-top: 1rem;
 }
 
+.passkey-settings {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 1rem;
+}
+
+.passkey-settings h3 {
+  margin: 0;
+}
+
+.passkey-settings label {
+  font-size: 0.9rem;
+  font-weight: 720;
+}
+
+.passkey-list {
+  display: grid;
+  gap: 0.65rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.passkey-list li {
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.75rem;
+}
+
+.passkey-list small {
+  color: var(--muted);
+}
+
+.passkey-add,
+.passkey-edit,
+.passkey-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.passkey-add input {
+  flex: 1 1 12rem;
+}
+
+.passkey-edit {
+  flex-direction: column;
+}
+
+.passkey-actions .button,
+.passkey-add .button {
+  min-height: 2.25rem;
+}
+
+.button-danger {
+  background: var(--danger);
+  color: white;
+}
+
+.passkey-error {
+  color: var(--danger);
+}
+
 .global-notice,
 .browser-layout {
   margin: 0 auto;

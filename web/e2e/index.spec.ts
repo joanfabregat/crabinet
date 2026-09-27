@@ -12,7 +12,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
     page.getByRole("heading", { name: "Sign in to Crabinet" }),
   ).toBeVisible();
 
-  await page.getByLabel("Username").fill("reader");
+  await page.getByLabel("Email or username", { exact: true }).fill("reader");
   await page.getByLabel("Password").fill("incorrect-password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("alert")).toContainText("Sign-in failed");

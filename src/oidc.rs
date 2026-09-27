@@ -114,6 +114,7 @@ fn google_picture_url(picture: Option<&str>) -> Option<&str> {
 struct Methods {
     password_enabled: bool,
     oidc_enabled: bool,
+    passkey_enabled: bool,
 }
 
 impl OidcService {
@@ -510,6 +511,7 @@ async fn methods(State(state): State<AppState>) -> Json<Methods> {
     Json(Methods {
         password_enabled: state.auth().is_some_and(|auth| auth.password_enabled()),
         oidc_enabled: state.oidc().is_some(),
+        passkey_enabled: state.auth().is_some_and(|auth| auth.passkey_enabled()),
     })
 }
 

@@ -19,7 +19,14 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
-exceptions = [{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" }]
+exceptions = [
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+  { allow = ["MPL-2.0"], crate = "webauthn-rs" },
+  { allow = ["MPL-2.0"], crate = "webauthn-rs-core" },
+  { allow = ["MPL-2.0"], crate = "webauthn-rs-proto" },
+  { allow = ["MPL-2.0"], crate = "webauthn-attestation-ca" },
+  { allow = ["MPL-2.0"], crate = "base64urlsafedata" },
+]
 
 [bans]
 multiple-versions = "warn"

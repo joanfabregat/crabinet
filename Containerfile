@@ -11,6 +11,8 @@ LABEL org.opencontainers.image.title="Crabinet" \
 
 COPY --chmod=0555 release/crabinet-linux-${TARGETARCH}/crabinet /crabinet
 COPY --chmod=0444 LICENSE-CCADB /licenses/LICENSE-CCADB
+COPY --chmod=0444 LICENSE-Apache-2.0 /licenses/LICENSE-Apache-2.0
+COPY --chmod=0444 LICENSE-MPL-2.0 /licenses/LICENSE-MPL-2.0
 
 USER 65532:65532
 EXPOSE 8080
