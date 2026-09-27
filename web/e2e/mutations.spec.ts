@@ -313,24 +313,30 @@ test.describe("writable share operations", () => {
     await expect(page.getByTestId("upload-drop-overlay")).toHaveCount(0);
 
     const uploads = page.getByRole("dialog", { name: "Uploads" });
-    await expect(uploadJob(uploads, "dragged.txt")).toContainText("Succeeded");
-    await expect(uploadJob(uploads, "replace-me.txt")).toContainText(
-      "Needs attention",
-    );
-    const oversizedJob = uploadJob(uploads, "too-large.bin");
-    await expect(oversizedJob).toContainText(
-      /This file is larger than the server allows\.|The server is busy\. Retry shortly\./,
-    );
-    if (
-      await oversizedJob
-        .getByText("The server is busy. Retry shortly.")
-        .isVisible()
-    ) {
-      await oversizedJob.getByRole("button", { name: "Retry" }).click();
+    const outcomes = [
+      { name: "dragged.txt", expected: "Succeeded" },
+      { name: "replace-me.txt", expected: "Needs attention" },
+      {
+        name: "too-large.bin",
+        expected: "This file is larger than the server allows.",
+      },
+    ];
+    // The server allows two concurrent uploads per user, so any of the three
+    // jobs may need a retry. Wait for all initial requests to release their slots.
+    for (const { name } of outcomes) {
+      await expect(uploadJob(uploads, name)).toContainText(
+        /Succeeded|Needs attention|This file is larger than the server allows\.|The server is busy\. Retry shortly\./,
+      );
     }
-    await expect(oversizedJob).toContainText(
-      "This file is larger than the server allows.",
-    );
+    for (const { name, expected } of outcomes) {
+      const job = uploadJob(uploads, name);
+      if (
+        await job.getByText("The server is busy. Retry shortly.").isVisible()
+      ) {
+        await job.getByRole("button", { name: "Retry" }).click();
+      }
+      await expect(job).toContainText(expected);
+    }
     expect(await readText(page, "writable", "replace-me.txt")).toBe("");
 
     await uploadJob(uploads, "replace-me.txt")
