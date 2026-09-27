@@ -20,7 +20,7 @@ The top-level fields are:
 
 - `version`: must be `1`.
 - `server`: listen address, SQLite path, session-secret file, upload/preview limits, and authentication/session resource limits.
-- `auth`: enable password sign-in, OIDC sign-in, or both; optionally enable passkeys with a public origin.
+- `auth`: enable password sign-in, OIDC sign-in, or both; optionally enable passkeys with a public origin. `gravatar_enabled` (default `false`) shows Gravatar images for users who have a configured email but no OIDC picture; when enabled, browsers send a hash of that email address to gravatar.com on every page load.
 - `users`: local usernames, optional Argon2id password hashes, and optional OIDC email bindings.
 - `shares`: stable IDs, user-facing display names, absolute filesystem roots, optional global read-only policy, and grants.
 
@@ -58,7 +58,7 @@ Password sign-in remains enabled by default. Its form accepts a configured usern
 
 ## Passkeys
 
-Set `[auth.passkeys] origin = "https://files.example.com"` to enable passkeys. The origin must exactly match the public HTTPS origin used by browsers, including any nondefault port, and cannot include a path, query, or fragment. Crabinet stores WebAuthn credentials and stable user handles in the same SQLite database as sessions. Users first sign in with Google or a password, then add and name passkeys in Settings. They may keep up to 20 keys, rename them, and remove them independently. The sign-in page accepts a username or configured email before offering that account's keys. A passkey signs in to the same configured user account and receives the same session and grants. Lost keys can be replaced after Google or password sign-in; keep one of these initial methods enabled for enrollment and recovery. Challenges expire after five minutes, are single use, and are held in process memory, so an in-progress ceremony must restart if the server restarts or a load balancer routes its two requests to different replicas.
+Set `[auth.passkeys] origin = "https://files.example.com"` to enable passkeys. The origin must exactly match the public HTTPS origin used by browsers, including any nondefault port, and cannot include a path, query, or fragment. Crabinet stores WebAuthn credentials and stable user handles in the same SQLite database as sessions. Users first sign in with Google or a password, then add and name passkeys in Settings. They may keep up to 20 keys, rename them, and remove them independently. Sign-in uses discoverable credentials only: the browser offers the passkeys it holds for this site without asking for an account name. Adding a passkey requires a session that signed in within the last 10 minutes. A passkey signs in to the same configured user account and receives the same session and grants. Lost keys can be replaced after Google or password sign-in; keep one of these initial methods enabled for enrollment and recovery. Registration challenges expire after five minutes and sign-in challenges after two; both are single use and held in process memory, so an in-progress ceremony must restart if the server restarts or a load balancer routes its two requests to different replicas.
 
 This version migrates the SQLite database to schema version 4 at startup, even if passkeys are not enabled. Take a consistent database backup before upgrading; an older binary rejects the migrated schema, so rollback requires restoring that backup.
 

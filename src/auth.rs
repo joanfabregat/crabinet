@@ -10,7 +10,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use argon2::{Argon2, PasswordHash, password_hash::PasswordVerifier};
+use argon2::{
+    Argon2, PasswordHash,
+    password_hash::{PasswordHasher, PasswordVerifier},
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -38,13 +41,14 @@ use crate::{
 
 type HmacSha256 = Hmac<Sha256>;
 
-const SESSION_COOKIE: &str = "crabinet_session";
+const SESSION_COOKIE: &str = "__Host-crabinet_session";
 const TOKEN_BYTES: usize = 32;
 const SESSION_SCHEMA_VERSION: i64 = 4;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
 const MAX_PASSWORD_BYTES: usize = 4_096;
+const VERIFIER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 const DUMMY_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";
 
@@ -122,7 +126,9 @@ struct AuthInner {
     shares: Vec<ShareRecord>,
     store: SessionStore,
     token_key: Vec<u8>,
-    verifier_slots: Semaphore,
+    verifier_slots: Arc<Semaphore>,
+    dummy_password_hash: String,
+    gravatar_enabled: bool,
     idle_timeout_seconds: i64,
     absolute_timeout_seconds: i64,
     max_sessions_per_user: usize,
@@ -176,6 +182,7 @@ struct SessionRotation {
 struct AuthenticatedSession {
     principal: AuthenticatedPrincipal,
     session_token: [u8; TOKEN_BYTES],
+    created_at: i64,
     picture_url: Option<String>,
 }
 
@@ -230,8 +237,22 @@ where
             parts
                 .extensions
                 .get::<ConnectInfo<SocketAddr>>()
-                .map(|address| address.0.ip()),
+                .map(|address| rate_limit_source(address.0.ip())),
         ))
+    }
+}
+
+/// Groups peers the way address allocation does: a client normally controls
+/// a whole IPv6 /64, so each /64 is one limiter source.
+fn rate_limit_source(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => address,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(std::net::Ipv6Addr::from(
+                u128::from(v6) & !((1_u128 << 64) - 1),
+            )),
+        },
     }
 }
 
@@ -326,11 +347,13 @@ impl AuthService {
             })
             .collect();
         let server = config.server();
+        let store = SessionStore::open(server.database_path())?;
+        store.prune_unknown_users(config.users().iter().map(|user| user.username()))?;
         let mut auth = Self::new(
             users,
             config.auth().password_enabled(),
             shares,
-            SessionStore::open(server.database_path())?,
+            store,
             config.session_secret().to_vec(),
             server.auth_max_concurrent(),
             server.session_idle_timeout_seconds() as i64,
@@ -340,10 +363,16 @@ impl AuthService {
             server.max_sessions_total(),
             Arc::new(SystemClock),
         );
+        let inner = Arc::get_mut(&mut auth.inner).expect("new auth service has one owner");
+        inner.gravatar_enabled = config.auth().gravatar_enabled();
+        inner.dummy_password_hash = dummy_password_hash(
+            config
+                .users()
+                .iter()
+                .filter_map(|user| user.password_hash()),
+        );
         if let Some(origin) = config.auth().passkeys_origin() {
-            Arc::get_mut(&mut auth.inner)
-                .expect("new auth service has one owner")
-                .passkeys = Some(passkeys::PasskeyState::new(origin)?);
+            inner.passkeys = Some(passkeys::PasskeyState::new(origin)?);
         }
         Ok(auth)
     }
@@ -371,7 +400,9 @@ impl AuthService {
                 shares,
                 store,
                 token_key,
-                verifier_slots: Semaphore::new(verifier_slots),
+                verifier_slots: Arc::new(Semaphore::new(verifier_slots)),
+                dummy_password_hash: DUMMY_PASSWORD_HASH.to_owned(),
+                gravatar_enabled: false,
                 idle_timeout_seconds,
                 absolute_timeout_seconds,
                 max_sessions_per_user,
@@ -404,6 +435,22 @@ impl AuthService {
             None
         };
         let account = candidate.map_or(username, |(name, _)| name.as_str());
+        // Oversized passwords are rejected before they can create limiter
+        // entries, so they cannot be used to churn the bounded limiter map.
+        if password.len() > MAX_PASSWORD_BYTES {
+            return Err(AppError::AuthenticationFailed);
+        }
+        // The permit is taken before the limiter is consulted, so new limiter
+        // keys can only be created at the bounded verification rate. It is
+        // moved into the blocking task below: cancelling the request cannot
+        // release it while a detached Argon2 computation is still running.
+        let permit = tokio::time::timeout(
+            VERIFIER_WAIT,
+            Arc::clone(&self.inner.verifier_slots).acquire_owned(),
+        )
+        .await
+        .map_err(|_| AppError::Busy)?
+        .map_err(|_| AppError::Internal)?;
         let now = self.inner.clock.now();
         let rate_key = RateLimitKey {
             account: normalized_identifier_digest(account),
@@ -419,9 +466,6 @@ impl AuthService {
             return Err(AppError::TooManyRequests);
         }
 
-        if password.len() > MAX_PASSWORD_BYTES {
-            return Err(AppError::AuthenticationFailed);
-        }
         let usable = self.inner.password_enabled
             && candidate.is_some_and(|(_, user)| !user.disabled && user.password_hash.is_some());
         let hash = if usable {
@@ -432,19 +476,15 @@ impl AuthService {
                 .clone()
                 .expect("checked above")
         } else {
-            DUMMY_PASSWORD_HASH.to_owned()
+            self.inner.dummy_password_hash.clone()
         };
         let password = password.as_bytes().to_vec();
-        let permit = self
-            .inner
-            .verifier_slots
-            .acquire()
-            .await
-            .map_err(|_| AppError::Internal)?;
-        let valid = tokio::task::spawn_blocking(move || verify_password(&hash, &password))
-            .await
-            .map_err(|_| AppError::Internal)?;
-        drop(permit);
+        let valid = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            verify_password(&hash, &password)
+        })
+        .await
+        .map_err(|_| AppError::Internal)?;
         if !usable || !valid {
             return Err(AppError::AuthenticationFailed);
         }
@@ -468,7 +508,7 @@ impl AuthService {
         &self,
         email: &str,
         picture_url: Option<&str>,
-        old_cookie: Option<&str>,
+        old_session_key: Option<Vec<u8>>,
     ) -> Result<(String, String, String), AppError> {
         let email = email.to_ascii_lowercase();
         let Some((username, _)) = self
@@ -480,11 +520,7 @@ impl AuthService {
             return Err(AppError::AuthenticationFailed);
         };
         let session = self
-            .issue_session(
-                username,
-                picture_url,
-                old_cookie.and_then(|token| self.session_key(token)),
-            )
+            .issue_session(username, picture_url, old_session_key)
             .await?;
         Ok((session.username, session.cookie_token, session.csrf_token))
     }
@@ -550,6 +586,7 @@ impl AuthService {
                 username: Arc::from(session.username),
             },
             session_token: raw_token,
+            created_at: session.created_at,
             picture_url: session.picture_url,
         })
     }
@@ -623,7 +660,7 @@ impl AuthService {
         mac.finalize().into_bytes().to_vec()
     }
 
-    fn session_key(&self, encoded: &str) -> Option<Vec<u8>> {
+    pub(crate) fn session_key(&self, encoded: &str) -> Option<Vec<u8>> {
         decode_token(encoded).map(|token| self.digest(b"session\0", &token))
     }
 
@@ -641,6 +678,7 @@ impl AuthService {
             self.inner
                 .users
                 .get(username)
+                .filter(|_| self.inner.gravatar_enabled)
                 .and_then(|user| user.email.as_deref())
                 .map(gravatar_picture_url)
         });
@@ -783,6 +821,39 @@ impl SessionStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    /// Deletes sessions, preferences and passkeys of usernames that are no
+    /// longer configured, so a later user given a removed name inherits none.
+    fn prune_unknown_users<'a>(
+        &self,
+        usernames: impl Iterator<Item = &'a str>,
+    ) -> Result<(), AuthInitError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| AuthInitError::Database(rusqlite::Error::InvalidQuery))?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE configured_users (username TEXT PRIMARY KEY NOT NULL);",
+        )?;
+        for username in usernames {
+            transaction.execute(
+                "INSERT OR IGNORE INTO configured_users (username) VALUES (?1)",
+                params![username],
+            )?;
+        }
+        transaction.execute_batch(
+            "DELETE FROM sessions WHERE username NOT IN (SELECT username FROM configured_users);
+             DELETE FROM user_preferences
+               WHERE username NOT IN (SELECT username FROM configured_users);
+             DELETE FROM passkeys WHERE username NOT IN (SELECT username FROM configured_users);
+             DELETE FROM passkey_users
+               WHERE username NOT IN (SELECT username FROM configured_users);
+             DROP TABLE configured_users;",
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     async fn default_folder(&self, username: &str) -> Result<Option<DefaultFolder>, AuthError> {
@@ -949,14 +1020,19 @@ impl RateLimiter {
         self.entries.retain(|_, window| {
             now.saturating_sub(window.last_seen_at) < RATE_LIMIT_WINDOW_SECONDS
         });
-        if self.entries.len() >= MAX_RATE_LIMIT_KEYS
-            && !self.entries.contains_key(&key)
-            && let Some(oldest) = self
+        if self.entries.len() >= MAX_RATE_LIMIT_KEYS && !self.entries.contains_key(&key) {
+            // Never evict an exhausted window: that would let a blocked caller
+            // reset its own limit by flooding the map with fresh keys.
+            let limit = self.attempts_per_window;
+            let Some(oldest) = self
                 .entries
                 .iter()
+                .filter(|(_, window)| window.attempts < limit)
                 .min_by_key(|(_, window)| window.last_seen_at)
                 .map(|(key, _)| key.clone())
-        {
+            else {
+                return false;
+            };
             self.entries.remove(&oldest);
         }
         let window = self.entries.entry(key).or_insert(AttemptWindow {
@@ -1143,7 +1219,7 @@ fn no_store(headers: &mut HeaderMap) {
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
 }
 
-fn session_cookie_header(token: &str, max_age: i64) -> HeaderValue {
+pub(crate) fn session_cookie_header(token: &str, max_age: i64) -> HeaderValue {
     HeaderValue::from_str(&format!(
         "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=Strict"
     ))
@@ -1152,21 +1228,28 @@ fn session_cookie_header(token: &str, max_age: i64) -> HeaderValue {
 
 fn clear_session_cookie() -> HeaderValue {
     HeaderValue::from_static(
-        "crabinet_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict",
+        "__Host-crabinet_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict",
     )
 }
 
 pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    cookie_value(headers, SESSION_COOKIE)
+}
+
+/// Returns the single value of cookie `name`, or `None` when it is absent or
+/// duplicated. Malformed or non-UTF-8 pairs set by unrelated applications on
+/// the same site are skipped instead of hiding every other cookie.
+pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let mut found = None;
     for header_value in headers.get_all(header::COOKIE) {
-        let Ok(cookies) = header_value.to_str() else {
-            return None;
-        };
-        for cookie in cookies.split(';') {
-            let Some((name, value)) = cookie.trim().split_once('=') else {
+        for pair in header_value.as_bytes().split(|byte| *byte == b';') {
+            let Ok(pair) = std::str::from_utf8(pair) else {
                 continue;
             };
-            if name == SESSION_COOKIE {
+            let Some((key, value)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            if key == name {
                 if found.is_some() {
                     return None;
                 }
@@ -1203,6 +1286,46 @@ fn validate_same_origin(headers: &HeaderMap) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Returns the hash verified for unknown or unusable accounts. It uses the most
+/// expensive configured Argon2 cost, so a failed lookup takes as long as a real
+/// verification and response timing does not reveal which accounts exist.
+fn dummy_password_hash<'a>(hashes: impl Iterator<Item = &'a str>) -> String {
+    let strongest = hashes
+        .filter_map(|hash| {
+            let parsed = PasswordHash::new(hash).ok()?;
+            Some((
+                parsed.params.get_decimal("m")?,
+                parsed.params.get_decimal("t")?,
+                parsed.params.get_decimal("p")?,
+            ))
+        })
+        .max();
+    let Some((memory, iterations, parallelism)) = strongest else {
+        return DUMMY_PASSWORD_HASH.to_owned();
+    };
+    if (memory, iterations, parallelism)
+        == (
+            crate::password::PASSWORD_MEMORY_KIB,
+            crate::password::PASSWORD_ITERATIONS,
+            crate::password::PASSWORD_PARALLELISM,
+        )
+    {
+        return DUMMY_PASSWORD_HASH.to_owned();
+    }
+    let mut password = [0_u8; TOKEN_BYTES];
+    if random_fill(&mut password).is_err() {
+        return DUMMY_PASSWORD_HASH.to_owned();
+    }
+    argon2::Params::new(memory, iterations, parallelism, None)
+        .ok()
+        .and_then(|params| {
+            Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+                .hash_password(&password)
+                .ok()
+        })
+        .map_or_else(|| DUMMY_PASSWORD_HASH.to_owned(), |hash| hash.to_string())
+}
+
 fn verify_password(hash: &str, password: &[u8]) -> bool {
     PasswordHash::new(hash)
         .ok()
@@ -1233,7 +1356,7 @@ fn is_plausible_username(username: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1243,7 +1366,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn decode_token(value: &str) -> Option<[u8; TOKEN_BYTES]> {
+pub(crate) fn decode_token(value: &str) -> Option<[u8; TOKEN_BYTES]> {
     if value.len() != TOKEN_BYTES * 2 {
         return None;
     }
@@ -2031,6 +2154,15 @@ mod tests {
             .unwrap()
             .email = Some("Alice@Example.com".into());
         let state = AppState::new(true);
+        let disabled = test
+            .service
+            .session_response(state.browse(), "Alice", "csrf".into(), None)
+            .await
+            .unwrap();
+        assert!(disabled.user.picture_url.is_none());
+        Arc::get_mut(&mut test.service.inner)
+            .unwrap()
+            .gravatar_enabled = true;
         let fallback = test
             .service
             .session_response(state.browse(), "Alice", "csrf".into(), None)
@@ -2495,13 +2627,188 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_limiter_windows_survive_key_flooding() {
+        let key = |name: &str| RateLimitKey {
+            account: normalized_identifier_digest(name),
+            source: None,
+        };
+        let mut limiter = RateLimiter {
+            entries: HashMap::new(),
+            attempts_per_window: 2,
+        };
+        assert!(limiter.allow(key("victim"), 100));
+        assert!(limiter.allow(key("victim"), 100));
+        assert!(!limiter.allow(key("victim"), 100));
+        for index in 0..(MAX_RATE_LIMIT_KEYS + 100) {
+            limiter.allow(key(&format!("flood-{index}")), 101);
+        }
+        assert_eq!(limiter.entries.len(), MAX_RATE_LIMIT_KEYS);
+        assert!(!limiter.allow(key("victim"), 102));
+
+        let mut full = RateLimiter {
+            entries: HashMap::new(),
+            attempts_per_window: 1,
+        };
+        for index in 0..MAX_RATE_LIMIT_KEYS {
+            assert!(full.allow(key(&format!("blocked-{index}")), 100));
+        }
+        assert!(!full.allow(key("newcomer"), 100));
+    }
+
+    #[test]
+    fn limiter_sources_group_ipv6_prefixes() {
+        let first: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let second: IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(rate_limit_source(first), rate_limit_source(second));
+        assert_ne!(rate_limit_source(first), rate_limit_source(other));
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        assert_eq!(
+            rate_limit_source(mapped),
+            "192.0.2.7".parse::<IpAddr>().unwrap()
+        );
+        let v4: IpAddr = "192.0.2.8".parse().unwrap();
+        assert_eq!(rate_limit_source(v4), v4);
+    }
+
+    #[test]
+    fn dummy_hash_matches_the_strongest_configured_cost() {
+        assert_eq!(dummy_password_hash(std::iter::empty()), DUMMY_PASSWORD_HASH);
+        assert_eq!(
+            dummy_password_hash([DUMMY_PASSWORD_HASH].into_iter()),
+            DUMMY_PASSWORD_HASH
+        );
+        let cheap = test_hash("cheap");
+        let stronger = Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(16, 2, 1, None).unwrap(),
+        )
+        .hash_password(b"stronger")
+        .unwrap()
+        .to_string();
+        let dummy = dummy_password_hash([cheap.as_str(), stronger.as_str()].into_iter());
+        let parsed = PasswordHash::new(&dummy).unwrap();
+        assert_eq!(parsed.params.get_decimal("m"), Some(16));
+        assert_eq!(parsed.params.get_decimal("t"), Some(2));
+        assert!(!verify_password(&dummy, b"stronger"));
+    }
+
+    #[tokio::test]
+    async fn startup_prunes_state_of_removed_users() {
+        let auth = test_auth(1, 20);
+        auth.service
+            .login("Alice", "a very long unicode password 🙂", None, None)
+            .await
+            .unwrap();
+        let store = &auth.service.inner.store;
+        store
+            .with_connection(|connection| {
+                connection.execute_batch(
+                    "INSERT INTO sessions (session_key, username, created_at, last_seen_at, expires_at)
+                       VALUES (zeroblob(32), 'Ghost', 1, 1, 9999999999);
+                     INSERT INTO user_preferences (username, default_share_id, default_path)
+                       VALUES ('Ghost', 'documents', ''), ('Alice', 'documents', '');
+                     INSERT INTO passkey_users (username, user_handle)
+                       VALUES ('Ghost', zeroblob(16));
+                     INSERT INTO passkeys (id, username, credential_id, name, credential_json, created_at)
+                       VALUES ('ghost-key', 'Ghost', x'02', 'Old', '{}', 1);",
+                )
+            })
+            .await
+            .unwrap();
+        store
+            .prune_unknown_users(["Alice", "Bob"].into_iter())
+            .unwrap();
+        for table in ["sessions", "user_preferences", "passkey_users", "passkeys"] {
+            let ghosts: i64 = store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE username = 'Ghost'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(ghosts, 0, "{table}");
+        }
+        assert_eq!(session_count(&auth.service, Some("Alice")), 1);
+        assert!(store.default_folder("Alice").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn passkey_registration_requires_a_recent_sign_in() {
+        let mut auth = test_auth(1, 20);
+        {
+            let inner = Arc::get_mut(&mut auth.service.inner).unwrap();
+            inner.idle_timeout_seconds = 3_600;
+            inner.absolute_timeout_seconds = 7_200;
+            inner.passkeys = Some(
+                passkeys::PasskeyState::new(
+                    &url::Url::parse("https://files.example.test").unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        let app = app_router(AppState::with_auth(true, auth.service.clone()));
+        let (cookie, csrf) = login_as(&app, "Alice", "a very long unicode password 🙂").await;
+        let start = || {
+            Request::post("/api/v1/auth/passkeys/register/start")
+                .header(header::HOST, "files.example.test")
+                .header(header::ORIGIN, "https://files.example.test")
+                .header("sec-fetch-site", "same-origin")
+                .header(header::COOKIE, &cookie)
+                .header("x-csrf-token", &csrf)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"name":"Laptop"}"#))
+                .unwrap()
+        };
+        let fresh = app.clone().oneshot(start()).await.unwrap();
+        assert_eq!(fresh.status(), StatusCode::OK);
+        auth.clock.set(1_000_000 + 601);
+        let stale = app.clone().oneshot(start()).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(stale.into_body(), 4_096).await.unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("reauthentication_required")
+        );
+    }
+
+    #[test]
+    fn cookie_parser_skips_foreign_malformed_pairs() {
+        let token = "0".repeat(64);
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_bytes(b"theme=\xff\xfe; flag").unwrap(),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("other=1; {SESSION_COOKIE}={token}")).unwrap(),
+        );
+        assert_eq!(session_cookie(&headers), Some(token.as_str()));
+        let mut unprefixed = HeaderMap::new();
+        unprefixed.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("crabinet_session={token}")).unwrap(),
+        );
+        assert_eq!(session_cookie(&unprefixed), None);
+    }
+
+    #[test]
     fn cookie_parser_and_token_decoder_reject_ambiguity() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_static(
-                "crabinet_session=0000000000000000000000000000000000000000000000000000000000000000; crabinet_session=1111111111111111111111111111111111111111111111111111111111111111",
-            ),
+            HeaderValue::from_str(&format!(
+                "{SESSION_COOKIE}={}; {SESSION_COOKIE}={}",
+                "0".repeat(64),
+                "1".repeat(64)
+            ))
+            .unwrap(),
         );
         assert_eq!(session_cookie(&headers), None);
         assert!(decode_token(&"f".repeat(64)).is_some());

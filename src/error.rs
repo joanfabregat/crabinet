@@ -13,6 +13,8 @@ pub enum AppError {
     AuthenticationFailed,
     #[error("request forbidden")]
     Forbidden,
+    #[error("a recent sign-in is required")]
+    ReauthenticationRequired,
     #[error("too many requests")]
     TooManyRequests,
     #[error("resource not found")]
@@ -58,6 +60,11 @@ impl AppError {
                 "Authentication failed",
             ),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "Request forbidden"),
+            Self::ReauthenticationRequired => (
+                StatusCode::FORBIDDEN,
+                "reauthentication_required",
+                "Sign in again to continue",
+            ),
             Self::TooManyRequests => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",

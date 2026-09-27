@@ -107,7 +107,7 @@ Generate hashes only with `crabinet hash-password`; clear-text passwords are nev
 
 A share grant is absent-by-default. `permission = "read"` cannot mutate. `permission = "write"` can mutate unless the share's `read_only = true`, which always wins. The OS user must still have matching host permissions. Each writable share receives a private mode-`0700` `.index-staging` directory for atomic uploads and bounded crash recovery; Crabinet never scans the complete share at startup. Writable shares must be mounted into only one Crabinet process; read-only shares create no staging state and may be served by separate read-only replicas.
 
-The `.index-staging` name remains reserved so existing writable shares can be used after upgrading from Index. Keep it in place when renaming the service and its deployment directories. The renamed `crabinet_session` cookie requires users to sign in again; update any deployment setting that uses the old `INDEX_CONFIG` environment variable to `CRABINET_CONFIG`.
+The `.index-staging` name remains reserved so existing writable shares can be used after upgrading from Index. Keep it in place when renaming the service and its deployment directories. The session cookie is now named `__Host-crabinet_session`, so upgrading requires users to sign in again; update any deployment setting that uses the old `INDEX_CONFIG` environment variable to `CRABINET_CONFIG`.
 
 ## Rootless Podman pod
 

@@ -85,10 +85,13 @@ async fn main() -> Result<()> {
     let auth = AuthService::from_config(&config).context("cannot initialize authentication")?;
     let oidc = if let Some(settings) = config.auth().oidc() {
         Some(
-            OidcService::discover(settings.clone())
-                .await
-                .map_err(anyhow::Error::msg)
-                .context("cannot initialize OIDC provider")?,
+            OidcService::discover(
+                settings.clone(),
+                derive_key(b"crabinet:oidc-transaction:v1\0", config.session_secret()).to_vec(),
+            )
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("cannot initialize OIDC provider")?,
         )
     } else {
         None
@@ -147,14 +150,14 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
         shares,
         limits,
         GlobalPolicy::default(),
-        derive_cursor_key(config.session_secret()),
+        derive_key(b"index:browse-cursor:v1\0", config.session_secret()),
     )
     .context("invalid browse policy")
 }
 
-fn derive_cursor_key(secret: &[u8]) -> [u8; 32] {
+fn derive_key(domain: &[u8], secret: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"index:browse-cursor:v1\0");
+    digest.update(domain);
     digest.update(secret);
     digest.finalize().into()
 }

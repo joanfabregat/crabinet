@@ -59,6 +59,10 @@ struct RawAuthConfig {
     oidc_enabled: bool,
     oidc: Option<RawOidcConfig>,
     passkeys: Option<RawPasskeyConfig>,
+    /// Show Gravatar images for users without an OIDC picture. Browsers then
+    /// send a hash of the configured email address to gravatar.com.
+    #[serde(default)]
+    gravatar_enabled: bool,
 }
 
 impl Default for RawAuthConfig {
@@ -68,6 +72,7 @@ impl Default for RawAuthConfig {
             oidc_enabled: false,
             oidc: None,
             passkeys: None,
+            gravatar_enabled: false,
         }
     }
 }
@@ -192,6 +197,7 @@ pub struct AuthConfig {
     password_enabled: bool,
     oidc: Option<OidcConfig>,
     passkeys_origin: Option<url::Url>,
+    gravatar_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -222,6 +228,7 @@ impl fmt::Debug for AuthConfig {
             .field("password_enabled", &self.password_enabled)
             .field("oidc", &self.oidc)
             .field("passkeys_origin", &self.passkeys_origin)
+            .field("gravatar_enabled", &self.gravatar_enabled)
             .finish()
     }
 }
@@ -549,6 +556,7 @@ impl Config {
                 password_enabled: raw.auth.password_enabled,
                 oidc,
                 passkeys_origin,
+                gravatar_enabled: raw.auth.gravatar_enabled,
             },
             server: ServerConfig {
                 listen,
@@ -671,6 +679,9 @@ impl AuthConfig {
     }
     pub fn passkeys_origin(&self) -> Option<&url::Url> {
         self.passkeys_origin.as_ref()
+    }
+    pub fn gravatar_enabled(&self) -> bool {
+        self.gravatar_enabled
     }
 }
 

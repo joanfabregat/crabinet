@@ -12,40 +12,40 @@ use axum::{
 };
 use webauthn_rs::prelude::{
     AuthenticationResult, DiscoverableAuthentication, DiscoverableKey, Passkey,
-    PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
-    Uuid, Webauthn, WebauthnBuilder,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, Uuid, Webauthn,
+    WebauthnBuilder,
 };
 use webauthn_rs_proto::ResidentKeyRequirement;
 
-const CHALLENGE_LIFETIME: Duration = Duration::from_secs(300);
-const MAX_PENDING: usize = 1_024;
+const REGISTRATION_LIFETIME: Duration = Duration::from_secs(300);
+const LOGIN_LIFETIME: Duration = Duration::from_secs(120);
+/// Unauthenticated login ceremonies share this bound. When it is reached the
+/// oldest ceremony is dropped rather than refusing new ones, so filling the map
+/// cannot lock every user out of passkey sign-in.
+const MAX_PENDING_LOGINS: usize = 4_096;
+const MAX_PENDING_REGISTRATIONS_PER_USER: usize = 4;
+/// Adding a passkey creates a long-lived credential, so it requires a session
+/// that was signed in recently rather than any still-valid session.
+const REGISTRATION_MAX_SESSION_AGE_SECONDS: i64 = 600;
 const MAX_PASSKEYS_PER_USER: i64 = 20;
 const MAX_PASSKEY_NAME_BYTES: usize = 80;
 
 pub(super) struct PasskeyState {
     webauthn: Webauthn,
-    pending: Mutex<HashMap<String, Pending>>,
+    registrations: Mutex<HashMap<String, Pending<Registration>>>,
+    logins: Mutex<HashMap<String, Pending<DiscoverableAuthentication>>>,
 }
 
-struct Pending {
+struct Pending<T> {
     expires: Instant,
-    kind: PendingKind,
+    state: T,
 }
 
-enum PendingKind {
-    Registration {
-        username: String,
-        session_key: Vec<u8>,
-        name: String,
-        state: PasskeyRegistration,
-    },
-    Login {
-        username: String,
-        state: PasskeyAuthentication,
-    },
-    DiscoverableLogin {
-        state: DiscoverableAuthentication,
-    },
+struct Registration {
+    username: String,
+    session_key: Vec<u8>,
+    name: String,
+    state: PasskeyRegistration,
 }
 
 #[derive(Serialize)]
@@ -71,8 +71,9 @@ struct FinishRegistration {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartLogin {
-    #[serde(default)]
-    username: Option<String>,
+    /// Accepted from older clients and ignored; see [`start_login`].
+    #[serde(default, rename = "username")]
+    _username: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,45 +114,91 @@ impl PasskeyState {
             .map_err(|error| AuthInitError::Passkeys(error.to_string()))?;
         Ok(Self {
             webauthn,
-            pending: Mutex::new(HashMap::new()),
+            registrations: Mutex::new(HashMap::new()),
+            logins: Mutex::new(HashMap::new()),
         })
     }
 
-    fn insert(&self, kind: PendingKind) -> Result<String, AppError> {
-        let mut pending = self.pending.lock().map_err(|_| AppError::Internal)?;
+    fn insert_registration(&self, registration: Registration) -> Result<String, AppError> {
+        let mut pending = self.registrations.lock().map_err(|_| AppError::Internal)?;
         let now = Instant::now();
         pending.retain(|_, flow| flow.expires > now);
-        if pending.len() >= MAX_PENDING {
-            return Err(AppError::Busy);
+        // Registrations are authenticated and bounded per configured user;
+        // a user's own oldest ceremony gives way to a new one.
+        let mine = || {
+            pending
+                .iter()
+                .filter(|(_, flow)| flow.state.username == registration.username)
+        };
+        if mine().count() >= MAX_PENDING_REGISTRATIONS_PER_USER
+            && let Some(oldest) = mine()
+                .min_by_key(|(_, flow)| flow.expires)
+                .map(|(id, _)| id.clone())
+        {
+            pending.remove(&oldest);
         }
-        let mut random = [0_u8; TOKEN_BYTES];
-        random_fill(&mut random).map_err(|_| AppError::Internal)?;
-        let id = encode_hex(&random);
+        let id = flow_id()?;
         pending.insert(
             id.clone(),
             Pending {
-                expires: now + CHALLENGE_LIFETIME,
-                kind,
+                expires: now + REGISTRATION_LIFETIME,
+                state: registration,
             },
         );
         Ok(id)
     }
 
-    fn take(&self, id: &str) -> Result<PendingKind, AppError> {
-        if id.len() != TOKEN_BYTES * 2 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppError::AuthenticationFailed);
+    fn insert_login(&self, login: DiscoverableAuthentication) -> Result<String, AppError> {
+        let mut pending = self.logins.lock().map_err(|_| AppError::Internal)?;
+        let now = Instant::now();
+        pending.retain(|_, flow| flow.expires > now);
+        if pending.len() >= MAX_PENDING_LOGINS
+            && let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, flow)| flow.expires)
+                .map(|(id, _)| id.clone())
+        {
+            pending.remove(&oldest);
         }
-        let pending = self
-            .pending
-            .lock()
-            .map_err(|_| AppError::Internal)?
-            .remove(id)
-            .ok_or(AppError::AuthenticationFailed)?;
-        if pending.expires <= Instant::now() {
-            return Err(AppError::AuthenticationFailed);
-        }
-        Ok(pending.kind)
+        let id = flow_id()?;
+        pending.insert(
+            id.clone(),
+            Pending {
+                expires: now + LOGIN_LIFETIME,
+                state: login,
+            },
+        );
+        Ok(id)
     }
+
+    fn take_registration(&self, id: &str) -> Result<Registration, AppError> {
+        take(&self.registrations, id)
+    }
+
+    fn take_login(&self, id: &str) -> Result<DiscoverableAuthentication, AppError> {
+        take(&self.logins, id)
+    }
+}
+
+fn flow_id() -> Result<String, AppError> {
+    let mut random = [0_u8; TOKEN_BYTES];
+    random_fill(&mut random).map_err(|_| AppError::Internal)?;
+    Ok(encode_hex(&random))
+}
+
+fn take<T>(flows: &Mutex<HashMap<String, Pending<T>>>, id: &str) -> Result<T, AppError> {
+    if id.len() != TOKEN_BYTES * 2 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::AuthenticationFailed);
+    }
+    let pending = flows
+        .lock()
+        .map_err(|_| AppError::Internal)?
+        .remove(id)
+        .ok_or(AppError::AuthenticationFailed)?;
+    if pending.expires <= Instant::now() {
+        return Err(AppError::AuthenticationFailed);
+    }
+    Ok(pending.state)
 }
 
 fn enabled(auth: &AuthService) -> Result<&PasskeyState, AppError> {
@@ -223,6 +270,11 @@ async fn start_registration(
     let auth = state.auth().ok_or(AppError::Internal)?;
     let passkeys = enabled(auth)?;
     let session = authorized_session(auth, &headers).await?;
+    if auth.inner.clock.now().saturating_sub(session.created_at)
+        > REGISTRATION_MAX_SESSION_AGE_SECONDS
+    {
+        return Err(AppError::ReauthenticationRequired);
+    }
     let Json(payload) = payload.map_err(|_| AppError::InvalidRequest)?;
     let name = validated_name(&payload.name)?;
     let username = session.principal.username().to_owned();
@@ -248,7 +300,7 @@ async fn start_registration(
         return Err(AppError::Internal);
     }
     let session_key = auth.digest(b"session\0", &session.session_token);
-    let flow_id = passkeys.insert(PendingKind::Registration {
+    let flow_id = passkeys.insert_registration(Registration {
         username,
         session_key,
         name,
@@ -266,15 +318,12 @@ async fn finish_registration(
     let passkeys = enabled(auth)?;
     let session = authorized_session(auth, &headers).await?;
     let Json(payload) = payload.map_err(|_| AppError::InvalidRequest)?;
-    let PendingKind::Registration {
+    let Registration {
         username,
         session_key,
         name,
         state: registration,
-    } = passkeys.take(&payload.flow_id)?
-    else {
-        return Err(AppError::AuthenticationFailed);
-    };
+    } = passkeys.take_registration(&payload.flow_id)?;
     if username != session.principal.username()
         || session_key != auth.digest(b"session\0", &session.session_token)
     {
@@ -289,83 +338,34 @@ async fn finish_registration(
         .store
         .add_passkey(&username, name, credential, auth.inner.clock.now())
         .await?;
+    tracing::info!(
+        audit = true,
+        subject = %username,
+        operation = "passkey_register",
+        passkey = %summary.id,
+        outcome = "success"
+    );
     Ok(no_store_json(summary))
 }
 
+/// Starts a discoverable ceremony. A supplied username is accepted for client
+/// compatibility but deliberately ignored: every enrolled passkey is
+/// discoverable, and answering per account would reveal which accounts exist
+/// and expose their credential IDs.
 async fn start_login(
     State(state): State<AppState>,
-    PeerAddress(source): PeerAddress,
     headers: HeaderMap,
     payload: Result<Json<StartLogin>, JsonRejection>,
 ) -> Result<Response, AppError> {
     validate_same_origin(&headers)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
     let passkeys = enabled(auth)?;
-    let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
-    let input = payload.username.as_deref().unwrap_or("").trim();
-    if input.is_empty() {
-        let rate_key = RateLimitKey {
-            account: normalized_identifier_digest("passkey-discoverable"),
-            source,
-        };
-        if !auth
-            .inner
-            .rate_limit
-            .lock()
-            .map_err(|_| AppError::Internal)?
-            .allow(rate_key, auth.inner.clock.now())
-        {
-            return Err(AppError::TooManyRequests);
-        }
-        let (options, authentication) = passkeys
-            .webauthn
-            .start_discoverable_authentication()
-            .map_err(|_| AppError::Internal)?;
-        let flow_id = passkeys.insert(PendingKind::DiscoverableLogin {
-            state: authentication,
-        })?;
-        return Ok(no_store_json(Challenge { flow_id, options }));
-    }
-    let user = if is_plausible_username(input) {
-        auth.inner.users.get_key_value(input)
-    } else if input.len() <= 254 && input.is_ascii() && input.contains('@') {
-        auth.inner.users.iter().find(|(_, user)| {
-            user.email
-                .as_deref()
-                .is_some_and(|email| email.eq_ignore_ascii_case(input))
-        })
-    } else {
-        None
-    };
-    let account = user.map_or(input, |(name, _)| name.as_str());
-    let rate_key = RateLimitKey {
-        account: normalized_identifier_digest(account),
-        source,
-    };
-    if !auth
-        .inner
-        .rate_limit
-        .lock()
-        .map_err(|_| AppError::Internal)?
-        .allow(rate_key, auth.inner.clock.now())
-    {
-        return Err(AppError::TooManyRequests);
-    }
-    let (username, _) = user
-        .filter(|(_, user)| !user.disabled)
-        .ok_or(AppError::AuthenticationFailed)?;
-    let credentials = auth.inner.store.passkeys_for(username).await?;
-    if credentials.is_empty() {
-        return Err(AppError::AuthenticationFailed);
-    }
+    let Json(_payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
     let (options, authentication) = passkeys
         .webauthn
-        .start_passkey_authentication(&credentials)
-        .map_err(|_| AppError::AuthenticationFailed)?;
-    let flow_id = passkeys.insert(PendingKind::Login {
-        username: username.to_owned(),
-        state: authentication,
-    })?;
+        .start_discoverable_authentication()
+        .map_err(|_| AppError::Internal)?;
+    let flow_id = passkeys.insert_login(authentication)?;
     Ok(no_store_json(Challenge { flow_id, options }))
 }
 
@@ -378,54 +378,33 @@ async fn finish_login(
     let auth = state.auth().ok_or(AppError::Internal)?;
     let passkeys = enabled(auth)?;
     let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
-    let pending = passkeys.take(&payload.flow_id)?;
-    let (username, result) = match pending {
-        PendingKind::Login { username, state } => {
-            if auth
-                .inner
-                .users
-                .get(&username)
-                .is_none_or(|user| user.disabled)
-            {
-                return Err(AppError::AuthenticationFailed);
-            }
-            let result = passkeys
-                .webauthn
-                .finish_passkey_authentication(&payload.credential, &state)
-                .map_err(|_| AppError::AuthenticationFailed)?;
-            (username, result)
-        }
-        PendingKind::DiscoverableLogin { state } => {
-            let (handle, credential_id) = passkeys
-                .webauthn
-                .identify_discoverable_authentication(&payload.credential)
-                .map_err(|_| AppError::AuthenticationFailed)?;
-            let (username, credential) = auth
-                .inner
-                .store
-                .passkey_for_discoverable_login(handle.as_bytes(), credential_id)
-                .await?
-                .ok_or(AppError::AuthenticationFailed)?;
-            if auth
-                .inner
-                .users
-                .get(&username)
-                .is_none_or(|user| user.disabled)
-            {
-                return Err(AppError::AuthenticationFailed);
-            }
-            let result = passkeys
-                .webauthn
-                .finish_discoverable_authentication(
-                    &payload.credential,
-                    state,
-                    &[DiscoverableKey::from(&credential)],
-                )
-                .map_err(|_| AppError::AuthenticationFailed)?;
-            (username, result)
-        }
-        PendingKind::Registration { .. } => return Err(AppError::AuthenticationFailed),
-    };
+    let authentication = passkeys.take_login(&payload.flow_id)?;
+    let (handle, credential_id) = passkeys
+        .webauthn
+        .identify_discoverable_authentication(&payload.credential)
+        .map_err(|_| AppError::AuthenticationFailed)?;
+    let (username, credential) = auth
+        .inner
+        .store
+        .passkey_for_discoverable_login(handle.as_bytes(), credential_id)
+        .await?
+        .ok_or(AppError::AuthenticationFailed)?;
+    if auth
+        .inner
+        .users
+        .get(&username)
+        .is_none_or(|user| user.disabled)
+    {
+        return Err(AppError::AuthenticationFailed);
+    }
+    let result = passkeys
+        .webauthn
+        .finish_discoverable_authentication(
+            &payload.credential,
+            authentication,
+            &[DiscoverableKey::from(&credential)],
+        )
+        .map_err(|_| AppError::AuthenticationFailed)?;
     if !auth
         .inner
         .store
@@ -668,6 +647,61 @@ fn random_id(bytes: usize) -> Result<String, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state() -> PasskeyState {
+        PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn login_ceremonies_drop_the_oldest_instead_of_refusing() {
+        let passkeys = state();
+        let mut last = String::new();
+        for _ in 0..=MAX_PENDING_LOGINS {
+            let (_, login) = passkeys
+                .webauthn
+                .start_discoverable_authentication()
+                .unwrap();
+            last = passkeys.insert_login(login).unwrap();
+        }
+        assert_eq!(passkeys.logins.lock().unwrap().len(), MAX_PENDING_LOGINS);
+        assert!(passkeys.take_login(&last).is_ok());
+        assert!(matches!(
+            passkeys.take_login(&last),
+            Err(AppError::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn registrations_are_bounded_per_user_and_separate_from_logins() {
+        let passkeys = state();
+        let registration = |username: &str| {
+            let (_, state) = passkeys
+                .webauthn
+                .start_passkey_registration(Uuid::from_bytes([1; 16]), username, username, None)
+                .unwrap();
+            Registration {
+                username: username.to_owned(),
+                session_key: vec![0; 32],
+                name: "Key".into(),
+                state,
+            }
+        };
+        let bob = passkeys.insert_registration(registration("Bob")).unwrap();
+        let alice: Vec<_> = (0..=MAX_PENDING_REGISTRATIONS_PER_USER)
+            .map(|_| passkeys.insert_registration(registration("Alice")).unwrap())
+            .collect();
+        assert_eq!(
+            passkeys.registrations.lock().unwrap().len(),
+            MAX_PENDING_REGISTRATIONS_PER_USER + 1
+        );
+        assert!(passkeys.take_login(&bob).is_err());
+        assert!(passkeys.take_registration(&bob).is_ok());
+        let kept = alice
+            .iter()
+            .filter(|id| passkeys.take_registration(id).is_ok())
+            .count();
+        assert_eq!(kept, MAX_PENDING_REGISTRATIONS_PER_USER);
+    }
 
     #[tokio::test]
     async fn passkey_records_are_scoped_to_their_owner_and_can_be_renamed_or_removed() {
