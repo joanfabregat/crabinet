@@ -430,6 +430,7 @@ test.describe("writable share operations", () => {
     await openSignedIn(page, "/browse/writable", "writer");
     await page.getByRole("link", { name: "Projects" }).click();
     await expect(page).toHaveURL(/path=Projects/);
+    await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
     let releaseUpload!: () => void;
     const holdUpload = new Promise<void>((resolve) => {
