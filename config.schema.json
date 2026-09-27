@@ -46,6 +46,11 @@
     "RawAuthConfig": {
       "type": "object",
       "properties": {
+        "gravatar_enabled": {
+          "description": "Show Gravatar images for users without an OIDC picture. Browsers then\nsend a hash of the configured email address to gravatar.com.",
+          "type": "boolean",
+          "default": false
+        },
         "oidc": {
           "anyOf": [
             {

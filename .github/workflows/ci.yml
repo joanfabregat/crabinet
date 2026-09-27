@@ -55,6 +55,9 @@ jobs:
       - name: Audit dependencies
         working-directory: web
         run: npm audit --audit-level=high
+      - name: Install audited esbuild binary
+        working-directory: web
+        run: npm rebuild esbuild --ignore-scripts=false
       - name: Check formatting
         working-directory: web
         run: npm run format:check

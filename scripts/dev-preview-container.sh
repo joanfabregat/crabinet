@@ -4,6 +4,7 @@ set -eu
 
 repo_root=/workspace
 fixtures=$repo_root/web/e2e/fixtures
+binary=$repo_root/target/debug/crabinet
 state_dir=$(mktemp -d /tmp/crabinet-preview.XXXXXXXX)
 backend_pid=
 vite_pid=
@@ -25,11 +26,20 @@ mv "$state_dir/read-only/hostile-html.fixture" "$state_dir/read-only/hostile.htm
 cp -R "$fixtures/writable" "$state_dir/writable"
 head -c 48 /dev/urandom > "$state_dir/session.key"
 chmod 600 "$state_dir/session.key"
+
+# The e2e fixture's password is committed, so a routed preview gets its own.
+# hash-password reads only from a controlling terminal; script(1) gives it a
+# private pseudo-terminal whose echo is discarded with everything but the hash.
+preview_password=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+preview_hash=$(printf '%s\n%s\n' "$preview_password" "$preview_password" |
+  script --quiet --return --command "$binary hash-password" /dev/null |
+  tr -d '\r' | grep -E '^[$]argon2id[$][A-Za-z0-9+/=,$]+$')
 sed \
   -e "s|__STATE_DIR__|$state_dir|g" \
   -e 's|__PORT__|8080|g' \
   -e 's|session_idle_timeout_seconds = 60|session_idle_timeout_seconds = 3600|g' \
   -e 's|session_absolute_timeout_seconds = 300|session_absolute_timeout_seconds = 28800|g' \
+  -e "s|^password_hash = \".*\"\$|password_hash = \"$preview_hash\"|" \
   "$fixtures/config.toml.in" > "$state_dir/config.toml"
 
 # Land preview users in the synthetic writable share so create actions are visible.
@@ -141,8 +151,10 @@ cat >> "$state_dir/config.toml" <<'EOF'
 origin = "https://files-dev.jf.ffwip.com"
 EOF
 
+printf 'Preview password for reader and writer (this run only): %s\n' "$preview_password" >&2
+unset preview_password
+
 export RUST_LOG=crabinet=debug
-binary=$repo_root/target/debug/crabinet
 "$binary" --config "$state_dir/config.toml" &
 backend_pid=$!
 running_binary=$(stat -c '%Y %s' "$binary")

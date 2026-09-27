@@ -50,7 +50,7 @@ Configuration and mounted share roots are operator-trusted at startup. Filenames
 12. Code and text render as inert text. Markdown disallows raw HTML and is sanitized. HTML preview has both iframe and HTTP CSP sandboxes and cannot execute scripts, submit forms, navigate, open popups, use application storage, or contact external origins.
 13. Logs, errors, test artifacts, and CI output exclude passwords, hashes, cookies, session IDs, secret contents, and file contents.
 14. Release images package the same tested binaries attached to the release; dependency and provenance evidence accompanies releases.
-15. Passkey registration requires an authenticated session and CSRF proof. Authentication binds a single-use challenge to the configured HTTPS origin and relying party, requires user verification, and maps the credential to an enabled local user before creating a session.
+15. Passkey registration requires CSRF proof and a session that signed in within the last 10 minutes. Authentication binds a single-use challenge to the configured HTTPS origin and relying party, requires user verification, and maps the credential to an enabled local user before creating a session.
 
 The concrete path grammar, capability lifecycle, alias policy, platform assumptions, and authorization contract are specified in [Filesystem security boundary](filesystem-security.md). Preview formats, size limits, response headers, and the source-only HTML decision are specified in [Preview security contract](previews.md).
 

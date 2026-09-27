@@ -14,15 +14,26 @@ use axum::{
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::{app::AppState, config::OidcConfig, error::AppError};
+use crate::{
+    app::AppState,
+    auth::{cookie_value, decode_token, encode_hex, session_cookie, session_cookie_header},
+    config::OidcConfig,
+    error::AppError,
+};
 
 const TRANSACTION_SECONDS: u64 = 300;
-const TRANSACTION_COOKIE: &str = "crabinet_oidc_state";
+const TRANSACTION_COOKIE: &str = "__Host-crabinet_oidc_state";
+/// Bounds the replay-protection set of consumed states. Transactions live in
+/// the browser, so nothing unauthenticated callers do can refuse new sign-ins.
+const MAX_CONSUMED_STATES: usize = 4_096;
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct OidcService {
@@ -34,7 +45,8 @@ struct OidcInner {
     http: reqwest::Client,
     metadata: ProviderMetadata,
     keys: Mutex<JwkSet>,
-    pending: Mutex<HashMap<String, Pending>>,
+    transaction_key: Vec<u8>,
+    consumed: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -48,11 +60,13 @@ struct ProviderMetadata {
     token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
-struct Pending {
+/// One sign-in attempt. Its state, expiry and the previous session key travel
+/// in an HMAC-protected cookie; the nonce and PKCE verifier are derived from
+/// the state with the server key, so no per-attempt server memory is needed.
+struct Transaction {
     nonce: String,
     verifier: String,
-    previous_cookie: Option<String>,
-    expires_at: u64,
+    previous_session_key: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -118,7 +132,9 @@ struct Methods {
 }
 
 impl OidcService {
-    pub async fn discover(config: OidcConfig) -> Result<Self, String> {
+    /// `transaction_key` authenticates sign-in transaction cookies; derive it
+    /// from the session secret with a domain separate from other uses.
+    pub async fn discover(config: OidcConfig, transaction_key: Vec<u8>) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
@@ -160,33 +176,47 @@ impl OidcService {
                 http,
                 metadata,
                 keys: Mutex::new(keys),
-                pending: Mutex::new(HashMap::new()),
+                transaction_key,
+                consumed: Mutex::new(HashMap::new()),
             }),
         })
     }
 
-    fn begin(&self, headers: &HeaderMap) -> Result<Response, AppError> {
+    fn transaction_mac(&self) -> HmacSha256 {
+        HmacSha256::new_from_slice(&self.inner.transaction_key)
+            .expect("HMAC accepts keys of every length")
+    }
+
+    fn derive(&self, domain: &[u8], state: &str) -> String {
+        let mut mac = self.transaction_mac();
+        mac.update(domain);
+        mac.update(state.as_bytes());
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    }
+
+    fn cookie_mac(&self, state: &str, expires_at: u64, previous: &str) -> HmacSha256 {
+        let mut mac = self.transaction_mac();
+        mac.update(b"oidc-transaction\0");
+        mac.update(state.as_bytes());
+        mac.update(b"\0");
+        mac.update(expires_at.to_string().as_bytes());
+        mac.update(b"\0");
+        mac.update(previous.as_bytes());
+        mac
+    }
+
+    fn begin(&self, previous_session_key: Option<&[u8]>) -> Result<Response, AppError> {
         let state = random_token()?;
-        let nonce = random_token()?;
-        let verifier = random_token()?;
+        let nonce = self.derive(b"oidc-nonce\0", &state);
+        let verifier = self.derive(b"oidc-verifier\0", &state);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let now = unix_time()?;
-        {
-            let mut pending = self.inner.pending.lock().map_err(|_| AppError::Internal)?;
-            pending.retain(|_, item| item.expires_at > now);
-            if pending.len() >= 1024 {
-                return Err(AppError::Busy);
-            }
-            pending.insert(
-                state.clone(),
-                Pending {
-                    nonce: nonce.clone(),
-                    verifier,
-                    previous_cookie: crate::auth::session_cookie(headers).map(str::to_owned),
-                    expires_at: now + TRANSACTION_SECONDS,
-                },
-            );
-        }
+        let expires_at = unix_time()? + TRANSACTION_SECONDS;
+        let previous = previous_session_key.map(encode_hex).unwrap_or_default();
+        let tag = URL_SAFE_NO_PAD.encode(
+            self.cookie_mac(&state, expires_at, &previous)
+                .finalize()
+                .into_bytes(),
+        );
         let mut url = Url::parse(&self.inner.metadata.authorization_endpoint)
             .map_err(|_| AppError::Internal)?;
         url.query_pairs_mut()
@@ -200,7 +230,7 @@ impl OidcService {
             .append_pair("code_challenge_method", "S256");
         let mut response = Redirect::temporary(url.as_str()).into_response();
         response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&format!(
-            "{TRANSACTION_COOKIE}={state}; Max-Age={TRANSACTION_SECONDS}; Path=/api/v1/auth/oidc; Secure; HttpOnly; SameSite=Lax"
+            "{TRANSACTION_COOKIE}={state}.{expires_at}.{previous}.{tag}; Max-Age={TRANSACTION_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Lax"
         )).map_err(|_| AppError::Internal)?);
         no_store(&mut response);
         Ok(response)
@@ -276,16 +306,16 @@ impl OidcService {
             .login_oidc(
                 &email,
                 google_picture_url(claims.picture.as_deref()),
-                transaction.previous_cookie.as_deref(),
+                transaction.previous_session_key,
             )
             .await
         {
             Ok((_, cookie_token, _)) => {
                 let mut response = Redirect::to("/").into_response();
-                response.headers_mut().append(header::SET_COOKIE, HeaderValue::from_str(&format!(
-                    "crabinet_session={cookie_token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
-                    auth.absolute_timeout_seconds()
-                )).map_err(|_| AppError::Internal)?);
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    session_cookie_header(&cookie_token, auth.absolute_timeout_seconds()),
+                );
                 response
                     .headers_mut()
                     .append(header::SET_COOKIE, clear_transaction_cookie());
@@ -297,21 +327,65 @@ impl OidcService {
         }
     }
 
-    fn consume(&self, headers: &HeaderMap, state: &str) -> Result<Pending, AppError> {
-        if state.len() > 128 || cookie(headers, TRANSACTION_COOKIE) != Some(state) {
+    fn consume(&self, headers: &HeaderMap, state: &str) -> Result<Transaction, AppError> {
+        let value =
+            cookie_value(headers, TRANSACTION_COOKIE).ok_or(AppError::AuthenticationFailed)?;
+        let mut parts = value.split('.');
+        let (Some(cookie_state), Some(expires_at), Some(previous), Some(tag), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return Err(AppError::AuthenticationFailed);
+        };
+        if state.len() > 128 || cookie_state != state {
             return Err(AppError::AuthenticationFailed);
         }
-        let transaction = self
-            .inner
-            .pending
-            .lock()
-            .map_err(|_| AppError::Internal)?
-            .remove(state)
-            .ok_or(AppError::AuthenticationFailed)?;
-        if transaction.expires_at <= unix_time()? {
+        let expires_at: u64 = expires_at
+            .parse()
+            .map_err(|_| AppError::AuthenticationFailed)?;
+        let tag = URL_SAFE_NO_PAD
+            .decode(tag)
+            .map_err(|_| AppError::AuthenticationFailed)?;
+        self.cookie_mac(state, expires_at, previous)
+            .verify_slice(&tag)
+            .map_err(|_| AppError::AuthenticationFailed)?;
+        let now = unix_time()?;
+        if expires_at <= now {
             return Err(AppError::AuthenticationFailed);
         }
-        Ok(transaction)
+        let previous_session_key = if previous.is_empty() {
+            None
+        } else {
+            Some(
+                decode_token(previous)
+                    .ok_or(AppError::AuthenticationFailed)?
+                    .to_vec(),
+            )
+        };
+        {
+            let mut consumed = self.inner.consumed.lock().map_err(|_| AppError::Internal)?;
+            consumed.retain(|_, expiry| *expiry > now);
+            if consumed.contains_key(state) {
+                return Err(AppError::AuthenticationFailed);
+            }
+            if consumed.len() >= MAX_CONSUMED_STATES
+                && let Some(oldest) = consumed
+                    .iter()
+                    .min_by_key(|(_, expiry)| **expiry)
+                    .map(|(state, _)| state.clone())
+            {
+                consumed.remove(&oldest);
+            }
+            consumed.insert(state.to_owned(), expires_at);
+        }
+        Ok(Transaction {
+            nonce: self.derive(b"oidc-nonce\0", state),
+            verifier: self.derive(b"oidc-verifier\0", state),
+            previous_session_key,
+        })
     }
 
     async fn verify(&self, token: &str, nonce: &str) -> Result<Claims, AppError> {
@@ -462,25 +536,9 @@ fn unix_time() -> Result<u64, AppError> {
         .as_secs())
 }
 
-fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let mut found = None;
-    for header in headers.get_all(header::COOKIE) {
-        for part in header.to_str().ok()?.split(';') {
-            let (key, value) = part.trim().split_once('=')?;
-            if key == name {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(value);
-            }
-        }
-    }
-    found
-}
-
 fn clear_transaction_cookie() -> HeaderValue {
     HeaderValue::from_static(
-        "crabinet_oidc_state=; Max-Age=0; Path=/api/v1/auth/oidc; Secure; HttpOnly; SameSite=Lax",
+        "__Host-crabinet_oidc_state=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
     )
 }
 
@@ -516,7 +574,11 @@ async fn methods(State(state): State<AppState>) -> Json<Methods> {
 }
 
 async fn start(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
-    state.oidc().ok_or(AppError::NotFound)?.begin(&headers)
+    let oidc = state.oidc().ok_or(AppError::NotFound)?;
+    let previous_session_key = state
+        .auth()
+        .and_then(|auth| session_cookie(&headers).and_then(|cookie| auth.session_key(cookie)));
+    oidc.begin(previous_session_key.as_deref())
 }
 
 async fn callback(
@@ -578,7 +640,8 @@ mod tests {
                     http: reqwest::Client::builder().no_proxy().build().unwrap(),
                     metadata,
                     keys: Mutex::new(keys),
-                    pending: Mutex::new(HashMap::new()),
+                    transaction_key: vec![3_u8; 32],
+                    consumed: Mutex::new(HashMap::new()),
                 }),
             },
             private.as_ref().to_vec(),
@@ -696,15 +759,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_static("crabinet_oidc_state=a; crabinet_oidc_state=b"),
+            HeaderValue::from_static("__Host-crabinet_oidc_state=a; __Host-crabinet_oidc_state=b"),
         );
-        assert_eq!(cookie(&headers, TRANSACTION_COOKIE), None);
+        assert_eq!(cookie_value(&headers, TRANSACTION_COOKIE), None);
     }
 
     #[test]
     fn state_requires_the_starting_browser_and_is_single_use() {
         let (service, _) = service_and_key();
-        let response = service.begin(&HeaderMap::new()).unwrap();
+        let response = service.begin(None).unwrap();
         let location = response
             .headers()
             .get(header::LOCATION)
@@ -738,6 +801,59 @@ mod tests {
             service.consume(&headers, &state),
             Err(AppError::AuthenticationFailed)
         ));
+    }
+
+    #[test]
+    fn transaction_cookie_is_authenticated_and_carries_no_server_state() {
+        let (service, _) = service_and_key();
+        let previous = [9_u8; 32];
+        let response = service.begin(Some(&previous)).unwrap();
+        let location = response.headers().get(header::LOCATION).unwrap();
+        let location = Url::parse(location.to_str().unwrap()).unwrap();
+        let query = |name: &str| {
+            location
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .unwrap()
+                .1
+                .into_owned()
+        };
+        let state = query("state");
+        let raw_cookie = response.headers().get(header::SET_COOKIE).unwrap();
+        let raw_cookie = raw_cookie.to_str().unwrap();
+        assert!(raw_cookie.starts_with("__Host-crabinet_oidc_state="));
+        assert!(raw_cookie.contains("; Path=/;"));
+        let pair = raw_cookie.split(';').next().unwrap().to_owned();
+        let with_cookie = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, HeaderValue::from_str(value).unwrap());
+            headers
+        };
+
+        for tampered in [
+            pair.replacen(&encode_hex(&previous), &encode_hex(&[8_u8; 32]), 1),
+            pair.replacen(&state, &random_token().unwrap(), 1),
+            format!(
+                "{}{}",
+                &pair[..pair.len() - 1],
+                if pair.ends_with('A') { "B" } else { "A" }
+            ),
+        ] {
+            assert!(matches!(
+                service.consume(&with_cookie(&tampered), &state),
+                Err(AppError::AuthenticationFailed)
+            ));
+        }
+        let transaction = service.consume(&with_cookie(&pair), &state).unwrap();
+        assert_eq!(
+            transaction.previous_session_key.as_deref(),
+            Some(&previous[..])
+        );
+        assert_eq!(transaction.nonce, query("nonce"));
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(Sha256::digest(transaction.verifier.as_bytes())),
+            query("code_challenge")
+        );
     }
 
     fn local_auth() -> (TempDir, AuthService) {
@@ -776,7 +892,7 @@ email = "alice@example.com"
     async fn callback_exchanges_code_maps_email_and_rejects_replay() {
         let (_directory, auth) = local_auth();
         let (mut service, private) = service_and_key();
-        let begin = service.begin(&HeaderMap::new()).unwrap();
+        let begin = service.begin(None).unwrap();
         let location = Url::parse(
             begin
                 .headers()
@@ -855,7 +971,10 @@ email = "alice@example.com"
                 .headers()
                 .get_all(header::SET_COOKIE)
                 .iter()
-                .any(|cookie| cookie.to_str().unwrap().starts_with("crabinet_session="))
+                .any(|cookie| cookie
+                    .to_str()
+                    .unwrap()
+                    .starts_with("__Host-crabinet_session="))
         );
         let replay = CallbackQuery {
             code: Some("sample-code".into()),

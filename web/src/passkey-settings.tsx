@@ -1,23 +1,59 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import {
   browserSupportsWebAuthn,
   startRegistration,
+  WebAuthnAbortService,
 } from "@simplewebauthn/browser";
 import { Pencil, Trash2 } from "lucide-preact";
 
-import { ApiError, type ApiClient, type Passkey } from "./api";
+import {
+  accountChangedCode,
+  ApiError,
+  reauthenticationRequiredCode,
+  withCsrfRetry,
+  type ApiClient,
+  type Passkey,
+  type Session,
+} from "./api";
 
 interface Props {
   api: ApiClient;
   csrfToken: string;
+  userId: string;
   onSessionExpired: () => void;
+  onSessionRefreshed: (session: Session) => void;
+  /** Reports when a passkey action is in progress so the host can stay open. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 function dateLabel(seconds: number): string {
   return new Date(seconds * 1000).toLocaleDateString();
 }
 
-export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
+/**
+ * Whether a WebAuthn or request failure means the person (or this page)
+ * cancelled the ceremony. Browsers report a dismissed or timed-out prompt as
+ * `NotAllowedError`; those are not failures worth an error message.
+ */
+export function isWebAuthnCancellation(cause: unknown): boolean {
+  if (cause instanceof ApiError) return cause.kind === "aborted";
+  if (typeof cause !== "object" || cause === null) return false;
+  const { name, code } = cause as { name?: unknown; code?: unknown };
+  return (
+    name === "AbortError" ||
+    name === "NotAllowedError" ||
+    code === "ERROR_CEREMONY_ABORTED"
+  );
+}
+
+export function PasskeySettings({
+  api,
+  csrfToken,
+  userId,
+  onSessionExpired,
+  onSessionRefreshed,
+  onBusyChange,
+}: Props) {
   const [enabled, setEnabled] = useState(false);
   const [keys, setKeys] = useState<Passkey[]>([]);
   const [name, setName] = useState("");
@@ -25,6 +61,25 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
   const [editedName, setEditedName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const registration = useRef<AbortController>();
+  const ceremonyActive = useRef(false);
+  const busyChange = useRef(onBusyChange);
+  busyChange.current = onBusyChange;
+
+  useEffect(() => {
+    busyChange.current?.(busy);
+  }, [busy]);
+
+  useEffect(
+    () => () => {
+      // Leaving Settings mid-registration must not leave a prompt or a
+      // request running for a dialog that no longer exists.
+      registration.current?.abort();
+      if (ceremonyActive.current) WebAuthnAbortService.cancelCeremony();
+      busyChange.current?.(false);
+    },
+    [],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -50,37 +105,72 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
   const failed = (cause: unknown, message: string) => {
     if (cause instanceof ApiError && cause.kind === "unauthorized") {
       onSessionExpired();
+    } else if (cause instanceof ApiError && cause.code === accountChangedCode) {
+      setError(
+        "A different account is now signed in. Reload the page to continue.",
+      );
     } else {
       setError(message);
     }
   };
 
+  const mutate = <T,>(
+    request: (token: string) => Promise<T>,
+    signal?: AbortSignal,
+  ) =>
+    withCsrfRetry(api, csrfToken, userId, onSessionRefreshed, request, signal);
+
   const add = async () => {
     if (!name.trim() || busy) return;
+    const controller = new AbortController();
+    registration.current = controller;
     setBusy(true);
     setError(undefined);
     try {
-      const challenge = await api.startPasskeyRegistration(
-        name.trim(),
-        csrfToken,
+      const challenge = await mutate(
+        (token) =>
+          api.startPasskeyRegistration(name.trim(), token, controller.signal),
+        controller.signal,
       );
+      if (controller.signal.aborted) return;
+      ceremonyActive.current = true;
       const credential = await startRegistration({
         optionsJSON: challenge.options.publicKey,
+      }).finally(() => {
+        ceremonyActive.current = false;
       });
-      const key = await api.finishPasskeyRegistration(
-        challenge.flowId,
-        credential,
-        csrfToken,
+      if (controller.signal.aborted) return;
+      const key = await mutate(
+        (token) =>
+          api.finishPasskeyRegistration(
+            challenge.flowId,
+            credential,
+            token,
+            controller.signal,
+          ),
+        controller.signal,
       );
+      if (controller.signal.aborted) return;
       setKeys((current) => [key, ...current]);
       setName("");
     } catch (cause) {
+      if (controller.signal.aborted || isWebAuthnCancellation(cause)) return;
+      if (
+        cause instanceof ApiError &&
+        cause.code === reauthenticationRequiredCode
+      ) {
+        setError(
+          "For security, sign out and sign in again, then add the passkey within 10 minutes.",
+        );
+        return;
+      }
       failed(
         cause,
         "Could not add the passkey. Try again or choose another device.",
       );
     } finally {
-      setBusy(false);
+      if (registration.current === controller) registration.current = undefined;
+      if (!controller.signal.aborted) setBusy(false);
     }
   };
 
@@ -89,7 +179,9 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
     setBusy(true);
     setError(undefined);
     try {
-      const updated = await api.renamePasskey(id, editedName.trim(), csrfToken);
+      const updated = await mutate((token) =>
+        api.renamePasskey(id, editedName.trim(), token),
+      );
       setKeys((current) =>
         current.map((key) => (key.id === id ? updated : key)),
       );
@@ -110,7 +202,7 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
     setBusy(true);
     setError(undefined);
     try {
-      await api.removePasskey(key.id, csrfToken);
+      await mutate((token) => api.removePasskey(key.id, token));
       setKeys((current) => current.filter((item) => item.id !== key.id));
     } catch (cause) {
       failed(cause, "Could not remove the passkey. Try again.");

@@ -40,11 +40,7 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
     };
 
     let mime = mime_guess::from_path(asset_path).first_or_octet_stream();
-    let cache = if asset_path == INDEX {
-        "no-cache"
-    } else {
-        "public, max-age=31536000, immutable"
-    };
+    let cache = cache_control(asset_path);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -56,6 +52,17 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
         .unwrap_or_else(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal service error").into_response()
         })
+}
+
+/// Only Vite's content-hashed `assets/*` output may be cached immutably.
+/// Unhashed files (the HTML shell and `web/public` icons) keep their URL
+/// across releases, so browsers must revalidate them.
+fn cache_control(asset_path: &str) -> &'static str {
+    if asset_path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
 }
 
 pub fn has_index() -> bool {
@@ -80,6 +87,17 @@ mod tests {
         assert!(value.contains("frame-ancestors 'none'"));
         assert!(value.contains("img-src 'self' https://lh3.googleusercontent.com"));
         assert!(value.contains("https://www.gravatar.com"));
+    }
+
+    #[test]
+    fn only_hashed_assets_are_immutable() {
+        assert_eq!(
+            cache_control("assets/index-3f2a1b.js"),
+            "public, max-age=31536000, immutable"
+        );
+        for unhashed in [INDEX, "crabinet.png", "google-g.png"] {
+            assert_eq!(cache_control(unhashed), "no-cache", "{unhashed}");
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ The Axum/Tokio backend owns authentication, authorization, bounded streaming, an
 
 Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files preference is also in Settings and remains local to each browser.
 
-Account pictures use an accepted Google profile image when available or a Gravatar image keyed by the configured email address. These are browser requests to external hosts; see [authentication and account pictures](docs/authentication.md#account-pictures).
+Account pictures use an accepted Google profile image when available or, when an operator enables `auth.gravatar_enabled`, a Gravatar image keyed by the configured email address. These are browser requests to external hosts; see [authentication and account pictures](docs/authentication.md#account-pictures).
 
 Start with the [threat model](docs/threat-model.md), [architecture decisions](docs/architecture-decisions.md), and [filesystem invariants](docs/filesystem-security.md) before changing a security boundary. The HTTP behavior used by the frontend is documented in [browse](docs/browse-api.md), [mutation](docs/mutations.md), [preview](docs/previews.md), and [frontend contract](docs/frontend-api-contract.md) notes; these describe the current first-party API, not a stable third-party compatibility promise.
 
@@ -41,17 +41,19 @@ Start with the [threat model](docs/threat-model.md), [architecture decisions](do
 Release archives contain the executable, license, README, annotated configuration, and JSON Schema. Linux `x86_64` and `aarch64` are supported; other operating systems and libc targets are not release targets. The commands below describe Crabinet-branded releases; prereleases published before the rename retain their original `index` artifact names.
 
 ```sh
-curl -LO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/crabinet-v0.1.0-linux-amd64.tar.gz
-curl -LO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/SHA256SUMS
+curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/crabinet-v0.1.0-linux-amd64.tar.gz
+curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 gh attestation verify crabinet-v0.1.0-linux-amd64.tar.gz \
-  --repo joanfabregat/crabinet
+  --repo joanfabregat/crabinet \
+  --signer-workflow joanfabregat/crabinet/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0
 tar -xzf crabinet-v0.1.0-linux-amd64.tar.gz
 cd crabinet-linux-amd64
 ./crabinet --help
 ```
 
-Replace `v0.1.0` with an existing release tag. The release publishes one combined `SHA256SUMS` file; `--ignore-missing` checks the archive you downloaded without requiring every release asset.
+Replace `v0.1.0` with an existing release tag in every command. The release publishes one combined `SHA256SUMS` file; `--ignore-missing` checks the archive you downloaded without requiring every release asset. The attestation check pins the signing workflow and tag, so an artifact built by any other workflow or ref is rejected.
 
 Prepare paths outside every share, generate a session secret, and create a password hash interactively:
 
@@ -111,7 +113,7 @@ Generate hashes only with `crabinet hash-password`; clear-text passwords are nev
 
 A share grant is absent-by-default. `permission = "read"` cannot mutate. `permission = "write"` can mutate unless the share's `read_only = true`, which always wins. The OS user must still have matching host permissions. Each writable share receives a private mode-`0700` `.index-staging` directory for atomic uploads and bounded crash recovery; Crabinet never scans the complete share at startup. Writable shares must be mounted into only one Crabinet process; read-only shares create no staging state and may be served by separate read-only replicas.
 
-The `.index-staging` name remains reserved so existing writable shares can be used after upgrading from Index. Keep it in place when renaming the service and its deployment directories. The renamed `crabinet_session` cookie requires users to sign in again; update any deployment setting that uses the old `INDEX_CONFIG` environment variable to `CRABINET_CONFIG`.
+The `.index-staging` name remains reserved so existing writable shares can be used after upgrading from Index. Keep it in place when renaming the service and its deployment directories. The session cookie is now named `__Host-crabinet_session`, so upgrading requires users to sign in again; update any deployment setting that uses the old `INDEX_CONFIG` environment variable to `CRABINET_CONFIG`.
 
 ## Rootless Podman pod
 

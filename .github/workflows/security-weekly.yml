@@ -115,13 +115,28 @@ jobs:
       packages: read
       security-events: write
     steps:
+      - name: Authenticate to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - name: Check whether the latest image exists
         id: image
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGE: ghcr.io/${{ github.repository }}:latest
         run: |
-          if docker manifest inspect "${IMAGE}" >/dev/null 2>&1; then
+          # Only an empty release list means nothing was published yet. Once a
+          # stable release exists, an unreadable image is a failure.
+          stable_releases=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select((.draft | not) and (.prerelease | not)) | .tag_name')
+          if docker manifest inspect "${IMAGE}" >/dev/null; then
             echo "available=true" >> "${GITHUB_OUTPUT}"
+          elif [[ -n "${stable_releases}" ]]; then
+            echo "A stable release exists but ${IMAGE} cannot be read" >&2
+            exit 1
           else
             echo "available=false" >> "${GITHUB_OUTPUT}"
             echo "No released image exists yet; source scans still ran."

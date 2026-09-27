@@ -8,6 +8,7 @@ import {
   htmlPreviewUrl,
   imagePreviewUrl,
   renderedHtmlPreviewUrl,
+  withCsrfRetry,
 } from "./api";
 
 describe("API client", () => {
@@ -99,11 +100,12 @@ describe("API client", () => {
   });
 
   it("starts discoverable passkey sign-in without an account name", async () => {
-    const fetch = vi
-      .fn<typeof globalThis.fetch>()
-      .mockResolvedValue(
-        Response.json({ flowId: "flow", options: { publicKey: {} } }),
-      );
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        flowId: "flow",
+        options: { publicKey: { challenge: "c", allowCredentials: [] } },
+      }),
+    );
     const api = createApiClient({ fetch });
 
     await api.startPasskeyLogin();
@@ -291,6 +293,168 @@ describe("API client", () => {
     ).rejects.toMatchObject({
       kind: "invalid-response",
     });
+  });
+
+  it.each([
+    ["https://lh3.googleusercontent.com/a/avatar", true],
+    ["https://www.gravatar.com/avatar/abc", true],
+    ["http://lh3.googleusercontent.com/a/avatar", false],
+    ["https://lh3.googleusercontent.com.evil.example/a", false],
+    ["https://evil.example/avatar.png", false],
+    ["https://user@lh3.googleusercontent.com/a", false],
+    ["https://lh3.googleusercontent.com:8443/a", false],
+    ["javascript:alert(1)", false],
+    ["not a url", false],
+  ])(
+    "keeps profile picture %s only for CSP-allowed hosts",
+    async (url, kept) => {
+      const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+        Response.json({
+          user: { id: "u", username: "u", displayName: "U", pictureUrl: url },
+          shares: [],
+          csrfToken: "csrf",
+        }),
+      );
+      const session = await createApiClient({ fetch }).session();
+      expect(session.user.pictureUrl).toBe(kept ? url : undefined);
+      expect(session.user.displayName).toBe("U");
+    },
+  );
+
+  it("validates passkey responses before handing them to the UI", async () => {
+    const passkey = { id: "k", name: "Laptop", createdAt: 1, lastUsedAt: null };
+    const respond = (body: unknown) =>
+      createApiClient({
+        fetch: vi
+          .fn<typeof globalThis.fetch>()
+          .mockResolvedValue(Response.json(body)),
+      });
+
+    await expect(respond({ passkeys: [passkey] }).passkeys()).resolves.toEqual([
+      passkey,
+    ]);
+    await expect(
+      respond({
+        passkeys: [{ ...passkey, createdAt: "yesterday" }],
+      }).passkeys(),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(respond([passkey]).passkeys()).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+    await expect(
+      respond({ ...passkey, name: 7 }).finishPasskeyRegistration(
+        "flow",
+        {} as never,
+        "csrf",
+      ),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(
+      respond(passkey).renamePasskey("other", "Laptop", "csrf"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(
+      respond(passkey).renamePasskey("k", "Laptop", "csrf"),
+    ).resolves.toEqual(passkey);
+
+    const creation = {
+      challenge: "c",
+      rp: { name: "Crabinet", id: "files.example" },
+      user: { id: "dXNlcg", name: "joan", displayName: "Joan" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+      excludeCredentials: [{ id: "k", type: "public-key" }],
+    };
+    await expect(
+      respond({
+        flowId: "flow",
+        options: { publicKey: creation },
+      }).startPasskeyRegistration("Laptop", "csrf"),
+    ).resolves.toEqual({ flowId: "flow", options: { publicKey: creation } });
+    for (const publicKey of [
+      { ...creation, challenge: "" },
+      { ...creation, user: { ...creation.user, id: 1 } },
+      { ...creation, pubKeyCredParams: [] },
+      { ...creation, excludeCredentials: [{ id: "k", type: "other" }] },
+    ]) {
+      await expect(
+        respond({
+          flowId: "flow",
+          options: { publicKey },
+        }).startPasskeyRegistration("Laptop", "csrf"),
+      ).rejects.toMatchObject({ kind: "invalid-response" });
+    }
+    await expect(
+      respond({
+        options: { publicKey: { challenge: "c" } },
+      }).startPasskeyLogin(),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+    await expect(
+      respond({ flowId: "flow", options: {} }).startPasskeyLogin("joan"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it("exposes the API error code so re-authentication differs from CSRF", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            code: "reauthentication_required",
+            message: "Sign in again",
+          },
+        },
+        { status: 403 },
+      ),
+    );
+    await expect(
+      createApiClient({ fetch }).startPasskeyRegistration("Laptop", "csrf"),
+    ).rejects.toMatchObject({
+      kind: "forbidden",
+      status: 403,
+      code: "reauthentication_required",
+    });
+  });
+
+  it("retries a mutation once with a refreshed CSRF token for the same user", async () => {
+    const refreshed = {
+      user: { id: "u", username: "u", displayName: "U" },
+      shares: [],
+      csrfToken: "fresh",
+    };
+    const api = { session: vi.fn(async () => refreshed) };
+    const onRefreshed = vi.fn();
+    const mutate = vi
+      .fn<(token: string) => Promise<string>>()
+      .mockRejectedValueOnce(
+        new ApiError("forbidden", "stale", { status: 403, code: "forbidden" }),
+      )
+      .mockResolvedValue("done");
+
+    await expect(
+      withCsrfRetry(api, "stale", "u", onRefreshed, mutate),
+    ).resolves.toBe("done");
+    expect(mutate.mock.calls).toEqual([["stale"], ["fresh"]]);
+    expect(onRefreshed).toHaveBeenCalledWith(refreshed);
+
+    const reauth = vi
+      .fn<(token: string) => Promise<string>>()
+      .mockRejectedValue(
+        new ApiError("forbidden", "reauth", {
+          status: 403,
+          code: "reauthentication_required",
+        }),
+      );
+    await expect(
+      withCsrfRetry(api, "stale", "u", onRefreshed, reauth),
+    ).rejects.toMatchObject({ code: "reauthentication_required" });
+    expect(reauth).toHaveBeenCalledOnce();
+
+    const otherUser = vi
+      .fn<(token: string) => Promise<string>>()
+      .mockRejectedValue(
+        new ApiError("forbidden", "stale", { status: 403, code: "forbidden" }),
+      );
+    await expect(
+      withCsrfRetry(api, "stale", "someone-else", onRefreshed, otherUser),
+    ).rejects.toMatchObject({ code: "account_changed" });
+    expect(otherUser).toHaveBeenCalledOnce();
   });
 
   it("rejects an invalid request path before calling fetch", async () => {
