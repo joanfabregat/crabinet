@@ -24,7 +24,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures_util::stream;
+use futures_util::{StreamExt as _, stream};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ use crate::{
     error::AppError,
     filesystem::{
         AccessLevel, AuthorizedShare, DirectoryEntry, EntryKind, EntryMetadata, FsError,
-        FsErrorCode, GlobalPolicy, ShareFs, ShareGrant, ShareId, VirtualPath,
+        FsErrorCode, GlobalPolicy, OwnedAuthorizedShare, ShareFs, ShareGrant, ShareId, VirtualPath,
     },
 };
 
@@ -49,6 +49,28 @@ const CURSOR_VERSION: u8 = 1;
 const CURSOR_BYTES: usize = 1 + 8 + 32 + 32;
 const MAX_EVENT_CONNECTIONS: usize = 64;
 const MAX_EVENT_CONNECTIONS_PER_SUBJECT: usize = 4;
+/// Event streams end after this lifetime so the browser reconnects through
+/// the authentication middleware, which re-validates the session and grants.
+const EVENT_STREAM_LIFETIME: Duration = Duration::from_secs(60);
+/// Reconnect delay hint sent to `EventSource` clients.
+const EVENT_STREAM_RETRY: Duration = Duration::from_secs(1);
+/// Concurrent requests that buffer a whole file in memory (text reads and
+/// previews). Each can hold several copies of up to the 16 MiB preview cap.
+const MAX_CONCURRENT_BUFFERED_READS: usize = 4;
+/// Concurrent directory scans, each of up to `max_directory_entries` stats.
+const MAX_CONCURRENT_LISTINGS: usize = 16;
+
+/// Runs synchronous filesystem work on Tokio's blocking pool so slow disks
+/// or network filesystems never stall the async worker threads.
+pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| AppError::Internal)
+}
 
 #[derive(Clone, Debug)]
 pub struct AuthenticatedIdentity {
@@ -128,7 +150,7 @@ pub enum BrowseStateError {
 
 pub struct ConfiguredShare {
     name: Arc<str>,
-    filesystem: ShareFs,
+    filesystem: Arc<ShareFs>,
 }
 
 impl ConfiguredShare {
@@ -137,7 +159,10 @@ impl ConfiguredShare {
         if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
             return Err(BrowseStateError::InvalidDisplayName);
         }
-        Ok(Self { name, filesystem })
+        Ok(Self {
+            name,
+            filesystem: Arc::new(filesystem),
+        })
     }
 
     #[must_use]
@@ -156,23 +181,27 @@ pub struct BrowseState {
     limits: BrowseLimits,
     policy: GlobalPolicy,
     cursor_key: [u8; 32],
-    event_gate: DirectoryEventGate,
+    event_gate: SubjectGate,
+    buffered_read_gate: Arc<Semaphore>,
+    listing_gate: Arc<Semaphore>,
 }
 
-struct DirectoryEventGate {
+/// A process-wide concurrency cap combined with a per-subject cap, so one
+/// authenticated user cannot take every process slot.
+pub(crate) struct SubjectGate {
     process: Arc<Semaphore>,
     subjects: Arc<Mutex<HashMap<Arc<str>, usize>>>,
     per_subject: usize,
 }
 
-struct DirectoryEventLease {
+pub(crate) struct SubjectLease {
     _process: OwnedSemaphorePermit,
     subject: Arc<str>,
     subjects: Arc<Mutex<HashMap<Arc<str>, usize>>>,
 }
 
-impl DirectoryEventGate {
-    fn new(process: usize, per_subject: usize) -> Self {
+impl SubjectGate {
+    pub(crate) fn new(process: usize, per_subject: usize) -> Self {
         Self {
             process: Arc::new(Semaphore::new(process)),
             subjects: Arc::new(Mutex::new(HashMap::new())),
@@ -180,29 +209,31 @@ impl DirectoryEventGate {
         }
     }
 
-    fn try_acquire(&self, subject: &str) -> Result<DirectoryEventLease, AppError> {
-        let process = self
-            .process
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AppError::TooManyRequests)?;
+    /// Returns `None` when either the process or the subject cap is reached.
+    pub(crate) fn try_acquire(&self, subject: &str) -> Option<SubjectLease> {
+        let process = self.process.clone().try_acquire_owned().ok()?;
         let subject: Arc<str> = Arc::from(subject);
-        let mut subjects = self.subjects.lock().map_err(|_| AppError::Internal)?;
+        let mut subjects = self.subjects.lock().ok()?;
         let active = subjects.entry(subject.clone()).or_default();
         if *active >= self.per_subject {
-            return Err(AppError::TooManyRequests);
+            return None;
         }
         *active += 1;
         drop(subjects);
-        Ok(DirectoryEventLease {
+        Some(SubjectLease {
             _process: process,
             subject,
             subjects: self.subjects.clone(),
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn process_semaphore(&self) -> &Arc<Semaphore> {
+        &self.process
+    }
 }
 
-impl Drop for DirectoryEventLease {
+impl Drop for SubjectLease {
     fn drop(&mut self) {
         let Ok(mut subjects) = self.subjects.lock() else {
             return;
@@ -249,10 +280,9 @@ impl BrowseState {
             limits,
             policy,
             cursor_key,
-            event_gate: DirectoryEventGate::new(
-                MAX_EVENT_CONNECTIONS,
-                MAX_EVENT_CONNECTIONS_PER_SUBJECT,
-            ),
+            event_gate: SubjectGate::new(MAX_EVENT_CONNECTIONS, MAX_EVENT_CONNECTIONS_PER_SUBJECT),
+            buffered_read_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_BUFFERED_READS)),
+            listing_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_LISTINGS)),
         })
     }
 
@@ -262,11 +292,58 @@ impl BrowseState {
             limits: BrowseLimits::default(),
             policy: GlobalPolicy::default(),
             cursor_key: [0; 32],
-            event_gate: DirectoryEventGate::new(
-                MAX_EVENT_CONNECTIONS,
-                MAX_EVENT_CONNECTIONS_PER_SUBJECT,
-            ),
+            event_gate: SubjectGate::new(MAX_EVENT_CONNECTIONS, MAX_EVENT_CONNECTIONS_PER_SUBJECT),
+            buffered_read_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_BUFFERED_READS)),
+            listing_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_LISTINGS)),
         }
+    }
+
+    /// Owned variant of [`Self::authorize`] for work moved to the blocking
+    /// pool. The grant check is identical and runs for every request.
+    pub(crate) fn authorize_owned(
+        &self,
+        identity: &AuthenticatedIdentity,
+        share_id: &ShareId,
+    ) -> Result<OwnedAuthorizedShare, AppError> {
+        let share = self.shares.get(share_id).ok_or(AppError::NotFound)?;
+        share
+            .filesystem
+            .authorize_owned(identity.grant_for(share_id), self.policy)
+            .map_err(non_disclosing_fs_error)
+    }
+
+    fn authorized_owned(
+        &self,
+        identity: &AuthenticatedIdentity,
+        raw_share_id: &str,
+    ) -> Result<OwnedAuthorizedShare, AppError> {
+        let share_id = ShareId::new(raw_share_id.to_owned()).map_err(|_| AppError::NotFound)?;
+        self.authorize_owned(identity, &share_id)
+    }
+
+    /// Admits one request that buffers a complete file in memory.
+    pub(crate) fn acquire_buffered_read(&self) -> Result<OwnedSemaphorePermit, AppError> {
+        self.buffered_read_gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AppError::Busy)
+    }
+
+    fn acquire_listing(&self) -> Result<OwnedSemaphorePermit, AppError> {
+        self.listing_gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AppError::Busy)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn buffered_read_gate(&self) -> &Arc<Semaphore> {
+        &self.buffered_read_gate
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listing_gate(&self) -> &Arc<Semaphore> {
+        &self.listing_gate
     }
 
     pub fn authorize<'state>(
@@ -284,8 +361,10 @@ impl BrowseState {
     fn acquire_event_connection(
         &self,
         identity: &AuthenticatedIdentity,
-    ) -> Result<DirectoryEventLease, AppError> {
-        self.event_gate.try_acquire(identity.subject())
+    ) -> Result<SubjectLease, AppError> {
+        self.event_gate
+            .try_acquire(identity.subject())
+            .ok_or(AppError::TooManyRequests)
     }
 
     /// Builds the same opaque validator returned by the metadata/read APIs.
@@ -298,17 +377,6 @@ impl BrowseState {
         metadata: EntryMetadata,
     ) -> String {
         entry_etag(&self.cursor_key, share_id, path, metadata)
-    }
-
-    fn authorized<'state>(
-        &'state self,
-        identity: &AuthenticatedIdentity,
-        raw_share_id: &str,
-    ) -> Result<(&'state ConfiguredShare, AuthorizedShare<'state>), AppError> {
-        let share_id = ShareId::new(raw_share_id.to_owned()).map_err(|_| AppError::NotFound)?;
-        let share = self.shares.get(&share_id).ok_or(AppError::NotFound)?;
-        let authorized = self.authorize(identity, &share_id)?;
-        Ok((share.as_ref(), authorized))
     }
 }
 
@@ -416,16 +484,24 @@ async fn list_directory(
     Query(query): Query<DirectoryQuery>,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
-    let (share, authorized) = browse.authorized(&identity, &raw_share_id)?;
+    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
+    let share_id = authorized.share_id().clone();
+    let access = authorized.access();
     let path = parse_query_path(query.path.as_deref())?;
     let limit = query.limit.unwrap_or(browse.limits.default_page_size);
     if limit == 0 || limit > browse.limits.max_page_size {
         return Err(AppError::InvalidRequest);
     }
 
-    let mut entries = authorized
-        .list_bounded(&path, browse.limits.max_directory_entries)
-        .map_err(map_fs_error)?;
+    let permit = browse.acquire_listing()?;
+    let max_entries = browse.limits.max_directory_entries;
+    let listing_path = path.clone();
+    let mut entries = run_blocking(move || {
+        let _permit = permit;
+        authorized.view().list_bounded(&listing_path, max_entries)
+    })
+    .await?
+    .map_err(map_fs_error)?;
     if query.show_hidden == Some(false) {
         entries.retain(|entry| !entry.name.as_str().starts_with('.'));
     }
@@ -440,9 +516,9 @@ async fn list_directory(
             cursor,
             &browse.cursor_key,
             &identity,
-            share.id(),
+            &share_id,
             &path,
-            authorized.access(),
+            access,
             &fingerprint,
         )?,
         None => 0,
@@ -455,9 +531,9 @@ async fn list_directory(
         encode_cursor(
             &browse.cursor_key,
             &identity,
-            share.id(),
+            &share_id,
             &path,
-            authorized.access(),
+            access,
             end,
             &fingerprint,
         )
@@ -465,7 +541,7 @@ async fn list_directory(
     let entries = entries[offset..end].iter().map(entry_response).collect();
 
     Ok(inert_json(DirectoryPage {
-        share_id: share.id().as_str().to_owned(),
+        share_id: share_id.as_str().to_owned(),
         path: path.to_string(),
         entries,
         next_cursor,
@@ -473,9 +549,10 @@ async fn list_directory(
 }
 
 /// Sends event-driven invalidation hints for one explicitly selected
-/// directory. Each connection is bounded to five minutes, then browsers
-/// reconnect through authentication middleware. No directory contents are
-/// scanned by the event stream.
+/// directory. Authorization is checked when the stream opens, so each
+/// connection is bounded to [`EVENT_STREAM_LIFETIME`]; browsers then
+/// reconnect through authentication middleware, which re-validates the
+/// session and grants. No directory contents are scanned by the event stream.
 async fn directory_events(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
@@ -484,11 +561,17 @@ async fn directory_events(
 ) -> Result<Response, AppError> {
     let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
     let path = parse_query_path(query.path.as_deref())?;
-    let authorized = state.browse().authorize(&identity, &share_id)?;
+    let authorized = state.browse().authorize_owned(&identity, &share_id)?;
     let lease = state.browse().acquire_event_connection(&identity)?;
-    let watcher = authorized.watch_directory(&path).map_err(map_fs_error)?;
-    let deadline = Instant::now() + Duration::from_secs(5 * 60);
+    let watcher = run_blocking(move || authorized.view().watch_directory(&path))
+        .await?
+        .map_err(map_fs_error)?;
+    let deadline = Instant::now() + EVENT_STREAM_LIFETIME;
 
+    // A retry-only event sets the browser's reconnect delay without
+    // dispatching anything to the page.
+    let retry_hint =
+        stream::once(async { Ok::<Event, Infallible>(Event::default().retry(EVENT_STREAM_RETRY)) });
     let events = stream::unfold(
         (watcher, deadline, lease),
         |(watcher, deadline, lease)| async move {
@@ -519,7 +602,7 @@ async fn directory_events(
         },
     );
 
-    let mut response = Sse::new(events)
+    let mut response = Sse::new(retry_hint.chain(events))
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(15))
@@ -560,17 +643,21 @@ async fn read_metadata(
     Query(query): Query<FileQuery>,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
-    let (share, authorized) = browse.authorized(&identity, &raw_share_id)?;
+    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
+    let share_id = authorized.share_id().clone();
     let path = VirtualPath::parse(&query.path).map_err(map_fs_error)?;
-    let metadata = authorized.metadata(&path).map_err(map_fs_error)?;
+    let metadata_path = path.clone();
+    let metadata = run_blocking(move || authorized.view().metadata(&metadata_path))
+        .await?
+        .map_err(map_fs_error)?;
     let name = path
         .components()
         .last()
         .ok_or(AppError::InvalidRequest)?
         .as_str();
-    let etag = entry_etag(&browse.cursor_key, share.id(), &path, metadata);
+    let etag = entry_etag(&browse.cursor_key, &share_id, &path, metadata);
     let mut response = inert_json(MetadataResponse {
-        share_id: share.id().as_str().to_owned(),
+        share_id: share_id.as_str().to_owned(),
         path: path.to_string(),
         name: name.to_owned(),
         kind: kind_name(metadata.kind),
@@ -608,17 +695,23 @@ async fn read_text(
     Query(query): Query<FileQuery>,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
-    let (share, authorized) = browse.authorized(&identity, &raw_share_id)?;
+    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
+    let share_id = authorized.share_id().clone();
     let path = VirtualPath::parse(&query.path).map_err(map_fs_error)?;
-    let bytes = authorized
-        .read_file(&path, browse.limits.max_text_bytes)
-        .map_err(map_fs_error)?;
+    // The permit travels with the blocking read, so a cancelled request cannot
+    // release it early, and is held until the response body is built.
+    let permit = browse.acquire_buffered_read()?;
+    let max_bytes = browse.limits.max_text_bytes;
+    let read_path = path.clone();
+    let (bytes, _permit) =
+        run_blocking(move || (authorized.view().read_file(&read_path, max_bytes), permit)).await?;
+    let bytes = bytes.map_err(map_fs_error)?;
     let size = bytes.len() as u64;
     let text = String::from_utf8(bytes).map_err(|_| AppError::UnsupportedMedia)?;
     let mime_type = mime_for_path(&path);
     let etag = content_etag(text.as_bytes());
     let mut response = Json(TextResponse {
-        share_id: share.id().as_str().to_owned(),
+        share_id: share_id.as_str().to_owned(),
         path: path.to_string(),
         text,
         size,
@@ -641,16 +734,20 @@ async fn download(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
-    let (share, authorized) = browse.authorized(&identity, &raw_share_id)?;
+    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
+    let share_id = authorized.share_id().clone();
     let path = VirtualPath::parse(&query.path).map_err(map_fs_error)?;
-    let opened = authorized.open_file(&path).map_err(map_fs_error)?;
+    let open_path = path.clone();
+    let opened = run_blocking(move || authorized.view().open_file(&open_path))
+        .await?
+        .map_err(map_fs_error)?;
     let total_len = opened.len();
     if total_len > browse.limits.max_download_bytes {
         return Err(AppError::TooLarge);
     }
     let etag = metadata_etag(
         &browse.cursor_key,
-        share.id(),
+        &share_id,
         &path,
         total_len,
         opened.modified(),
@@ -671,14 +768,15 @@ async fn download(
     }
 
     let requested_range = if if_range_allows(headers.get(header::IF_RANGE), &etag) {
-        match headers.get(header::RANGE) {
-            Some(value) => {
-                let Some(range) = parse_range(value, total_len) else {
-                    return range_not_satisfiable(total_len);
-                };
-                Some(range)
-            }
-            None => None,
+        match headers
+            .get(header::RANGE)
+            .map(|value| parse_range(value, total_len))
+        {
+            Some(RangeRequest::Satisfiable(start, end)) => Some((start, end)),
+            Some(RangeRequest::Unsatisfiable) => return range_not_satisfiable(total_len),
+            // RFC 9110 section 14.2: an invalid or unsupported (including
+            // multi-range) header is ignored and the full content is sent.
+            Some(RangeRequest::Ignore) | None => None,
         }
     } else {
         None
@@ -743,6 +841,9 @@ fn kind_name(kind: EntryKind) -> &'static str {
     }
 }
 
+/// Fingerprints only the page structure: entry kind, name, and identity.
+/// Size and modification time are deliberately excluded so a file being
+/// written does not invalidate every later page of its directory.
 fn listing_fingerprint(entries: &[DirectoryEntry]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update((entries.len() as u64).to_be_bytes());
@@ -750,9 +851,7 @@ fn listing_fingerprint(entries: &[DirectoryEntry]) -> [u8; 32] {
         hash.update([entry_kind_order(entry.kind)]);
         hash.update((entry.name.as_str().len() as u64).to_be_bytes());
         hash.update(entry.name.as_str().as_bytes());
-        hash.update(entry.size.to_be_bytes());
         hash.update(entry.file_id.to_be_bytes());
-        update_time_digest(&mut hash, entry.modified);
     }
     hash.finalize().into()
 }
@@ -902,17 +1001,6 @@ fn entry_etag(
     )
 }
 
-fn update_time_digest(hash: &mut Sha256, time: Option<SystemTime>) {
-    match time.and_then(|time| time.duration_since(UNIX_EPOCH).ok()) {
-        Some(duration) => {
-            hash.update([1]);
-            hash.update(duration.as_secs().to_be_bytes());
-            hash.update(duration.subsec_nanos().to_be_bytes());
-        }
-        None => hash.update([0]),
-    }
-}
-
 fn system_time_millis(time: Option<SystemTime>) -> Option<u64> {
     time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
@@ -956,30 +1044,69 @@ fn if_range_allows(value: Option<&HeaderValue>, etag: &str) -> bool {
             && value.is_some_and(|value| value.as_bytes() == etag.as_bytes()))
 }
 
-fn parse_range(value: &HeaderValue, total_len: u64) -> Option<(u64, u64)> {
-    let value = value.to_str().ok()?.strip_prefix("bytes=")?;
-    if value.contains(',') || total_len == 0 {
-        return None;
-    }
-    let (start, end) = value.split_once('-')?;
+#[derive(Debug, Eq, PartialEq)]
+enum RangeRequest {
+    /// Syntactically invalid, multi-range, or another unit: serve `200`.
+    Ignore,
+    /// Valid but outside the representation: serve `416`.
+    Unsatisfiable,
+    /// One inclusive byte range within the representation.
+    Satisfiable(u64, u64),
+}
+
+fn parse_range(value: &HeaderValue, total_len: u64) -> RangeRequest {
+    let Some(spec) = value
+        .to_str()
+        .ok()
+        .and_then(|value| value.strip_prefix("bytes="))
+    else {
+        return RangeRequest::Ignore;
+    };
+    // Multiple ranges are unsupported; RFC 9110 permits ignoring the header.
+    let Some((start, end)) = spec.split_once('-').filter(|_| !spec.contains(',')) else {
+        return RangeRequest::Ignore;
+    };
     if start.is_empty() {
-        let suffix = end.parse::<u64>().ok()?;
+        let Some(suffix) = parse_range_number(end) else {
+            return RangeRequest::Ignore;
+        };
         if suffix == 0 {
-            return None;
+            return RangeRequest::Unsatisfiable;
+        }
+        if total_len == 0 {
+            // A non-zero suffix of an empty representation is the whole,
+            // empty representation.
+            return RangeRequest::Ignore;
         }
         let length = suffix.min(total_len);
-        return Some((total_len - length, total_len - 1));
+        return RangeRequest::Satisfiable(total_len - length, total_len - 1);
     }
-    let start = start.parse::<u64>().ok()?;
+    let Some(start) = parse_range_number(start) else {
+        return RangeRequest::Ignore;
+    };
+    let end = if end.is_empty() {
+        None
+    } else {
+        match parse_range_number(end) {
+            Some(end) if end >= start => Some(end),
+            _ => return RangeRequest::Ignore,
+        }
+    };
     if start >= total_len {
+        return RangeRequest::Unsatisfiable;
+    }
+    RangeRequest::Satisfiable(
+        start,
+        end.map_or(total_len - 1, |end| end.min(total_len - 1)),
+    )
+}
+
+/// `1*DIGIT` only: `u64::from_str` would also accept a leading `+`.
+fn parse_range_number(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let end = if end.is_empty() {
-        total_len - 1
-    } else {
-        end.parse::<u64>().ok()?.min(total_len - 1)
-    };
-    (start <= end).then_some((start, end))
+    value.parse().ok()
 }
 
 fn mime_for_path(path: &VirtualPath) -> String {
@@ -1018,9 +1145,11 @@ fn add_inert_headers(headers: &mut HeaderMap) {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    // `no-store` keeps authenticated bodies out of the browser disk cache
+    // after logout. ETags still support explicit conditional requests.
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
+        HeaderValue::from_static("no-store, private"),
     );
 }
 
@@ -1856,33 +1985,217 @@ mod tests {
 
     #[test]
     fn byte_range_parser_accepts_single_standard_forms_only() {
-        assert_eq!(
-            parse_range(&HeaderValue::from_static("bytes=2-4"), 6),
-            Some((2, 4))
-        );
-        assert_eq!(
-            parse_range(&HeaderValue::from_static("bytes=2-"), 6),
-            Some((2, 5))
-        );
-        assert_eq!(
-            parse_range(&HeaderValue::from_static("bytes=-2"), 6),
-            Some((4, 5))
-        );
-        assert_eq!(
-            parse_range(&HeaderValue::from_static("bytes=2-99"), 6),
-            Some((2, 5))
-        );
-        for invalid in [
-            "bytes=6-",
+        for (value, start, end) in [
+            ("bytes=2-4", 2, 4),
+            ("bytes=2-", 2, 5),
+            ("bytes=-2", 4, 5),
+            ("bytes=-99", 0, 5),
+            ("bytes=2-99", 2, 5),
+        ] {
+            assert_eq!(
+                parse_range(&HeaderValue::from_static(value), 6),
+                RangeRequest::Satisfiable(start, end),
+                "{value}"
+            );
+        }
+        for unsatisfiable in ["bytes=6-", "bytes=99-100", "bytes=-0"] {
+            assert_eq!(
+                parse_range(&HeaderValue::from_static(unsatisfiable), 6),
+                RangeRequest::Unsatisfiable,
+                "{unsatisfiable}"
+            );
+        }
+        for ignored in [
             "bytes=4-2",
             "bytes=0-1,3-4",
             "items=0-1",
-            "bytes=-0",
+            "bytes=+1-2",
+            "bytes=1-+2",
+            "bytes=-+2",
+            "bytes= 1-2",
+            "bytes=1",
+            "bytes=a-b",
+            "bytes=99999999999999999999999-",
         ] {
             assert_eq!(
-                parse_range(&HeaderValue::from_str(invalid).unwrap(), 6),
-                None
+                parse_range(&HeaderValue::from_static(ignored), 6),
+                RangeRequest::Ignore,
+                "{ignored}"
             );
+        }
+        assert_eq!(
+            parse_range(&HeaderValue::from_static("bytes=0-"), 0),
+            RangeRequest::Unsatisfiable
+        );
+        assert_eq!(
+            parse_range(&HeaderValue::from_static("bytes=-5"), 0),
+            RangeRequest::Ignore
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn event_streams_announce_a_fast_reconnect_and_have_a_bounded_lifetime() {
+        assert!(EVENT_STREAM_LIFETIME <= Duration::from_secs(60));
+        let fixture = fixture(BrowseLimits::default());
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/events?path=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first = body.next().await.expect("first frame").expect("frame");
+        assert_eq!(first.as_ref(), b"retry: 1000\n\n");
+    }
+
+    #[tokio::test]
+    async fn invalid_and_multi_ranges_are_ignored_with_a_full_response() {
+        let fixture = fixture(BrowseLimits::default());
+        for range in ["bytes=5-3", "bytes=0-1,3-4", "bytes=+1-2", "bytes=garbage"] {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get("/api/v1/shares/documents/download?path=a.txt")
+                    .header(header::RANGE, range)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{range}");
+            assert!(response.headers().get(header::CONTENT_RANGE).is_none());
+            assert_eq!(
+                to_bytes(response.into_body(), 64).await.unwrap().as_ref(),
+                b"abcdef"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_read_responses_are_never_stored() {
+        let fixture = fixture(BrowseLimits::default());
+        for uri in [
+            "/api/v1/shares",
+            "/api/v1/shares/documents/directory",
+            "/api/v1/shares/documents/metadata?path=a.txt",
+            "/api/v1/shares/documents/text?path=a.txt",
+            "/api/v1/shares/documents/download?path=a.txt",
+        ] {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store, private",
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pagination_survives_content_changes_but_not_structural_changes() {
+        let fixture = fixture(BrowseLimits::default());
+        let first = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/directory?limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let cursor = json(first).await["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_owned();
+        // An in-place write changes size and mtime but not structure.
+        fs::write(
+            fixture._root.path().join("page.html"),
+            b"growing file contents",
+        )
+        .expect("in-place write");
+        let second = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get(format!(
+                "/api/v1/shares/documents/directory?limit=2&cursor={cursor}"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn buffered_reads_and_listings_are_concurrency_bounded() {
+        let root = TempDir::new().expect("temporary share");
+        fs::write(root.path().join("a.txt"), b"abcdef").expect("text fixture");
+        let id = ShareId::new("documents").expect("share id");
+        let share = ConfiguredShare::new(
+            "Documents",
+            ShareFs::open(id.clone(), root.path()).expect("open share"),
+        )
+        .expect("configured share");
+        let browse = BrowseState::new(
+            vec![share],
+            BrowseLimits::default(),
+            GlobalPolicy::default(),
+            [0x5a; 32],
+        )
+        .expect("browse state");
+        let reads = Arc::clone(browse.buffered_read_gate());
+        let listings = Arc::clone(browse.listing_gate());
+        let app = app::router(AppState::new(true).with_browse(browse));
+        let identity = AuthenticatedIdentity::new(
+            "user-1",
+            vec![ShareGrant {
+                share_id: id,
+                access: AccessLevel::ReadOnly,
+            }],
+        );
+
+        let held_reads = reads
+            .acquire_many_owned(MAX_CONCURRENT_BUFFERED_READS as u32)
+            .await
+            .expect("read permits");
+        let held_listings = listings
+            .acquire_many_owned(MAX_CONCURRENT_LISTINGS as u32)
+            .await
+            .expect("listing permits");
+        for uri in [
+            "/api/v1/shares/documents/text?path=a.txt",
+            "/api/v1/shares/documents/preview?path=a.txt",
+            "/api/v1/shares/documents/directory",
+        ] {
+            let busy = send(
+                &app,
+                Some(&identity),
+                Request::get(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS, "{uri}");
+            assert_eq!(json(busy).await["error"]["code"], "busy");
+        }
+        drop((held_reads, held_listings));
+        for uri in [
+            "/api/v1/shares/documents/text?path=a.txt",
+            "/api/v1/shares/documents/preview?path=a.txt",
+            "/api/v1/shares/documents/directory",
+        ] {
+            let accepted = send(
+                &app,
+                Some(&identity),
+                Request::get(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(accepted.status(), StatusCode::OK, "{uri}");
         }
     }
 
@@ -1928,19 +2241,15 @@ mod tests {
 }
 #[test]
 fn directory_event_connections_are_bounded_and_released() {
-    let gate = DirectoryEventGate::new(2, 1);
+    let gate = SubjectGate::new(2, 1);
     let alice = gate.try_acquire("alice").expect("first user lease");
-    assert!(matches!(
-        gate.try_acquire("alice"),
-        Err(AppError::TooManyRequests)
-    ));
+    assert!(gate.try_acquire("alice").is_none());
+    // A rejected per-subject attempt must not leak a process permit.
+    assert_eq!(gate.process_semaphore().available_permits(), 1);
     let bob = gate.try_acquire("bob").expect("second process lease");
-    assert!(matches!(
-        gate.try_acquire("charlie"),
-        Err(AppError::TooManyRequests)
-    ));
+    assert!(gate.try_acquire("charlie").is_none());
     drop(alice);
     let alice = gate.try_acquire("alice").expect("released user lease");
     drop((alice, bob));
-    assert!(gate.try_acquire("charlie").is_ok());
+    assert!(gate.try_acquire("charlie").is_some());
 }

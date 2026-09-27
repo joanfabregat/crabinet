@@ -18,7 +18,7 @@ All endpoints are under `/api/v1` and require authentication middleware to inser
 
 `GET /api/v1/shares/{shareId}/directory?path=&limit=100&cursor=` lists the share root when `path` is absent or empty. A nonempty path uses the validated slash-separated virtual path grammar documented in `filesystem-security.md`.
 
-Entries are sorted deterministically with directories first and then by normalized name. `limit` is nonzero and cannot exceed the configured page maximum. The service also caps the total number of entries it will inspect, preventing an attacker-controlled directory from causing unbounded allocation merely because deterministic sorting is required.
+Entries are sorted deterministically with directories first and then by normalized name. `limit` is nonzero and cannot exceed the configured page maximum. The service also caps the total number of entries it will inspect, preventing an attacker-controlled directory from causing unbounded allocation merely because deterministic sorting is required. A directory above that cap currently returns `413` (`too_large`). At most 16 listings are scanned concurrently across the process; further requests receive `429` with code `busy` and `Retry-After`. An entry removed between reading the directory and inspecting it is omitted rather than failing the listing.
 
 ```json
 {
@@ -39,7 +39,7 @@ Entries are sorted deterministically with directories first and then by normaliz
 }
 ```
 
-The cursor contains no host path. Its HMAC binds the authenticated subject, effective access grant, share ID, virtual path, offset, and a fingerprint of the sorted listing. Tampering, use by another user or grant, use for another directory, or a directory change between pages rejects the cursor with `409`; clients should restart from the first page. `nextCursor` is omitted on the final page. File entries include `size`; directory entries omit it. Modification time remains optional in the frontend contract and is omitted until a lightweight RFC 3339 formatter is part of the reviewed dependency set.
+The cursor contains no host path. Its HMAC binds the authenticated subject, effective access grant, share ID, virtual path, offset, and a fingerprint of the sorted listing structure (each entry's kind, name, and file identity). Tampering, use by another user or grant, use for another directory, or an entry being added, removed, renamed, or replaced between pages rejects the cursor with `409`; clients should restart from the first page. Size and modification-time changes, such as a file still being written, do not invalidate the cursor. `nextCursor` is omitted on the final page. File entries include `size`; directory entries omit it. Modification time remains optional in the frontend contract and is omitted until a lightweight RFC 3339 formatter is part of the reviewed dependency set.
 
 ## Single-entry metadata
 
@@ -62,15 +62,17 @@ Directory metadata omits `size`. The ETag is also returned in the response heade
 
 `GET /api/v1/shares/{shareId}/text?path=relative/path` returns a configured-size-capped file as a JSON string. Invalid UTF-8 returns `415`, and a file above the text cap returns `413`. HTML, SVG, Markdown, and code are data inside JSON at this boundary and are never emitted as an executable document.
 
-The response includes `size`, `mimeType`, and a content-derived `etag`, as well as `X-Content-Type-Options: nosniff` and `Cache-Control: private, no-cache`.
+The response includes `size`, `mimeType`, and a content-derived `etag`, as well as `X-Content-Type-Options: nosniff` and `Cache-Control: no-store, private`. Text reads and previews share a process-wide limit of four concurrent requests that buffer a whole file; further requests receive `429` with code `busy` and `Retry-After`.
 
 ## Streaming download
 
 `GET /api/v1/shares/{shareId}/download?path=relative/path` streams from the already validated regular-file handle. It never buffers the whole file. Each stream is capped by the configured maximum file size and fixed read chunk size, and dropping the response cancels the stream and closes the handle.
 
-The endpoint supports one RFC-style byte range (`start-end`, `start-`, or `-suffix`), returns `206` with `Content-Range` when applicable, and returns `416` with `Content-Range: bytes */{length}` for invalid or unsatisfiable ranges. Multiple ranges are intentionally unsupported. `If-None-Match` produces `304`. Download ETags are weak validators derived from file identity, nanosecond modification time, size, share, and virtual path; an `If-Range` request therefore falls back to a complete `200` response as required for weak validators.
+The endpoint supports one RFC-style byte range (`start-end`, `start-`, or `-suffix`), returns `206` with `Content-Range` when applicable, and returns `416` with `Content-Range: bytes */{length}` only for an unsatisfiable range (a first byte at or beyond the end, or `bytes=-0`). As RFC 9110 permits, a syntactically invalid range (including an inverted range or a number with a sign), another range unit, or a multi-range request is ignored and the complete representation is returned with `200`; multiple ranges are intentionally unsupported. `If-None-Match` produces `304`. Download ETags are weak validators derived from file identity, nanosecond modification time, size, share, and virtual path; an `If-Range` request therefore falls back to a complete `200` response as required for weak validators.
 
 Downloads include a safe ASCII fallback plus RFC 5987 UTF-8 filename in `Content-Disposition`. Every file, including raw HTML and SVG, is an attachment. Responses also set `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Accept-Ranges: bytes`, an explicit MIME type, ETag, and content length.
+
+Every browse response, including share discovery, listings, metadata, text, and downloads, sets `Cache-Control: no-store, private` so authenticated content does not remain in the browser disk cache after sign-out. ETags remain available for explicit `If-None-Match`, `If-Range`, and mutation `If-Match` requests.
 
 ## Default resource limits
 
