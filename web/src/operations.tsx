@@ -173,6 +173,99 @@ export function OperationDialog(props: OperationDialogProps) {
   return <SimpleOperationDialog {...props} />;
 }
 
+type ValidatorState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; etag: string }
+  | { status: "error"; message: string; retryable: boolean };
+
+/**
+ * Captures an entry's validator when a dialog opens, so the If-Match sent on
+ * submit protects the version the person actually reviewed. A kind that no
+ * longer matches the entry shown blocks the operation, because the
+ * confirmation offered depends on it.
+ */
+function useEntryValidator(
+  api: ApiClient,
+  shareId: string,
+  target: { path: string; entry: DirectoryEntry } | undefined,
+  onSessionExpired: () => void,
+): [ValidatorState, () => void] {
+  const [state, setState] = useState<ValidatorState>(
+    target ? { status: "loading" } : { status: "idle" },
+  );
+  const [attempt, setAttempt] = useState(0);
+  const path = target?.path;
+  const kind = target?.entry.kind;
+
+  useEffect(() => {
+    if (path === undefined || kind === undefined) return;
+    const controller = new AbortController();
+    setState({ status: "loading" });
+    api.metadata(shareId, path, controller.signal).then(
+      (metadata) => {
+        if (controller.signal.aborted) return;
+        if (metadata.kind !== kind) {
+          setState({
+            status: "error",
+            message:
+              metadata.kind === "directory"
+                ? "This item is now a folder. Close this dialog and reload the folder before trying again."
+                : "This item is now a file. Close this dialog and reload the folder before trying again.",
+            retryable: false,
+          });
+        } else {
+          setState({ status: "ready", etag: metadata.etag });
+        }
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted || isAborted(cause)) return;
+        if (isUnauthorized(cause)) {
+          onSessionExpired();
+          return;
+        }
+        setState({
+          status: "error",
+          message:
+            cause instanceof ApiError && cause.kind === "not-found"
+              ? "The item no longer exists. Reload the folder."
+              : "The current version of this item could not be checked.",
+          retryable: !(cause instanceof ApiError && cause.kind === "not-found"),
+        });
+      },
+    );
+    return () => controller.abort();
+  }, [api, attempt, kind, path, shareId]);
+
+  return [state, () => setAttempt((value) => value + 1)];
+}
+
+function ValidatorStatus({
+  state,
+  onRetry,
+}: {
+  state: ValidatorState;
+  onRetry: () => void;
+}) {
+  if (state.status === "loading")
+    return (
+      <p class="muted" role="status">
+        Checking the current version…
+      </p>
+    );
+  if (state.status !== "error") return null;
+  return (
+    <div class="field-error" role="alert">
+      <p>{state.message}</p>
+      {state.retryable && (
+        <button class="button button-secondary" type="button" onClick={onRetry}>
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SimpleOperationDialog({
   api,
   csrfToken,
@@ -193,6 +286,14 @@ function SimpleOperationDialog({
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController>();
   const input = useRef<HTMLInputElement>(null);
+  const [validator, retryValidator] = useEntryValidator(
+    api,
+    shareId,
+    "entry" in operation ? operation : undefined,
+    onSessionExpired,
+  );
+  const needsValidator = validator.status !== "idle";
+  const validatorReady = !needsValidator || validator.status === "ready";
   const title =
     operation.kind === "create-file"
       ? "Create file"
@@ -242,6 +343,7 @@ function SimpleOperationDialog({
       setError(`Confirm permanent deletion of ${operation.entry.name}.`);
       return;
     }
+    if (!validatorReady) return;
 
     setBusy(true);
     setError(undefined);
@@ -262,18 +364,17 @@ function SimpleOperationDialog({
           csrfToken,
           nextController.signal,
         );
+      } else if (validator.status !== "ready") {
+        return;
       } else {
-        const metadata = await api.metadata(
-          shareId,
-          operation.path,
-          nextController.signal,
-        );
+        // The validator was captured when this dialog opened, so a change
+        // made since then is refused by the server instead of overwritten.
         if (operation.kind === "rename") {
           await api.moveEntry(
             shareId,
             operation.path,
             destination,
-            metadata.etag,
+            validator.etag,
             csrfToken,
             nextController.signal,
           );
@@ -281,7 +382,7 @@ function SimpleOperationDialog({
           await api.deleteEntry(
             shareId,
             operation.path,
-            metadata.etag,
+            validator.etag,
             csrfToken,
             nextController.signal,
           );
@@ -354,6 +455,7 @@ function SimpleOperationDialog({
             />
           </>
         )}
+        <ValidatorStatus state={validator} onRetry={retryValidator} />
         {error && (
           <p id="operation-error" class="field-error" role="alert">
             {error}
@@ -373,6 +475,7 @@ function SimpleOperationDialog({
             type="submit"
             disabled={
               busy ||
+              !validatorReady ||
               (deletesFile && !confirmed) ||
               (deletesFolder && value !== operation.entry.name)
             }
@@ -404,32 +507,36 @@ function MoveDialog({
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController>();
 
+  const [validator, retryValidator] = useEntryValidator(
+    api,
+    shareId,
+    operation,
+    onSessionExpired,
+  );
+
   useEffect(() => () => controller.current?.abort(), []);
 
   const destination = joinPath(destinationDirectory, operation.entry.name);
   const invalid =
     destination === operation.path ||
     (operation.entry.kind === "directory" &&
-      destinationDirectory.startsWith(`${operation.path}/`));
+      (destinationDirectory === operation.path ||
+        destinationDirectory.startsWith(`${operation.path}/`)));
 
   const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (busy || invalid) return;
+    if (busy || invalid || validator.status !== "ready") return;
     setBusy(true);
     setError(undefined);
     const nextController = new AbortController();
     controller.current = nextController;
     try {
-      const metadata = await api.metadata(
-        shareId,
-        operation.path,
-        nextController.signal,
-      );
+      // The validator was captured when this dialog opened.
       await api.moveEntry(
         shareId,
         operation.path,
         destination,
-        metadata.etag,
+        validator.etag,
         csrfToken,
         nextController.signal,
       );
@@ -464,6 +571,7 @@ function MoveDialog({
             Choose a different folder outside this item.
           </p>
         )}
+        <ValidatorStatus state={validator} onRetry={retryValidator} />
         {error && (
           <p class="field-error" role="alert">
             {error}
@@ -481,7 +589,7 @@ function MoveDialog({
           <button
             class="button button-primary"
             type="submit"
-            disabled={busy || invalid}
+            disabled={busy || invalid || validator.status !== "ready"}
           >
             {busy ? "Moving…" : "Move here"}
           </button>
@@ -723,6 +831,8 @@ interface UploadJob {
   loaded: number;
   total?: number;
   message?: string;
+  /** The existing file's validator, captured when the conflict was shown. */
+  replaceEtag?: string;
 }
 
 export function UploadQueue({
@@ -765,20 +875,19 @@ export function UploadQueue({
 
   const run = async (job: UploadJob, replace = false) => {
     if (controllers.current.has(job.id)) return;
+    // Replacement only ever uses the validator captured when the conflict
+    // was shown, so a version the person never saw is not overwritten.
+    const etag = replace ? job.replaceEtag : undefined;
+    if (replace && !etag) return;
     const controller = new AbortController();
     controllers.current.set(job.id, controller);
-    update(job.id, { status: "uploading", loaded: 0, message: undefined });
+    update(job.id, {
+      status: "uploading",
+      loaded: 0,
+      message: undefined,
+      replaceEtag: undefined,
+    });
     try {
-      let etag: string | undefined;
-      if (replace) {
-        etag = (
-          await api.metadata(
-            shareId,
-            joinPath(directory, job.file.name),
-            controller.signal,
-          )
-        ).etag;
-      }
       const result = await api.uploadFile(
         shareId,
         directory,
@@ -801,10 +910,7 @@ export function UploadQueue({
         });
         onChanged();
       } else if (outcome === "conflict") {
-        update(job.id, {
-          status: "conflict",
-          message: "A file with this name already exists.",
-        });
+        update(job.id, await describeConflict(job, controller.signal));
       } else if (outcome === "quota_exceeded") {
         update(job.id, {
           status: "failed",
@@ -824,6 +930,37 @@ export function UploadQueue({
       }
     } finally {
       controllers.current.delete(job.id);
+    }
+  };
+
+  const describeConflict = async (
+    job: UploadJob,
+    signal: AbortSignal,
+  ): Promise<Partial<UploadJob>> => {
+    try {
+      const existing = await api.metadata(
+        shareId,
+        joinPath(directory, job.file.name),
+        signal,
+      );
+      if (existing.kind !== "file") {
+        return {
+          status: "failed",
+          message: "A folder with this name already exists.",
+        };
+      }
+      return {
+        status: "conflict",
+        message: "A file with this name already exists.",
+        replaceEtag: existing.etag,
+      };
+    } catch (cause) {
+      if (isUnauthorized(cause) || isAborted(cause)) throw cause;
+      return {
+        status: "conflict",
+        message:
+          "A file with this name already exists, but its current version could not be checked. Retry to check again.",
+      };
     }
   };
 
@@ -882,7 +1019,9 @@ export function UploadQueue({
                   Cancel
                 </button>
               )}
-              {(job.status === "failed" || job.status === "cancelled") &&
+              {(job.status === "failed" ||
+                job.status === "cancelled" ||
+                (job.status === "conflict" && !job.replaceEtag)) &&
                 isValidPathComponent(job.file.name) && (
                   <button
                     class="entry-action"
@@ -892,7 +1031,7 @@ export function UploadQueue({
                     Retry
                   </button>
                 )}
-              {job.status === "conflict" && (
+              {job.status === "conflict" && job.replaceEtag && (
                 <button
                   class="entry-action entry-action-danger"
                   type="button"
@@ -1048,6 +1187,8 @@ function operationError(
 function uploadError(cause: unknown): string {
   if (cause instanceof ApiError) {
     if (cause.kind === "forbidden") return "Your write access changed.";
+    if (cause.kind === "conflict" || cause.status === 412)
+      return "The existing file changed after it was checked. Retry to review it again.";
     if (cause.status === 413)
       return "This file is larger than the server allows.";
     if (cause.status === 429 || cause.status === 503)

@@ -183,11 +183,13 @@ export interface ApiClient {
   startPasskeyRegistration(
     name: string,
     csrfToken: string,
+    signal?: AbortSignal,
   ): Promise<PasskeyChallenge<PublicKeyCredentialCreationOptionsJSON>>;
   finishPasskeyRegistration(
     flowId: string,
     credential: RegistrationResponseJSON,
     csrfToken: string,
+    signal?: AbortSignal,
   ): Promise<Passkey>;
   startPasskeyLogin(
     username?: string,
@@ -367,38 +369,44 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         signal,
         headers: { "X-CSRF-Token": csrfToken },
       }),
-    passkeys: async (signal) => {
-      const result = await request<{ passkeys: Passkey[] }>(
-        "/api/v1/auth/passkeys",
-        { signal },
-        true,
-      );
-      return result.passkeys;
-    },
-    startPasskeyRegistration: (name, csrfToken) =>
-      request("/api/v1/auth/passkeys/register/start", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": csrfToken,
-        },
-        body: JSON.stringify({ name }),
-      }),
-    finishPasskeyRegistration: (flowId, credential, csrfToken) =>
-      request("/api/v1/auth/passkeys/register/finish", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": csrfToken,
-        },
-        body: JSON.stringify({ flowId, credential }),
-      }),
-    startPasskeyLogin: (username) =>
-      request("/api/v1/auth/passkeys/login/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(username ? { username } : {}),
-      }),
+    passkeys: async (signal) =>
+      parsePasskeyList(
+        await request<unknown>("/api/v1/auth/passkeys", { signal }, true),
+      ),
+    startPasskeyRegistration: async (name, csrfToken, signal) =>
+      parsePasskeyChallenge(
+        await request<unknown>("/api/v1/auth/passkeys/register/start", {
+          method: "POST",
+          signal,
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken,
+          },
+          body: JSON.stringify({ name }),
+        }),
+        isCreationOptions,
+      ) as PasskeyChallenge<PublicKeyCredentialCreationOptionsJSON>,
+    finishPasskeyRegistration: async (flowId, credential, csrfToken, signal) =>
+      parsePasskey(
+        await request<unknown>("/api/v1/auth/passkeys/register/finish", {
+          method: "POST",
+          signal,
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken,
+          },
+          body: JSON.stringify({ flowId, credential }),
+        }),
+      ),
+    startPasskeyLogin: async (username) =>
+      parsePasskeyChallenge(
+        await request<unknown>("/api/v1/auth/passkeys/login/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(username ? { username } : {}),
+        }),
+        isRequestOptions,
+      ) as PasskeyChallenge<PublicKeyCredentialRequestOptionsJSON>,
     finishPasskeyLogin: async (flowId, credential) =>
       parseSession(
         await request<unknown>("/api/v1/auth/passkeys/login/finish", {
@@ -407,15 +415,23 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
           body: JSON.stringify({ flowId, credential }),
         }),
       ),
-    renamePasskey: (id, name, csrfToken) =>
-      request(`/api/v1/auth/passkeys/${encodeURIComponent(id)}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": csrfToken,
-        },
-        body: JSON.stringify({ name }),
-      }),
+    renamePasskey: async (id, name, csrfToken) => {
+      const passkey = parsePasskey(
+        await request<unknown>(
+          `/api/v1/auth/passkeys/${encodeURIComponent(id)}`,
+          {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": csrfToken,
+            },
+            body: JSON.stringify({ name }),
+          },
+        ),
+      );
+      if (passkey.id !== id) throw invalidResponse();
+      return passkey;
+    },
     removePasskey: (id, csrfToken) =>
       request(`/api/v1/auth/passkeys/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -842,7 +858,174 @@ function parseSession(value: unknown): Session {
   ) {
     throw invalidResponse();
   }
-  return value as unknown as Session;
+  const { pictureUrl, ...user } = value.user as unknown as User;
+  const session = { ...value, user } as unknown as Session;
+  // Only avatar hosts allowed by the page CSP are rendered; anything else
+  // falls back to no picture rather than attempting a blocked request.
+  if (pictureUrl !== undefined && isAllowedPictureUrl(pictureUrl)) {
+    session.user.pictureUrl = pictureUrl;
+  }
+  return session;
+}
+
+const pictureHosts = new Set(["lh3.googleusercontent.com", "www.gravatar.com"]);
+
+function isAllowedPictureUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      pictureHosts.has(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function parsePasskey(value: unknown): Passkey {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    typeof value.name !== "string" ||
+    !isTimestampSeconds(value.createdAt) ||
+    (value.lastUsedAt !== null && !isTimestampSeconds(value.lastUsedAt))
+  ) {
+    throw invalidResponse();
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    createdAt: value.createdAt as number,
+    lastUsedAt: value.lastUsedAt as number | null,
+  };
+}
+
+function parsePasskeyList(value: unknown): Passkey[] {
+  if (!isRecord(value) || !Array.isArray(value.passkeys)) {
+    throw invalidResponse();
+  }
+  return value.passkeys.map(parsePasskey);
+}
+
+function isTimestampSeconds(value: unknown): boolean {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parsePasskeyChallenge(
+  value: unknown,
+  isOptions: (publicKey: Record<string, unknown>) => boolean,
+): PasskeyChallenge<unknown> {
+  if (
+    !isRecord(value) ||
+    typeof value.flowId !== "string" ||
+    value.flowId.length === 0 ||
+    !isRecord(value.options) ||
+    !isRecord(value.options.publicKey) ||
+    !isOptions(value.options.publicKey)
+  ) {
+    throw invalidResponse();
+  }
+  return {
+    flowId: value.flowId,
+    options: { publicKey: value.options.publicKey },
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isOptionalCredentialList(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.every(
+        (credential) =>
+          isRecord(credential) &&
+          isNonEmptyString(credential.id) &&
+          credential.type === "public-key",
+      ))
+  );
+}
+
+function isRequestOptions(publicKey: Record<string, unknown>): boolean {
+  return (
+    isNonEmptyString(publicKey.challenge) &&
+    isOptionalCredentialList(publicKey.allowCredentials) &&
+    (publicKey.rpId === undefined || typeof publicKey.rpId === "string")
+  );
+}
+
+function isCreationOptions(publicKey: Record<string, unknown>): boolean {
+  const { rp, user, pubKeyCredParams } = publicKey;
+  return (
+    isNonEmptyString(publicKey.challenge) &&
+    isRecord(rp) &&
+    typeof rp.name === "string" &&
+    (rp.id === undefined || typeof rp.id === "string") &&
+    isRecord(user) &&
+    isNonEmptyString(user.id) &&
+    typeof user.name === "string" &&
+    typeof user.displayName === "string" &&
+    Array.isArray(pubKeyCredParams) &&
+    pubKeyCredParams.length > 0 &&
+    pubKeyCredParams.every(
+      (parameter) =>
+        isRecord(parameter) &&
+        parameter.type === "public-key" &&
+        typeof parameter.alg === "number" &&
+        Number.isSafeInteger(parameter.alg),
+    ) &&
+    isOptionalCredentialList(publicKey.excludeCredentials)
+  );
+}
+
+/** The API error code sent when an action needs a recent sign-in. */
+export const reauthenticationRequiredCode = "reauthentication_required";
+
+/** Raised when a CSRF refresh finds a different account signed in. */
+export const accountChangedCode = "account_changed";
+
+/**
+ * Runs a CSRF-protected mutation, recovering once from a stale token.
+ *
+ * Another tab can rotate the session (and with it the CSRF token). A plain
+ * `403 forbidden` is then retried once with the token from a fresh session,
+ * but only when that session still belongs to the same user. Other 403s,
+ * such as a required re-authentication, are never retried.
+ */
+export async function withCsrfRetry<T>(
+  api: Pick<ApiClient, "session">,
+  csrfToken: string,
+  userId: string,
+  onSessionRefreshed: (session: Session) => void,
+  mutate: (csrfToken: string) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await mutate(csrfToken);
+  } catch (cause) {
+    if (
+      !(cause instanceof ApiError) ||
+      cause.kind !== "forbidden" ||
+      (cause.code !== undefined && cause.code !== "forbidden")
+    ) {
+      throw cause;
+    }
+    const refreshed = await api.session(signal);
+    if (refreshed.user.id !== userId) {
+      throw new ApiError("forbidden", "A different account is signed in", {
+        status: 403,
+        code: accountChangedCode,
+      });
+    }
+    onSessionRefreshed(refreshed);
+    return await mutate(refreshed.csrfToken);
+  }
 }
 
 function isOptionalDefaultFolder(value: unknown): boolean {

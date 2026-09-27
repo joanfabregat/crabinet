@@ -21,8 +21,10 @@ import {
 } from "lucide-preact";
 
 import {
+  accountChangedCode,
   ApiError,
   createApiClient,
+  withCsrfRetry,
   directoryEventsUrl,
   downloadUrl,
   htmlPreviewUrl,
@@ -61,7 +63,7 @@ import {
 import { SafeMarkdown } from "./safe-markdown";
 import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
-import { PasskeySettings } from "./passkey-settings";
+import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 
 const defaultApi = createApiClient();
 declare const __CRABINET_DEV_REVISION__: string | null;
@@ -273,7 +275,7 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
         await api.finishPasskeyLogin(challenge.flowId, credential),
       );
     } catch (cause) {
-      if (!isAborted(cause)) {
+      if (!isAborted(cause) && !isWebAuthnCancellation(cause)) {
         setError("Passkey sign-in failed. Check your account and try again.");
       }
     } finally {
@@ -434,6 +436,7 @@ function AuthenticatedShell({
   const [logoutError, setLogoutError] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingPreferences, setSavingPreferences] = useState(false);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string>();
   const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
     readShowHiddenFiles(session.user.id),
@@ -445,8 +448,14 @@ function AuthenticatedShell({
   const defaultShare = session.shares.find(
     (share) => share.id === defaultFolder?.shareId,
   );
+  // A saved folder whose share is no longer listed, or a nested folder, has
+  // no selectable option; show it as a disabled "Current" entry instead of
+  // letting the select fall back to a misleading "First shared folder".
+  const showCurrentStartFolder = Boolean(
+    defaultFolder && (defaultFolder.path || !defaultShare),
+  );
   const startFolderValue = defaultFolder
-    ? defaultFolder.path
+    ? showCurrentStartFolder
       ? "/"
       : defaultFolder.shareId
     : "";
@@ -479,11 +488,24 @@ function AuthenticatedShell({
     setSavingPreferences(true);
     setPreferencesError(undefined);
     try {
-      const saved = await api.updateDefaultFolder(folder, session.csrfToken);
+      const saved = await withCsrfRetry(
+        api,
+        session.csrfToken,
+        session.user.id,
+        onSessionRefreshed,
+        (token) => api.updateDefaultFolder(folder, token),
+      );
       onDefaultFolderChanged(saved);
     } catch (error) {
       if (isUnauthorized(error)) {
         onSessionExpired();
+      } else if (
+        error instanceof ApiError &&
+        error.code === accountChangedCode
+      ) {
+        setPreferencesError(
+          "A different account is now signed in. Reload the page to continue.",
+        );
       } else {
         setPreferencesError("Could not save your start folder. Try again.");
       }
@@ -553,7 +575,7 @@ function AuthenticatedShell({
         <Modal
           title="Settings"
           onClose={() => setSettingsOpen(false)}
-          busy={savingPreferences}
+          busy={savingPreferences || passkeyBusy}
         >
           <div class="settings-content">
             <label for="start-folder">Start folder</label>
@@ -568,9 +590,11 @@ function AuthenticatedShell({
               }}
             >
               <option value="">First shared folder</option>
-              {defaultFolder?.path && defaultShare && (
+              {showCurrentStartFolder && (
                 <option value="/" disabled>
-                  Current: {defaultShare.name} / {defaultFolder.path}
+                  {defaultShare
+                    ? `Current: ${defaultShare.name} / ${defaultFolder?.path}`
+                    : "Current: a folder you can no longer access"}
                 </option>
               )}
               {session.shares.map((share) => (
@@ -599,7 +623,10 @@ function AuthenticatedShell({
             <PasskeySettings
               api={api}
               csrfToken={session.csrfToken}
+              userId={session.user.id}
               onSessionExpired={onSessionExpired}
+              onSessionRefreshed={onSessionRefreshed}
+              onBusyChange={setPasskeyBusy}
             />
           </div>
         </Modal>
@@ -670,7 +697,9 @@ function DirectoryBrowser({
   const [operation, setOperation] = useState<EntryOperation>();
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
+  const [previewOperationError, setPreviewOperationError] = useState<string>();
   const loadMoreController = useRef<AbortController>();
+  const previewOperationController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const previewTriggerRef = useRef<HTMLAnchorElement>();
   const operationLocation = useRef(`${share.id}\u0000${route.path}`);
@@ -693,6 +722,11 @@ function DirectoryBrowser({
       setUploadSelection(undefined);
     }
   }, [route.path, share.id]);
+
+  useEffect(() => {
+    setPreviewOperationError(undefined);
+    return () => previewOperationController.current?.abort();
+  }, [route.path, route.previewPath, share.id]);
 
   useEffect(() => {
     let internalDrag = false;
@@ -971,15 +1005,50 @@ function DirectoryBrowser({
   const operateOnPreview = (kind: "edit" | "rename" | "move" | "delete") => {
     const previewPath = route.previewPath;
     if (!previewPath) return;
-    const name = previewPath.split("/").at(-1) ?? previewPath;
+    previewOperationController.current?.abort();
+    setPreviewOperationError(undefined);
     const listedEntry = page?.entries.find(
       (entry) => joinPath(route.path, entry.name) === previewPath,
     );
-    setOperation({
-      kind,
-      entry: listedEntry ?? { name, kind: "file" },
-      path: previewPath,
-    });
+    if (listedEntry) {
+      if (kind === "edit" && listedEntry.kind !== "file") return;
+      setOperation({ kind, entry: listedEntry, path: previewPath });
+      return;
+    }
+    // A deep-linked preview may name any path, including a folder. Never
+    // guess its kind: the confirmation style depends on it.
+    const controller = new AbortController();
+    previewOperationController.current = controller;
+    const location = operationLocation.current;
+    api.metadata(share.id, previewPath, controller.signal).then(
+      (metadata) => {
+        if (
+          controller.signal.aborted ||
+          activePreview.current !== previewPath ||
+          operationLocation.current !== location
+        )
+          return;
+        if (kind === "edit" && metadata.kind !== "file") {
+          setPreviewOperationError("Only files can be edited.");
+          return;
+        }
+        setOperation({
+          kind,
+          entry: { name: metadata.name, kind: metadata.kind },
+          path: previewPath,
+        });
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted || isAborted(cause)) return;
+        if (isUnauthorized(cause)) {
+          onSessionExpired();
+          return;
+        }
+        setPreviewOperationError(
+          "This item could not be checked. Reload the folder and try again.",
+        );
+      },
+    );
   };
 
   return (
@@ -1130,6 +1199,7 @@ function DirectoryBrowser({
           writable={writable}
           fullScreen={route.previewMode === "full"}
           onOperation={operateOnPreview}
+          operationError={previewOperationError}
           onClose={closePreview}
           onToggleFullScreen={() =>
             navigation.go({
@@ -1297,6 +1367,7 @@ interface PreviewPanelProps {
   writable: boolean;
   fullScreen: boolean;
   onOperation: (kind: "edit" | "rename" | "move" | "delete") => void;
+  operationError?: string;
   onClose: () => void;
   onToggleFullScreen: () => void;
   onSessionExpired: () => void;
@@ -1320,6 +1391,7 @@ function PreviewPanel({
   writable,
   fullScreen,
   onOperation,
+  operationError,
   onClose,
   onToggleFullScreen,
   onSessionExpired,
@@ -1534,6 +1606,7 @@ function PreviewPanel({
               </>
             )}
         </div>
+        {operationError && <Notice tone="danger">{operationError}</Notice>}
 
         <dl class="preview-metadata" aria-label="File details">
           <div>

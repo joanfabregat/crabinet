@@ -10,14 +10,21 @@ import {
 import { EntryIcon } from "./file-icons";
 import { CopyPathButton } from "./copy-path-button";
 import { directoryUrl, type BrowserNavigation } from "./navigation";
-import { isValidVirtualPath } from "./virtual-path";
+import { isValidPathComponent, isValidVirtualPath } from "./virtual-path";
 
 const dragType = "application/x-crabinet-entry";
+// Drag payloads can come from other tabs, windows, or pages that know the
+// MIME type. Only entries dragged from this page instance carry this nonce.
+const dragNonce = crypto.randomUUID();
 
 interface DraggedEntry {
   shareId: string;
   path: string;
   entry: DirectoryEntry;
+}
+
+interface DragPayload extends DraggedEntry {
+  nonce: string;
 }
 
 interface TreeState {
@@ -68,7 +75,12 @@ export function beginEntryDrag(
 ) {
   event.dataTransfer?.setData(
     dragType,
-    JSON.stringify({ shareId, path, entry } satisfies DraggedEntry),
+    JSON.stringify({
+      shareId,
+      path,
+      entry: { name: entry.name, kind: entry.kind },
+      nonce: dragNonce,
+    } satisfies DragPayload),
   );
   if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 }
@@ -77,18 +89,24 @@ function readDraggedEntry(event: DragEvent): DraggedEntry | undefined {
   try {
     const raw = event.dataTransfer?.getData(dragType);
     if (!raw) return undefined;
-    const value = JSON.parse(raw) as Partial<DraggedEntry>;
+    const value = JSON.parse(raw) as Partial<DragPayload>;
     if (
+      value.nonce !== dragNonce ||
       typeof value.shareId !== "string" ||
       typeof value.path !== "string" ||
       !isValidVirtualPath(value.path) ||
       !value.entry ||
-      typeof value.entry.name !== "string" ||
+      !isValidPathComponent(value.entry.name) ||
+      value.entry.name !== value.path.split("/").at(-1) ||
       (value.entry.kind !== "file" && value.entry.kind !== "directory")
     ) {
       return undefined;
     }
-    return value as DraggedEntry;
+    return {
+      shareId: value.shareId,
+      path: value.path,
+      entry: { name: value.entry.name, kind: value.entry.kind },
+    };
   } catch {
     return undefined;
   }
@@ -125,31 +143,49 @@ export function ShareTree({
   const [state, setState] = useState<Record<string, TreeState>>({});
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
+  // One in-flight listing per node: a newer request aborts the older one so
+  // a slow, stale response can never overwrite a fresher listing.
+  const requests = useRef(new Map<string, AbortController>());
+
+  useEffect(() => {
+    const active = requests.current;
+    return () => {
+      active.forEach((controller) => controller.abort());
+      active.clear();
+    };
+  }, []);
 
   const load = useCallback(
     async (shareId: string, path: string, cursor?: string) => {
       const nodeKey = key(shareId, path);
-      setState((current) => ({
-        ...current,
-        [nodeKey]: { ...current[nodeKey], loading: true, error: false },
+      requests.current.get(nodeKey)?.abort();
+      const controller = new AbortController();
+      requests.current.set(nodeKey, controller);
+      const current = () =>
+        !controller.signal.aborted &&
+        requests.current.get(nodeKey) === controller &&
+        showHiddenRef.current === showHidden;
+      setState((previous) => ({
+        ...previous,
+        [nodeKey]: { ...previous[nodeKey], loading: true, error: false },
       }));
       try {
         const page = await api.directory(
           shareId,
           path,
           cursor,
-          undefined,
+          controller.signal,
           showHidden,
         );
-        if (showHiddenRef.current !== showHidden) return;
-        setState((current) => ({
-          ...current,
+        if (!current()) return;
+        setState((previous) => ({
+          ...previous,
           [nodeKey]: {
-            page: mergePage(cursor ? current[nodeKey]?.page : undefined, page),
+            page: mergePage(cursor ? previous[nodeKey]?.page : undefined, page),
           },
         }));
       } catch (error) {
-        if (showHiddenRef.current !== showHidden) return;
+        if (!current()) return;
         if (
           typeof error === "object" &&
           error !== null &&
@@ -158,10 +194,14 @@ export function ShareTree({
         ) {
           onSessionExpired();
         } else {
-          setState((current) => ({
-            ...current,
-            [nodeKey]: { ...current[nodeKey], loading: false, error: true },
+          setState((previous) => ({
+            ...previous,
+            [nodeKey]: { ...previous[nodeKey], loading: false, error: true },
           }));
+        }
+      } finally {
+        if (requests.current.get(nodeKey) === controller) {
+          requests.current.delete(nodeKey);
         }
       }
     },
@@ -411,17 +451,45 @@ export function FolderPicker({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([""]));
   const [pages, setPages] = useState<Record<string, DirectoryPage>>({});
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
+  const [failed, setFailed] = useState<Set<string>>(() => new Set());
+  const requests = useRef(new Map<string, AbortController>());
+
+  useEffect(() => {
+    const active = requests.current;
+    return () => {
+      active.forEach((controller) => controller.abort());
+      active.clear();
+    };
+  }, []);
 
   const load = useCallback(
     async (path: string, cursor?: string) => {
-      setLoading((current) => new Set(current).add(path));
+      requests.current.get(path)?.abort();
+      const controller = new AbortController();
+      requests.current.set(path, controller);
+      const current = () =>
+        !controller.signal.aborted && requests.current.get(path) === controller;
+      setLoading((state) => new Set(state).add(path));
+      setFailed((state) => {
+        if (!state.has(path)) return state;
+        const next = new Set(state);
+        next.delete(path);
+        return next;
+      });
       try {
-        const page = await api.directory(share.id, path, cursor);
-        setPages((current) => ({
-          ...current,
-          [path]: mergePage(cursor ? current[path] : undefined, page),
+        const page = await api.directory(
+          share.id,
+          path,
+          cursor,
+          controller.signal,
+        );
+        if (!current()) return;
+        setPages((state) => ({
+          ...state,
+          [path]: mergePage(cursor ? state[path] : undefined, page),
         }));
       } catch (error) {
+        if (!current()) return;
         if (
           typeof error === "object" &&
           error !== null &&
@@ -429,21 +497,27 @@ export function FolderPicker({
           error.kind === "unauthorized"
         ) {
           onSessionExpired();
+        } else {
+          // Failures wait for an explicit retry instead of looping.
+          setFailed((state) => new Set(state).add(path));
         }
       } finally {
-        setLoading((current) => {
-          const next = new Set(current);
-          next.delete(path);
-          return next;
-        });
+        if (requests.current.get(path) === controller) {
+          requests.current.delete(path);
+          setLoading((state) => {
+            const next = new Set(state);
+            next.delete(path);
+            return next;
+          });
+        }
       }
     },
     [api, onSessionExpired, share.id],
   );
 
   useEffect(() => {
-    if (!pages[""] && !loading.has("")) void load("");
-  }, [load, loading, pages]);
+    void load("");
+  }, [load]);
 
   const toggle = (path: string) => {
     const opening = !expanded.has(path);
@@ -488,16 +562,29 @@ export function FolderPicker({
               render(joinPath(path, entry.name), entry.name, level + 1),
             )}
             {loading.has(path) && <li class="tree-status">Loading…</li>}
-            {pages[path]?.nextCursor && !loading.has(path) && (
-              <li class="tree-status">
+            {failed.has(path) && !loading.has(path) && (
+              <li class="tree-status" role="alert">
+                Folders could not be loaded.{" "}
                 <button
                   type="button"
                   onClick={() => void load(path, pages[path]?.nextCursor)}
                 >
-                  More folders…
+                  Try again
                 </button>
               </li>
             )}
+            {pages[path]?.nextCursor &&
+              !loading.has(path) &&
+              !failed.has(path) && (
+                <li class="tree-status">
+                  <button
+                    type="button"
+                    onClick={() => void load(path, pages[path]?.nextCursor)}
+                  >
+                    More folders…
+                  </button>
+                </li>
+              )}
           </ul>
         )}
       </li>
