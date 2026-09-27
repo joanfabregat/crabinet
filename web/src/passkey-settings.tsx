@@ -1,5 +1,8 @@
 import { useEffect, useState } from "preact/hooks";
-import { browserSupportsWebAuthn, startRegistration } from "@simplewebauthn/browser";
+import {
+  browserSupportsWebAuthn,
+  startRegistration,
+} from "@simplewebauthn/browser";
 
 import { ApiError, type ApiClient, type Passkey } from "./api";
 
@@ -31,12 +34,14 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
         setEnabled(true);
         api.passkeys(controller.signal).then(setKeys, (cause) => {
           if (controller.signal.aborted) return;
-          if (cause instanceof ApiError && cause.kind === "unauthorized") onSessionExpired();
+          if (cause instanceof ApiError && cause.kind === "unauthorized")
+            onSessionExpired();
           else setError("Could not load your passkeys.");
         });
       },
       () => {
-        if (!controller.signal.aborted) setError("Could not load passkey settings.");
+        if (!controller.signal.aborted)
+          setError("Could not load passkey settings.");
       },
     );
     return () => controller.abort();
@@ -55,13 +60,25 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
     setBusy(true);
     setError(undefined);
     try {
-      const challenge = await api.startPasskeyRegistration(name.trim(), csrfToken);
-      const credential = await startRegistration({ optionsJSON: challenge.options.publicKey });
-      const key = await api.finishPasskeyRegistration(challenge.flowId, credential, csrfToken);
+      const challenge = await api.startPasskeyRegistration(
+        name.trim(),
+        csrfToken,
+      );
+      const credential = await startRegistration({
+        optionsJSON: challenge.options.publicKey,
+      });
+      const key = await api.finishPasskeyRegistration(
+        challenge.flowId,
+        credential,
+        csrfToken,
+      );
       setKeys((current) => [key, ...current]);
       setName("");
     } catch (cause) {
-      failed(cause, "Could not add the passkey. Try again or choose another device.");
+      failed(
+        cause,
+        "Could not add the passkey. Try again or choose another device.",
+      );
     } finally {
       setBusy(false);
     }
@@ -73,7 +90,9 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
     setError(undefined);
     try {
       const updated = await api.renamePasskey(id, editedName.trim(), csrfToken);
-      setKeys((current) => current.map((key) => key.id === id ? updated : key));
+      setKeys((current) =>
+        current.map((key) => (key.id === id ? updated : key)),
+      );
       setEditingId(undefined);
     } catch (cause) {
       failed(cause, "Could not rename the passkey. Try again.");
@@ -102,8 +121,15 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
   return (
     <section class="passkey-settings" aria-labelledby="passkeys-title">
       <h3 id="passkeys-title">Passkeys</h3>
-      <p class="muted">Use a passkey to sign in without a password or identity provider. You can add more than one and manage each separately.</p>
-      {error && <p class="passkey-error" role="alert">{error}</p>}
+      <p class="muted">
+        Use a passkey to sign in without a password or identity provider. You
+        can add more than one and manage each separately.
+      </p>
+      {error && (
+        <p class="passkey-error" role="alert">
+          {error}
+        </p>
+      )}
       {enabled && (
         <>
           {keys.length === 0 && <p class="muted">No passkeys added yet.</p>}
@@ -113,32 +139,87 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
                 {editingId === key.id ? (
                   <div class="passkey-edit">
                     <label for={`passkey-name-${key.id}`}>Passkey name</label>
-                    <input id={`passkey-name-${key.id}`} value={editedName} maxLength={80}
-                      onInput={(event) => setEditedName(event.currentTarget.value)} disabled={busy} />
+                    <input
+                      id={`passkey-name-${key.id}`}
+                      value={editedName}
+                      maxLength={80}
+                      onInput={(event) =>
+                        setEditedName(event.currentTarget.value)
+                      }
+                      disabled={busy}
+                    />
                     <div class="passkey-actions">
-                      <button class="button" type="button" disabled={busy || !editedName.trim()}
-                        onClick={() => void rename(key.id)}>Save name</button>
-                      <button class="button button-secondary" type="button" disabled={busy}
-                        onClick={() => setEditingId(undefined)}>Cancel</button>
+                      <button
+                        class="button"
+                        type="button"
+                        disabled={busy || !editedName.trim()}
+                        onClick={() => void rename(key.id)}
+                      >
+                        Save name
+                      </button>
+                      <button
+                        class="button button-secondary"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setEditingId(undefined)}
+                      >
+                        Cancel
+                      </button>
                     </div>
                   </div>
                 ) : (
                   <>
                     <strong>{key.name}</strong>
-                    <small>Added {dateLabel(key.createdAt)}{key.lastUsedAt ? ` · Last used ${dateLabel(key.lastUsedAt)}` : ""}</small>
+                    <small>
+                      Added {dateLabel(key.createdAt)}
+                      {key.lastUsedAt
+                        ? ` · Last used ${dateLabel(key.lastUsedAt)}`
+                        : ""}
+                    </small>
                     <div class="passkey-actions">
-                      <button class="button button-secondary" type="button" disabled={busy}
-                        onClick={() => { setEditingId(key.id); setEditedName(key.name); setConfirmRemove(undefined); }}>Rename</button>
+                      <button
+                        class="button button-secondary"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setEditingId(key.id);
+                          setEditedName(key.name);
+                          setConfirmRemove(undefined);
+                        }}
+                      >
+                        Rename
+                      </button>
                       {confirmRemove === key.id ? (
                         <>
-                          <button class="button button-danger" type="button" disabled={busy}
-                            onClick={() => void remove(key.id)}>Confirm remove</button>
-                          <button class="button button-secondary" type="button" disabled={busy}
-                            onClick={() => setConfirmRemove(undefined)}>Cancel</button>
+                          <button
+                            class="button button-danger"
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void remove(key.id)}
+                          >
+                            Confirm remove
+                          </button>
+                          <button
+                            class="button button-secondary"
+                            type="button"
+                            disabled={busy}
+                            onClick={() => setConfirmRemove(undefined)}
+                          >
+                            Cancel
+                          </button>
                         </>
                       ) : (
-                        <button class="button button-secondary" type="button" disabled={busy}
-                          onClick={() => { setConfirmRemove(key.id); setEditingId(undefined); }}>Remove</button>
+                        <button
+                          class="button button-secondary"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            setConfirmRemove(key.id);
+                            setEditingId(undefined);
+                          }}
+                        >
+                          Remove
+                        </button>
                       )}
                     </div>
                   </>
@@ -148,12 +229,31 @@ export function PasskeySettings({ api, csrfToken, onSessionExpired }: Props) {
           </ul>
           <label for="new-passkey-name">Name for new passkey</label>
           <div class="passkey-add">
-            <input id="new-passkey-name" value={name} maxLength={80} placeholder="e.g. My laptop"
-              onInput={(event) => setName(event.currentTarget.value)} disabled={busy} />
-            <button class="button" type="button" disabled={busy || !name.trim() || !browserSupportsWebAuthn() || keys.length >= 20}
-              onClick={() => void add()}>{busy ? "Working…" : "Add passkey"}</button>
+            <input
+              id="new-passkey-name"
+              value={name}
+              maxLength={80}
+              placeholder="e.g. My laptop"
+              onInput={(event) => setName(event.currentTarget.value)}
+              disabled={busy}
+            />
+            <button
+              class="button"
+              type="button"
+              disabled={
+                busy ||
+                !name.trim() ||
+                !browserSupportsWebAuthn() ||
+                keys.length >= 20
+              }
+              onClick={() => void add()}
+            >
+              {busy ? "Working…" : "Add passkey"}
+            </button>
           </div>
-          {!browserSupportsWebAuthn() && <p class="muted">This browser does not support passkeys.</p>}
+          {!browserSupportsWebAuthn() && (
+            <p class="muted">This browser does not support passkeys.</p>
+          )}
         </>
       )}
     </section>

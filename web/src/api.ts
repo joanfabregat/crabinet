@@ -378,13 +378,19 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     startPasskeyRegistration: (name, csrfToken) =>
       request("/api/v1/auth/passkeys/register/start", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
         body: JSON.stringify({ name }),
       }),
     finishPasskeyRegistration: (flowId, credential, csrfToken) =>
       request("/api/v1/auth/passkeys/register/finish", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
         body: JSON.stringify({ flowId, credential }),
       }),
     startPasskeyLogin: (username) =>
@@ -394,15 +400,20 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         body: JSON.stringify({ username }),
       }),
     finishPasskeyLogin: async (flowId, credential) =>
-      parseSession(await request<unknown>("/api/v1/auth/passkeys/login/finish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flowId, credential }),
-      })),
+      parseSession(
+        await request<unknown>("/api/v1/auth/passkeys/login/finish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ flowId, credential }),
+        }),
+      ),
     renamePasskey: (id, name, csrfToken) =>
       request(`/api/v1/auth/passkeys/${encodeURIComponent(id)}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
         body: JSON.stringify({ name }),
       }),
     removePasskey: (id, csrfToken) =>

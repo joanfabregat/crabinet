@@ -178,10 +178,12 @@ describe("authentication", () => {
         oidcEnabled: true,
       })),
     });
-    const first = render(<App api={oidcOnly} navigation={new MemoryNavigation()} />);
-    expect(await screen.findByRole("link", { name: "Sign in with Google" })).toHaveAttribute(
-      "href", "/api/v1/auth/oidc/start",
+    const first = render(
+      <App api={oidcOnly} navigation={new MemoryNavigation()} />,
     );
+    expect(
+      await screen.findByRole("link", { name: "Sign in with Google" }),
+    ).toHaveAttribute("href", "/api/v1/auth/oidc/start");
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
     first.unmount();
 
@@ -206,7 +208,9 @@ describe("authentication", () => {
 
   it("offers passkey sign-in alongside Google when password sign-in is disabled", async () => {
     const api = fakeApi({
-      session: vi.fn().mockRejectedValue(new ApiError("unauthorized", "anonymous")),
+      session: vi
+        .fn()
+        .mockRejectedValue(new ApiError("unauthorized", "anonymous")),
       authMethods: vi.fn(async () => ({
         passwordEnabled: false,
         oidcEnabled: true,
@@ -214,9 +218,15 @@ describe("authentication", () => {
       })),
     });
     render(<App api={api} navigation={new MemoryNavigation()} />);
-    expect(await screen.findByRole("link", { name: "Sign in with Google" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Email or username for passkey")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sign in with a passkey" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("link", { name: "Sign in with Google" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Email or username for passkey"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Sign in with a passkey" }),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
   });
 

@@ -129,6 +129,8 @@ jobs:
           rustup toolchain install "${RUST_VERSION}" --profile minimal
           rustup +"${RUST_VERSION}" target add "${{ matrix.target }}"
       - name: Test and build locked release
+        env:
+          CC: musl-gcc
         run: |
           cargo +"${RUST_VERSION}" test --locked --release --target "${{ matrix.target }}" --all-features
           cargo +"${RUST_VERSION}" build --locked --release --target "${{ matrix.target }}"

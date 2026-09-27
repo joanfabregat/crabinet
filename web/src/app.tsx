@@ -1,6 +1,9 @@
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { browserSupportsWebAuthn, startAuthentication } from "@simplewebauthn/browser";
+import {
+  browserSupportsWebAuthn,
+  startAuthentication,
+} from "@simplewebauthn/browser";
 import {
   Code2,
   Download,
@@ -239,11 +242,7 @@ interface LoginScreenProps {
   onAuthenticated: (session: Session) => void;
 }
 
-function LoginScreen({
-  api,
-  reason,
-  onAuthenticated,
-}: LoginScreenProps) {
+function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
   const [pending, setPending] = useState(false);
   const [passkeyPending, setPasskeyPending] = useState(false);
   const [passkeyUsername, setPasskeyUsername] = useState("");
@@ -256,22 +255,27 @@ function LoginScreen({
 
   useEffect(() => {
     const controller = new AbortController();
-    api.authMethods(controller.signal).then(
-      setMethods,
-      () => setMethodsError(true),
-    );
+    api
+      .authMethods(controller.signal)
+      .then(setMethods, () => setMethodsError(true));
     return () => controller.abort();
   }, [api]);
 
-  const signInWithPasskey = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
+  const signInWithPasskey = async (
+    event: JSX.TargetedSubmitEvent<HTMLFormElement>,
+  ) => {
     event.preventDefault();
     if (passkeyPending) return;
     setPasskeyPending(true);
     setError(undefined);
     try {
       const challenge = await api.startPasskeyLogin(passkeyUsername.trim());
-      const credential = await startAuthentication({ optionsJSON: challenge.options.publicKey });
-      onAuthenticated(await api.finishPasskeyLogin(challenge.flowId, credential));
+      const credential = await startAuthentication({
+        optionsJSON: challenge.options.publicKey,
+      });
+      onAuthenticated(
+        await api.finishPasskeyLogin(challenge.flowId, credential),
+      );
     } catch (cause) {
       if (!isAborted(cause)) {
         setError("Passkey sign-in failed. Check your account and try again.");
@@ -346,33 +350,53 @@ function LoginScreen({
             </Notice>
           )}
           {methods?.oidcEnabled && (
-              <a class="google-signin" href="/api/v1/auth/oidc/start">
-                <img src="/google-g.png" width="20" height="20" alt="" />
-                <span>Sign in with Google</span>
-              </a>
-            )}
+            <a class="google-signin" href="/api/v1/auth/oidc/start">
+              <img src="/google-g.png" width="20" height="20" alt="" />
+              <span>Sign in with Google</span>
+            </a>
+          )}
           {methods?.oidcEnabled && methods.passkeyEnabled && (
             <p class="login-divider">or sign in with a passkey</p>
           )}
           {methods?.passkeyEnabled && (
-            <form class="login-form" onSubmit={(event) => void signInWithPasskey(event)}>
-              <label for="passkey-username">Email or username for passkey</label>
-              <input id="passkey-username" type="text" autocomplete="username webauthn"
-                value={passkeyUsername} onInput={(event) => setPasskeyUsername(event.currentTarget.value)}
-                disabled={passkeyPending} required />
-              <Button type="submit" busy={passkeyPending}
-                disabled={!browserSupportsWebAuthn()}>
+            <form
+              class="login-form"
+              onSubmit={(event) => void signInWithPasskey(event)}
+            >
+              <label for="passkey-username">
+                Email or username for passkey
+              </label>
+              <input
+                id="passkey-username"
+                type="text"
+                autocomplete="username webauthn"
+                value={passkeyUsername}
+                onInput={(event) =>
+                  setPasskeyUsername(event.currentTarget.value)
+                }
+                disabled={passkeyPending}
+                required
+              />
+              <Button
+                type="submit"
+                busy={passkeyPending}
+                disabled={!browserSupportsWebAuthn()}
+              >
                 {passkeyPending ? "Signing in…" : "Sign in with a passkey"}
               </Button>
-              {!browserSupportsWebAuthn() && <p class="muted">This browser does not support passkeys.</p>}
+              {!browserSupportsWebAuthn() && (
+                <p class="muted">This browser does not support passkeys.</p>
+              )}
             </form>
           )}
           {methods?.passwordEnabled && methods.passkeyEnabled && (
             <p class="login-divider">or sign in with a password</p>
           )}
-          {methods?.passwordEnabled && methods.oidcEnabled && !methods.passkeyEnabled && (
-            <p class="login-divider">or sign in with a password</p>
-          )}
+          {methods?.passwordEnabled &&
+            methods.oidcEnabled &&
+            !methods.passkeyEnabled && (
+              <p class="login-divider">or sign in with a password</p>
+            )}
           {methods?.passwordEnabled && (
             <form class="login-form" onSubmit={submit}>
               <label for="username">Email or username</label>
