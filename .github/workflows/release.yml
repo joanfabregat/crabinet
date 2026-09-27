@@ -212,13 +212,18 @@ jobs:
           path: release
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Prepare image output
-        run: mkdir -p image-output
+      - name: Prepare image context and output
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "image-context/release/crabinet-linux-${ARCH}" image-output
+          cp Containerfile LICENSE-CCADB LICENSE-Apache-2.0 LICENSE-MPL-2.0 image-context/
+          cp "release/crabinet-linux-${ARCH}/crabinet" "image-context/release/crabinet-linux-${ARCH}/crabinet"
       - name: Build exact OCI archive
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: .
-          file: Containerfile
+          context: image-context
+          file: image-context/Containerfile
           platforms: linux/${{ matrix.arch }}
           build-args: VERSION=${{ env.RELEASE_TAG }}
           outputs: type=oci,dest=image-output/crabinet-${{ matrix.arch }}.tar
