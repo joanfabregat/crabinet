@@ -317,7 +317,18 @@ test.describe("writable share operations", () => {
     await expect(uploadJob(uploads, "replace-me.txt")).toContainText(
       "Needs attention",
     );
-    await expect(uploadJob(uploads, "too-large.bin")).toContainText(
+    const oversizedJob = uploadJob(uploads, "too-large.bin");
+    await expect(oversizedJob).toContainText(
+      /This file is larger than the server allows\.|The server is busy\. Retry shortly\./,
+    );
+    if (
+      await oversizedJob
+        .getByText("The server is busy. Retry shortly.")
+        .isVisible()
+    ) {
+      await oversizedJob.getByRole("button", { name: "Retry" }).click();
+    }
+    await expect(oversizedJob).toContainText(
       "This file is larger than the server allows.",
     );
     expect(await readText(page, "writable", "replace-me.txt")).toBe("");
