@@ -77,8 +77,10 @@ pub enum MutationStateError {
 
 pub struct MutationState {
     limits: MutationLimits,
-    /// Process-wide upload cap plus a per-subject cap of half of it (at least
-    /// one), so a single user cannot hold every upload slot.
+    /// Process-wide upload cap plus a per-subject cap of one less (at least
+    /// one), so a single user cannot hold every upload slot. The default of
+    /// four leaves each user three, matching the browser client's three
+    /// parallel uploads in `web/src/operations.tsx`.
     upload_gate: SubjectGate,
     /// One commit lock per share. Quota checks and publication are atomic
     /// within a share; unrelated shares never wait on each other's fsyncs.
@@ -105,7 +107,7 @@ impl MutationState {
             limits,
             upload_gate: SubjectGate::new(
                 limits.max_concurrent_uploads,
-                (limits.max_concurrent_uploads / 2).max(1),
+                (limits.max_concurrent_uploads - 1).max(1),
             ),
             commit_locks: Mutex::new(HashMap::new()),
             upload_idle_timeout: UPLOAD_IDLE_TIMEOUT,
@@ -1827,9 +1829,11 @@ mod tests {
         let state = MutationState::new(MutationLimits::default()).expect("mutation state");
         let first = state.upload_gate.try_acquire("alice").expect("first slot");
         let second = state.upload_gate.try_acquire("alice").expect("second slot");
+        let third = state.upload_gate.try_acquire("alice").expect("third slot");
         assert!(state.upload_gate.try_acquire("alice").is_none());
         let other = state.upload_gate.try_acquire("bob").expect("other user");
-        drop((first, second, other));
+        assert!(state.upload_gate.try_acquire("bob").is_none());
+        drop((first, second, third, other));
 
         let single = MutationState::new(MutationLimits {
             max_concurrent_uploads: 1,

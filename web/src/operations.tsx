@@ -975,6 +975,7 @@ export function UploadQueue({
         if (job) await run(job);
       }
     };
+    // The server allows each user three concurrent uploads (src/mutations.rs).
     for (let index = 0; index < Math.min(3, queue.length); index += 1) {
       void worker();
     }
