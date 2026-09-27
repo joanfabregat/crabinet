@@ -91,7 +91,7 @@ systemd-run --user --quiet --wait --pipe --collect \
     --env=HOME=/tmp \
     --env=TMPDIR=/tmp \
     --label=traefik.enable=true \
-    '--label=traefik.http.routers.crabinet-preview.rule=Host(`files-dev.jf.ffwip.com`)' \
+    '--label=traefik.http.routers.crabinet-preview.rule=Host(`files-dev.jbox.ffwip.com`)' \
     --label=traefik.http.routers.crabinet-preview.entrypoints=websecure \
     --label=traefik.http.routers.crabinet-preview.service=crabinet-preview \
     --label=traefik.http.services.crabinet-preview.loadbalancer.server.port=5173 \
