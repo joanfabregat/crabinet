@@ -6,9 +6,19 @@ import {
   parentPath,
   previewRouteUrl,
   routeFromUrl,
+  trashUrl,
 } from "./navigation";
 
 describe("browser navigation", () => {
+  it("round-trips a per-share Trash route", () => {
+    const href = trashUrl("équipe/a");
+    expect(href).toBe("/trash/%C3%A9quipe%2Fa");
+    expect(routeFromUrl(new URL(href, "https://crabinet.test"))).toEqual({
+      shareId: "équipe/a",
+      path: "",
+      view: "trash",
+    });
+  });
   it("round-trips Unicode share IDs and relative paths", () => {
     const href = directoryUrl("équipe/a", "Designs/東京 🚀");
     expect(href).toBe(

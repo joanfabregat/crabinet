@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "crabinet"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -477,6 +477,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-util",
  "toml",

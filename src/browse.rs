@@ -248,6 +248,13 @@ impl Drop for SubjectLease {
 }
 
 impl BrowseState {
+    pub fn trash_gc_targets(&self) -> Vec<(ShareId, Arc<ShareFs>)> {
+        self.shares
+            .iter()
+            .map(|(id, share)| (id.clone(), Arc::clone(&share.filesystem)))
+            .collect()
+    }
+
     pub fn new(
         shares: Vec<ConfiguredShare>,
         limits: BrowseLimits,

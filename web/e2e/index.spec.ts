@@ -195,7 +195,8 @@ test("action tooltips escape clipped panels and remain inside the viewport", asy
   const copyPath = page.getByRole("button", {
     name: "Copy full path for README.md",
   });
-  await copyPath.hover();
+  await copyPath.scrollIntoViewIfNeeded();
+  await copyPath.focus();
 
   const tooltip = page.getByRole("tooltip");
   await expect(tooltip).toHaveText("Copy full path for README.md");

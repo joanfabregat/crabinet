@@ -495,6 +495,49 @@ select {
   grid-template-columns: 2.75rem minmax(0, 1fr) auto auto;
 }
 
+.tree-trash-row {
+  grid-template-columns: 2.75rem minmax(0, 1fr);
+}
+
+.tree-trash-row .tree-link {
+  grid-column: 2;
+}
+
+.trash-list {
+  list-style: none;
+  margin: 1.5rem 0 0;
+  padding: 0;
+}
+
+.trash-item {
+  align-items: start;
+  border-top: 1px solid #dce6df;
+  display: flex;
+  gap: 1rem;
+  padding: 1rem 0;
+}
+
+.trash-details {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.trash-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.trash-actions .button {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.3rem;
+}
+
 .tree-row:hover,
 .picker-row:hover,
 .tree-row.is-selected,

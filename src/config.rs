@@ -134,6 +134,10 @@ struct RawServerConfig {
     #[serde(default = "default_max_sessions_total")]
     #[schemars(range(min = 1, max = 100_000))]
     max_sessions_total: usize,
+    /// Number of days before an item in Trash is eligible for permanent removal.
+    #[serde(default = "default_trash_retention_days")]
+    #[schemars(range(min = 1, max = 3650))]
+    trash_retention_days: u16,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -260,6 +264,7 @@ pub struct ServerConfig {
     login_attempts_per_minute: u32,
     max_sessions_per_user: usize,
     max_sessions_total: usize,
+    trash_retention_days: u16,
 }
 
 #[derive(Clone)]
@@ -367,6 +372,11 @@ impl Config {
         if !(raw.server.max_sessions_per_user..=100_000).contains(&raw.server.max_sessions_total) {
             return Err(ConfigError::Validation(
                 "server.max_sessions_total must be between max_sessions_per_user and 100000".into(),
+            ));
+        }
+        if !(1..=3650).contains(&raw.server.trash_retention_days) {
+            return Err(ConfigError::Validation(
+                "server.trash_retention_days must be between 1 and 3650".into(),
             ));
         }
 
@@ -570,6 +580,7 @@ impl Config {
                 login_attempts_per_minute: raw.server.login_attempts_per_minute,
                 max_sessions_per_user: raw.server.max_sessions_per_user,
                 max_sessions_total: raw.server.max_sessions_total,
+                trash_retention_days: raw.server.trash_retention_days,
             },
             users,
             shares,
@@ -649,6 +660,10 @@ impl ServerConfig {
 
     pub fn max_sessions_total(&self) -> usize {
         self.max_sessions_total
+    }
+
+    pub fn trash_retention_days(&self) -> u16 {
+        self.trash_retention_days
     }
 }
 
@@ -733,6 +748,10 @@ const fn default_max_sessions_per_user() -> usize {
 
 const fn default_max_sessions_total() -> usize {
     4_096
+}
+
+const fn default_trash_retention_days() -> u16 {
+    30
 }
 
 impl Share {
@@ -1159,6 +1178,7 @@ permission = "write"
         assert_eq!(config.server().login_attempts_per_minute(), 5);
         assert_eq!(config.server().max_sessions_per_user(), 16);
         assert_eq!(config.server().max_sessions_total(), 4_096);
+        assert_eq!(config.server().trash_retention_days(), 30);
         assert!(!config.users()[0].disabled());
         assert_eq!(config.shares()[0].id(), "files");
         assert_eq!(config.shares()[0].name(), "Files");
@@ -1169,6 +1189,21 @@ permission = "write"
         );
         assert_eq!(config.shares()[0].permission_for("bob"), None);
         assert!(!format!("{config:?}").contains(HASH));
+    }
+
+    #[test]
+    fn trash_retention_is_configurable_and_bounded() {
+        let tree = TestTree::new();
+        let text = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\ntrash_retention_days = 45",
+        );
+        assert_eq!(
+            tree.load(&text).unwrap().server().trash_retention_days(),
+            45
+        );
+        let invalid = text.replace("trash_retention_days = 45", "trash_retention_days = 0");
+        assert!(tree.load(&invalid).is_err());
     }
 
     #[test]

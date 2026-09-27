@@ -22,6 +22,8 @@ login_attempts_per_minute = 5
 # clients repeatedly omit their previous cookie.
 max_sessions_per_user = 16
 max_sessions_total = 4096
+# Trash items become eligible for background permanent removal after 30 days.
+trash_retention_days = 30
 
 [auth]
 # Password sign-in remains enabled by default. Enable OIDC to show both methods.

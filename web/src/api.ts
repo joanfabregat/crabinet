@@ -97,6 +97,24 @@ export interface MutationResult {
   outcome: "success";
 }
 
+export interface TrashItem {
+  id: string;
+  originalPath: string;
+  kind: "directory" | "file";
+  deletedAt: string;
+  deletedBy: string;
+  expiresAt: string;
+}
+
+export interface TrashPage {
+  shareId: string;
+  items: TrashItem[];
+}
+
+export interface TrashResult extends MutationResult {
+  trashId: string;
+}
+
 export type UploadOutcomeKind =
   "created" | "replaced" | "conflict" | "quota_exceeded" | "error";
 
@@ -260,7 +278,21 @@ export interface ApiClient {
     etag: string,
     csrfToken: string,
     signal?: AbortSignal,
-  ): Promise<MutationResult>;
+  ): Promise<TrashResult>;
+  trash(shareId: string, signal?: AbortSignal): Promise<TrashPage>;
+  restoreTrash(
+    shareId: string,
+    id: string,
+    destination: string | undefined,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  purgeTrash(
+    shareId: string,
+    id: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
   uploadFile(
     shareId: string,
     directory: string,
@@ -555,7 +587,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         destination,
       ),
     deleteEntry: async (shareId, path, etag, csrfToken, signal) =>
-      parseMutationResult(
+      parseTrashResult(
         await request<unknown>(fileApiUrl(shareId, path, "entry"), {
           method: "DELETE",
           signal,
@@ -567,6 +599,35 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         shareId,
         path,
       ),
+    trash: async (shareId, signal) =>
+      parseTrashPage(
+        await request<unknown>(shareApiUrl(shareId, "trash"), { signal }, true),
+        shareId,
+      ),
+    restoreTrash: async (shareId, id, destination, csrfToken, signal) => {
+      if (destination !== undefined && !isValidVirtualPath(destination))
+        throw new ApiError(
+          "invalid-request",
+          "The restore destination is invalid",
+        );
+      await request<unknown>(
+        `${shareApiUrl(shareId, "trash")}/${encodeURIComponent(id)}/restore`,
+        {
+          method: "POST",
+          signal,
+          headers: mutationJsonHeaders(csrfToken),
+          body: JSON.stringify(
+            destination === undefined ? {} : { destination },
+          ),
+        },
+      );
+    },
+    purgeTrash: async (shareId, id, csrfToken, signal) => {
+      await request<unknown>(
+        `${shareApiUrl(shareId, "trash")}/${encodeURIComponent(id)}`,
+        { method: "DELETE", signal, headers: { "X-CSRF-Token": csrfToken } },
+      );
+    },
     uploadFile: (shareId, directory, file, csrfToken, uploadOptions = {}) =>
       uploadWithXhr(
         xhrFactory,
@@ -1127,6 +1188,38 @@ function parseMutationResult(
     throw invalidResponse();
   }
   return value as unknown as MutationResult;
+}
+
+function parseTrashResult(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): TrashResult {
+  parseMutationResult(value, expectedShareId, expectedPath);
+  if (!isRecord(value) || typeof value.trashId !== "string" || !value.trashId)
+    throw invalidResponse();
+  return value as unknown as TrashResult;
+}
+
+function parseTrashPage(value: unknown, expectedShareId: string): TrashPage {
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    !Array.isArray(value.items) ||
+    !value.items.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.id === "string" &&
+        typeof item.originalPath === "string" &&
+        isValidVirtualPath(item.originalPath) &&
+        (item.kind === "file" || item.kind === "directory") &&
+        typeof item.deletedAt === "string" &&
+        typeof item.deletedBy === "string" &&
+        typeof item.expiresAt === "string",
+    )
+  )
+    throw invalidResponse();
+  return value as unknown as TrashPage;
 }
 
 function parseUploadResult(

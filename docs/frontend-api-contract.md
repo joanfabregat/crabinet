@@ -38,6 +38,8 @@ When passkeys are enabled, `POST /api/v1/auth/passkeys/login/start` accepts `{}`
 
 ## Directory browsing
 
+Trash is a separate per-share view, not a virtual `.crabinet` folder. `GET /api/v1/shares/{shareId}/trash` returns `{ "shareId": "docs", "items": [{ "id": "opaque-id", "originalPath": "reports/old.txt", "kind": "file", "deletedAt": "2026-09-27T12:00:00Z", "deletedBy": "joan", "expiresAt": "2026-10-27T12:00:00Z" }] }`. It is available to every user granted the share. `DELETE /api/v1/shares/{shareId}/entry?path=...` returns a `trashId` for Undo. A writer restores through `POST /api/v1/shares/{shareId}/trash/{id}/restore` with `{}` for the original path or `{ "destination": "other/path" }` after a conflict, and permanently purges through `DELETE /api/v1/shares/{shareId}/trash/{id}`. The server enforces grants and no-replace semantics for every action. The sidebar shows Trash independently of the hidden-files preference; `.crabinet` remains inaccessible.
+
 `GET /api/v1/shares/{shareId}/directory?path={path}&limit=100&cursor={opaque}` returns:
 
 ```json

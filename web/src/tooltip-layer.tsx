@@ -57,6 +57,22 @@ export function TooltipLayer() {
     const keyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") hide();
     };
+    const onScroll = () => {
+      const focused = triggerFrom(document.activeElement);
+      if (focused) {
+        const bounds = focused.getBoundingClientRect();
+        if (
+          bounds.bottom > 0 &&
+          bounds.top < window.innerHeight &&
+          bounds.right > 0 &&
+          bounds.left < window.innerWidth
+        ) {
+          show(focused);
+          return;
+        }
+      }
+      hide();
+    };
     const dismiss = () => hide();
 
     document.addEventListener("pointerover", pointerOver);
@@ -64,7 +80,7 @@ export function TooltipLayer() {
     document.addEventListener("focusin", focusIn);
     document.addEventListener("focusout", focusOut);
     document.addEventListener("keydown", keyDown);
-    document.addEventListener("scroll", dismiss, true);
+    document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", dismiss);
     return () => {
       document.removeEventListener("pointerover", pointerOver);
@@ -72,7 +88,7 @@ export function TooltipLayer() {
       document.removeEventListener("focusin", focusIn);
       document.removeEventListener("focusout", focusOut);
       document.removeEventListener("keydown", keyDown);
-      document.removeEventListener("scroll", dismiss, true);
+      document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", dismiss);
     };
   }, []);

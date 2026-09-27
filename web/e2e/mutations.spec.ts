@@ -11,7 +11,7 @@ test.describe("writable share operations", () => {
     );
   });
 
-  test("creates, edits, moves, and exactly deletes without crossing shares or overwriting", async ({
+  test("creates, edits, moves, trashes, and restores without crossing shares or overwriting", async ({
     page,
   }) => {
     await openSignedIn(page, "/browse/writable", "writer");
@@ -109,43 +109,7 @@ test.describe("writable share operations", () => {
       page.getByRole("heading", { name: "example.toml" }),
     ).toBeVisible();
     await previewAction(page, "example.toml", "Delete").click();
-    const deleteDialog = page.getByRole("dialog", {
-      name: "Delete file example.toml",
-    });
-    const confirmation = deleteDialog.getByRole("checkbox", {
-      name: "I understand that example.toml will be permanently deleted",
-    });
-    const confirmationText = deleteDialog
-      .locator(".confirmation-check span")
-      .filter({ hasText: "I understand" });
-    const [confirmationBox, confirmationTextBox] = await Promise.all([
-      confirmation.boundingBox(),
-      confirmationText.boundingBox(),
-    ]);
-    expect(confirmationBox).not.toBeNull();
-    expect(confirmationTextBox).not.toBeNull();
-    expect(
-      Math.abs(
-        confirmationBox!.y +
-          confirmationBox!.height / 2 -
-          (confirmationTextBox!.y + confirmationTextBox!.height / 2),
-      ),
-    ).toBeLessThanOrEqual(2);
-    const deleteBackdropStyles = await deleteDialog
-      .locator("xpath=..")
-      .evaluate((element) => ({
-        background: getComputedStyle(element).backgroundColor,
-        blur: getComputedStyle(element).backdropFilter,
-      }));
-    expect(deleteBackdropStyles.background).not.toBe("rgba(0, 0, 0, 0)");
-    expect(deleteBackdropStyles.blur).toContain("blur");
-    await expect(
-      deleteDialog.getByRole("button", { name: "Delete", exact: true }),
-    ).toBeDisabled();
-    await confirmation.check();
-    await deleteDialog
-      .getByRole("button", { name: "Delete", exact: true })
-      .click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(
       directoryListing(page).getByRole("link", { name: "example.toml" }),
     ).toHaveCount(0);
@@ -154,40 +118,33 @@ test.describe("writable share operations", () => {
     ).toHaveCount(0);
     await expect(page).not.toHaveURL(/preview=/);
 
-    await page
-      .getByLabel("Breadcrumb")
-      .getByRole("link", { name: "Working files" })
-      .click();
-    await entryAction(page, "e2e-folder", "Delete").click();
-    const folderDelete = page.getByRole("dialog", {
-      name: "Delete folder e2e-folder",
+    await page.goto("/trash/writable");
+    const deletedFile = page.getByRole("listitem").filter({
+      hasText: "Original path: e2e-folder/example.toml",
     });
-    await folderDelete
-      .getByLabel("Type e2e-folder to confirm")
-      .fill("e2e-folder");
-    await folderDelete
-      .getByRole("button", { name: "Delete", exact: true })
-      .click();
+    await expect(deletedFile).toBeVisible();
+    await deletedFile.getByRole("button", { name: "Restore" }).click();
+    await expect(deletedFile).toHaveCount(0);
+
+    await page.goto("/browse/writable");
+    await entryAction(page, "e2e-folder", "Delete").click();
     await expect(
       directoryListing(page).getByRole("link", { name: "e2e-folder" }),
     ).toHaveCount(0);
 
-    await entryAction(page, "Projects", "Delete").click();
-    const nonEmptyDelete = page.getByRole("dialog", {
-      name: "Delete folder Projects",
+    await page.goto("/trash/writable");
+    const deletedFolder = page.getByRole("listitem").filter({
+      hasText: "Original path: e2e-folder",
     });
-    await nonEmptyDelete
-      .getByLabel("Type Projects to confirm")
-      .fill("Projects");
-    await nonEmptyDelete
-      .getByRole("button", { name: "Delete", exact: true })
-      .click();
-    await expect(nonEmptyDelete.getByRole("alert")).toContainText(
-      "destination already exists",
-    );
-    await nonEmptyDelete.getByRole("button", { name: "Cancel" }).click();
+    await expect(deletedFolder).toBeVisible();
+    await deletedFolder.getByRole("button", { name: "Restore" }).click();
+    await expect(deletedFolder).toHaveCount(0);
+    await page.goto("/browse/writable");
     await expect(
       directoryListing(page).getByRole("link", { name: "Projects" }),
+    ).toBeVisible();
+    await expect(
+      directoryListing(page).getByRole("link", { name: "e2e-folder" }),
     ).toBeVisible();
 
     const readOnlyLeak = await page.request.get(
@@ -265,13 +222,6 @@ test.describe("writable share operations", () => {
     ).toBeVisible();
 
     await entryAction(page, "sse-external", "Delete").click();
-    const dialog = page.getByRole("dialog", {
-      name: "Delete folder sse-external",
-    });
-    await dialog
-      .getByLabel("Type sse-external to confirm")
-      .fill("sse-external");
-    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(page.getByRole("link", { name: "sse-external" })).toHaveCount(
       0,
     );

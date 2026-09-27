@@ -3,6 +3,7 @@ import { isValidVirtualPath } from "./virtual-path";
 export interface BrowserRoute {
   shareId: string | null;
   path: string;
+  view?: "trash";
   /** A virtual file path selected for preview, or null when browsing only. */
   previewPath?: string | null;
   previewMode?: "side" | "full";
@@ -34,6 +35,18 @@ export const browserNavigation: BrowserNavigation = {
 };
 
 export function routeFromUrl(url: URL): BrowserRoute {
+  const trashMatch = /^\/trash\/([^/]+)\/?$/.exec(url.pathname);
+  if (trashMatch) {
+    try {
+      return {
+        shareId: decodeURIComponent(trashMatch[1]!),
+        path: "",
+        view: "trash",
+      };
+    } catch {
+      return { shareId: null, path: "" };
+    }
+  }
   const match = /^\/browse\/([^/]+)\/?$/.exec(url.pathname);
   if (!match) return { shareId: null, path: "" };
 
@@ -58,6 +71,10 @@ export function directoryUrl(shareId: string | null, path: string): string {
   return browserUrl({ shareId, path });
 }
 
+export function trashUrl(shareId: string): string {
+  return `/trash/${encodeURIComponent(shareId)}`;
+}
+
 export function previewRouteUrl(
   shareId: string,
   directoryPath: string,
@@ -70,6 +87,7 @@ export function previewRouteUrl(
 function browserUrl(route: BrowserRoute): string {
   const { shareId } = route;
   if (!shareId) return "/";
+  if (route.view === "trash") return trashUrl(shareId);
   const query = new URLSearchParams();
   const safePath = isValidVirtualPath(route.path) ? route.path : "";
   if (safePath) query.set("path", safePath);
