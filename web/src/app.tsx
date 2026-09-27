@@ -65,6 +65,12 @@ import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 import { TrashView } from "./trash";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
+import {
+  readThemePreference,
+  saveThemePreference,
+  subscribeThemePreference,
+  type ThemePreference,
+} from "./theme";
 
 const defaultApi = createApiClient();
 declare const __CRABINET_DEV_REVISION__: string | null;
@@ -442,6 +448,8 @@ function AuthenticatedShell({
   const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
     readShowHiddenFiles(session.user.id),
   );
+  const [themePreference, setThemePreference] =
+    useState<ThemePreference>(readThemePreference);
   const selectedShare = session.shares.find(
     (share) => share.id === route.shareId,
   );
@@ -472,6 +480,13 @@ function AuthenticatedShell({
     window.addEventListener("storage", syncPreference);
     return () => window.removeEventListener("storage", syncPreference);
   }, [session.user.id]);
+
+  useEffect(() => subscribeThemePreference(setThemePreference), []);
+
+  const updateThemePreference = (value: ThemePreference) => {
+    setThemePreference(value);
+    saveThemePreference(value);
+  };
 
   const updateShowHiddenFiles = (value: boolean) => {
     setShowHiddenFiles(value);
@@ -618,6 +633,23 @@ function AuthenticatedShell({
               Show hidden files
             </label>
             <p class="muted">Saved in this browser for your account.</p>
+            <label class="settings-subsection" for="theme-preference">
+              Appearance
+            </label>
+            <select
+              id="theme-preference"
+              value={themePreference}
+              onChange={(event) =>
+                updateThemePreference(
+                  event.currentTarget.value as ThemePreference,
+                )
+              }
+            >
+              <option value="system">Match system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+            <p class="muted">Saved in this browser.</p>
             {preferencesError && (
               <Notice tone="danger">{preferencesError}</Notice>
             )}

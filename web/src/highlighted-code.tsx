@@ -30,7 +30,10 @@ const languageLoaders: Record<string, () => Promise<{ default: unknown }>> = {
 };
 
 const highlighterPromise = createHighlighterCore({
-  themes: [import("@shikijs/themes/github-light-high-contrast")],
+  themes: [
+    import("@shikijs/themes/github-light-high-contrast"),
+    import("@shikijs/themes/github-dark-high-contrast"),
+  ],
   langs: [],
   engine: createJavaScriptRegexEngine(),
 });
@@ -61,7 +64,12 @@ async function tokens(
   }
   return highlighter.codeToTokens(source, {
     lang: language,
-    theme: "github-light-high-contrast",
+    // Both palettes land in CSS variables; styles.css picks one per theme.
+    themes: {
+      light: "github-light-high-contrast",
+      dark: "github-dark-high-contrast",
+    },
+    defaultColor: false,
   }).tokens;
 }
 
@@ -111,21 +119,7 @@ export function HighlightedCode({
           : lines.map((line, lineIndex) => (
               <span class="shiki-line" key={lineIndex}>
                 {line.map((token, tokenIndex) => (
-                  <span
-                    key={tokenIndex}
-                    style={{
-                      color: token.color,
-                      ...(token.fontStyle === 1
-                        ? { "font-style": "italic" }
-                        : {}),
-                      ...(token.fontStyle === 2
-                        ? { "font-weight": "700" }
-                        : {}),
-                      ...(token.fontStyle === 4
-                        ? { "text-decoration": "underline" }
-                        : {}),
-                    }}
-                  >
+                  <span key={tokenIndex} style={token.htmlStyle}>
                     {token.content}
                   </span>
                 ))}

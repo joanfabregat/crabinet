@@ -439,6 +439,63 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toEqual([]);
 });
 
+test("night mode follows the system, can be pinned, and passes axe", async ({
+  page,
+}) => {
+  const seriousViolations = async (exclude?: string) => {
+    const builder = new AxeBuilder({ page });
+    if (exclude) builder.exclude(exclude);
+    return (await builder.analyze()).violations.filter(({ impact }) =>
+      ["critical", "serious"].includes(impact ?? ""),
+    );
+  };
+  const pageBackground = () =>
+    page.evaluate(() => getComputedStyle(document.documentElement).background);
+
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Sign in to Crabinet" }),
+  ).toBeVisible();
+  expect(await pageBackground()).toContain("rgb(15, 21, 18)");
+  expect(await seriousViolations()).toEqual([]);
+
+  await signIn(page, "reader");
+  await page.getByRole("link", { name: "hello.rs" }).click();
+  const source = page.getByLabel("File source");
+  await expect(source).toHaveAttribute("aria-busy", "false");
+  const token = source.locator("span[style*='--shiki-dark']").first();
+  const tokenColors = await token.evaluate((element) => ({
+    color: getComputedStyle(element).color,
+    dark: element.style.getPropertyValue("--shiki-dark"),
+  }));
+  const probe = await page.evaluate((hex) => {
+    const element = document.createElement("span");
+    element.style.color = hex;
+    document.body.append(element);
+    const color = getComputedStyle(element).color;
+    element.remove();
+    return color;
+  }, tokenColors.dark);
+  expect(tokenColors.color).toBe(probe);
+  expect(await seriousViolations("iframe")).toEqual([]);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  expect(await seriousViolations("iframe")).toEqual([]);
+  await dialog.getByLabel("Appearance").selectOption("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await pageBackground()).toContain("rgb(242, 244, 239)");
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await pageBackground()).toContain("rgb(242, 244, 239)");
+  await expect(page.getByRole("button", { name: "Sign out" })).toHaveCSS(
+    "border-top-color",
+    "rgb(174, 184, 176)",
+  );
+});
+
 test("connection failure can recover and an expired session returns to login", async ({
   page,
 }) => {

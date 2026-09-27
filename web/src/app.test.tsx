@@ -450,7 +450,7 @@ describe("directory browser", () => {
       name: "Start folder",
     });
     expect(select).toHaveValue("");
-    expect(within(dialog).getAllByRole("option")).toHaveLength(3);
+    expect(within(select).getAllByRole("option")).toHaveLength(3);
     fireEvent.change(select, { target: { value: "work" } });
     await waitFor(() =>
       expect(updateDefaultFolder).toHaveBeenCalledWith(
@@ -558,6 +558,35 @@ describe("directory browser", () => {
     ).not.toBeChecked();
     await screen.findByRole("link", { name: "notes.txt" });
     expect(screen.queryByRole("link", { name: ".secret.txt" })).toBeNull();
+  });
+
+  it("places a browser-wide appearance choice in Settings and applies it", async () => {
+    const first = render(
+      <App api={fakeApi()} navigation={new MemoryNavigation()} />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const appearance = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("combobox", { name: "Appearance" });
+    expect(appearance).toHaveValue("system");
+    expect(document.documentElement).not.toHaveAttribute("data-theme");
+
+    fireEvent.change(appearance, { target: { value: "dark" } });
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(window.localStorage.getItem("crabinet.theme")).toBe("dark");
+
+    first.unmount();
+    render(<App api={fakeApi()} navigation={new MemoryNavigation()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    const reopened = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("combobox", { name: "Appearance" });
+    expect(reopened).toHaveValue("dark");
+
+    fireEvent.change(reopened, { target: { value: "system" } });
+    expect(document.documentElement).not.toHaveAttribute("data-theme");
+    expect(window.localStorage.getItem("crabinet.theme")).toBeNull();
   });
 
   it("places create and upload actions beside Copy path outside the sidebar", async () => {
