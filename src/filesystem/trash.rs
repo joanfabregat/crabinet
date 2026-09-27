@@ -22,6 +22,7 @@ const CONTAINER: &str = ".crabinet";
 const TRASH: &str = "trash";
 const MAX_SIDECAR_BYTES: u64 = 8192;
 const MAX_DEPTH: usize = 256;
+const SIDECAR_SCHEMA_VERSION: u8 = 1;
 
 /// A published Trash item. Time fields are UTC RFC 3339 strings.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +46,7 @@ enum State {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Sidecar {
+    schema_version: u8,
     id: String,
     original_path: String,
     kind: String,
@@ -216,6 +218,9 @@ fn read_sidecar(trash: &Dir, id: &str) -> FsResult<Sidecar> {
     if sidecar.id != id {
         return Err(FsError::new(FsErrorCode::Unavailable));
     }
+    if sidecar.schema_version != SIDECAR_SCHEMA_VERSION {
+        return Err(FsError::new(FsErrorCode::Unavailable));
+    }
     sidecar.entry()?;
     OffsetDateTime::parse(&sidecar.expires_at, &Rfc3339)
         .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
@@ -278,6 +283,7 @@ impl AuthorizedShare<'_> {
                 continue;
             }
             let mut sidecar = Sidecar {
+                schema_version: SIDECAR_SCHEMA_VERSION,
                 id,
                 original_path: path.to_string(),
                 kind: match expected.kind {
@@ -758,11 +764,76 @@ mod tests {
     }
 
     #[test]
+    fn repeated_unicode_name_uses_distinct_versioned_sidecars() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        let name = format!("résumé-{}.txt", "x".repeat(180));
+        let path = VirtualPath::parse(&name).unwrap();
+        fs::write(temp.path().join(&name), b"first").unwrap();
+        let first = view
+            .move_to_trash(&path, view.metadata(&path).unwrap(), "user-1", 30)
+            .unwrap();
+        fs::write(temp.path().join(&name), b"second").unwrap();
+        let second = view
+            .move_to_trash(&path, view.metadata(&path).unwrap(), "user-2", 30)
+            .unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(view.list_trash(100).unwrap().len(), 2);
+        let sidecar = fs::read(
+            temp.path()
+                .join(CONTAINER)
+                .join(TRASH)
+                .join(sidecar_name(&first.id)),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&sidecar).unwrap()["schemaVersion"],
+            SIDECAR_SCHEMA_VERSION
+        );
+        view.restore_trash(&first.id, None).unwrap();
+        assert_eq!(fs::read(temp.path().join(&name)).unwrap(), b"first");
+        assert_eq!(
+            view.restore_trash(&second.id, None).unwrap_err().code(),
+            FsErrorCode::Conflict
+        );
+        let alternate = VirtualPath::parse("recovered.txt").unwrap();
+        view.restore_trash(&second.id, Some(&alternate)).unwrap();
+        assert_eq!(
+            fs::read(temp.path().join("recovered.txt")).unwrap(),
+            b"second"
+        );
+    }
+
+    #[test]
+    fn unknown_sidecar_schema_fails_closed() {
+        let (_temp, share, _grant) = setup();
+        let trash = share.trash.as_ref().unwrap();
+        let sidecar = Sidecar {
+            schema_version: SIDECAR_SCHEMA_VERSION + 1,
+            id: "b".repeat(32),
+            original_path: "source".into(),
+            kind: "file".into(),
+            deleted_at: "2020-01-01T00:00:00Z".into(),
+            deleted_by: "user-1".into(),
+            expires_at: "2020-02-01T00:00:00Z".into(),
+            state: State::Pending,
+        };
+        write_sidecar(trash, &sidecar, false).unwrap();
+        assert_eq!(
+            share.recover_trash(100).unwrap_err().code(),
+            FsErrorCode::Unavailable
+        );
+    }
+
+    #[test]
     fn pending_recovery_and_expired_gc() {
         let (temp, share, grant) = setup();
         let trash = share.trash.as_ref().unwrap();
         let id = "a".repeat(32);
         let sidecar = Sidecar {
+            schema_version: SIDECAR_SCHEMA_VERSION,
             id: id.clone(),
             original_path: "source".into(),
             kind: "file".into(),
