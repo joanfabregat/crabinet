@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { RotateCcw, Trash2 } from "lucide-preact";
+import { RefreshCw, Shredder, Trash2, Undo2 } from "lucide-preact";
 
 import {
   ApiError,
@@ -49,6 +49,8 @@ export function TrashView({
   const [busyId, setBusyId] = useState<string>();
   const [restoreItem, setRestoreItem] = useState<TrashItem>();
   const [purgeItem, setPurgeItem] = useState<TrashItem>();
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
+  const [emptying, setEmptying] = useState(false);
   const [destinationDirectory, setDestinationDirectory] = useState("");
   const [destinationName, setDestinationName] = useState("");
 
@@ -135,6 +137,40 @@ export function TrashView({
     }
   };
 
+  const emptyTrash = async () => {
+    setEmptying(true);
+    setError(undefined);
+    try {
+      // Empty the displayed snapshot. Items added by another user while this
+      // runs are preserved and will appear after the final refresh.
+      for (const item of items) {
+        await withCsrfRetry(
+          api,
+          csrfToken,
+          userId,
+          onSessionRefreshed,
+          (token) => api.purgeTrash(share.id, item.id, token),
+        );
+        setItems((current) =>
+          current.filter((currentItem) => currentItem.id !== item.id),
+        );
+      }
+      setConfirmEmpty(false);
+      onChanged();
+      setRevision((value) => value + 1);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.kind === "unauthorized")
+        onSessionExpired();
+      else {
+        setError("Could not empty all of Trash. Refresh to see what remains.");
+        setRevision((value) => value + 1);
+      }
+      setConfirmEmpty(false);
+    } finally {
+      setEmptying(false);
+    }
+  };
+
   const destination = destinationDirectory
     ? `${destinationDirectory}/${destinationName}`
     : destinationName;
@@ -146,6 +182,18 @@ export function TrashView({
           <p class="eyebrow">{share.name}</p>
           <h1 id="trash-title">Trash</h1>
         </div>
+        {share.access === "read-write" && items.length > 0 && !loading && (
+          <button
+            type="button"
+            class="icon-button icon-button-danger tooltip-action"
+            aria-label="Empty Trash"
+            data-tooltip="Empty Trash"
+            disabled={Boolean(busyId) || emptying}
+            onClick={() => setConfirmEmpty(true)}
+          >
+            <Trash2 size={18} aria-hidden="true" />
+          </button>
+        )}
       </div>
       <p class="muted">
         Deleted items remain here until they expire. Restoring and permanent
@@ -156,10 +204,12 @@ export function TrashView({
           {error}{" "}
           <button
             type="button"
-            class="entry-action"
+            class="icon-button tooltip-action"
+            aria-label="Refresh Trash"
+            data-tooltip="Refresh Trash"
             onClick={() => setRevision((value) => value + 1)}
           >
-            Refresh
+            <RefreshCw size={18} aria-hidden="true" />
           </button>
         </div>
       )}
@@ -178,29 +228,37 @@ export function TrashView({
               />
               <div class="trash-details">
                 <strong>{nameOf(item.originalPath)}</strong>
-                <span>Original path: {item.originalPath}</span>
-                <span>
+                <span class="entry-meta">
+                  Original path: {item.originalPath}
+                </span>
+                <span class="entry-meta">
                   Deleted: {displayTime(item.deletedAt)} by {item.deletedBy}
                 </span>
-                <span>Expires: {displayTime(item.expiresAt)}</span>
+                <span class="entry-meta">
+                  Expires: {displayTime(item.expiresAt)}
+                </span>
               </div>
               {share.access === "read-write" && (
                 <div class="trash-actions">
                   <button
                     type="button"
-                    class="button button-secondary"
-                    disabled={Boolean(busyId)}
+                    class="icon-button tooltip-action"
+                    aria-label={`Restore ${nameOf(item.originalPath)}`}
+                    data-tooltip="Restore"
+                    disabled={Boolean(busyId) || emptying}
                     onClick={() => void restore(item)}
                   >
-                    <RotateCcw size={16} aria-hidden="true" /> Restore
+                    <Undo2 size={18} aria-hidden="true" />
                   </button>
                   <button
                     type="button"
-                    class="button button-danger"
-                    disabled={Boolean(busyId)}
+                    class="icon-button icon-button-danger tooltip-action"
+                    aria-label={`Permanently delete ${nameOf(item.originalPath)}`}
+                    data-tooltip="Delete permanently"
+                    disabled={Boolean(busyId) || emptying}
                     onClick={() => setPurgeItem(item)}
                   >
-                    <Trash2 size={16} aria-hidden="true" /> Delete permanently
+                    <Shredder size={18} aria-hidden="true" />
                   </button>
                 </div>
               )}
@@ -281,6 +339,38 @@ export function TrashView({
               onClick={() => void purge(purgeItem)}
             >
               Delete permanently
+            </button>
+          </div>
+        </Modal>
+      )}
+      {confirmEmpty && (
+        <Modal
+          title={`Empty ${share.name} Trash?`}
+          busy={emptying}
+          onClose={() => setConfirmEmpty(false)}
+        >
+          <p>
+            Permanently delete {items.length}{" "}
+            {items.length === 1 ? "item" : "items"} from {share.name} Trash?
+            This cannot be undone. Items added while this runs will remain in
+            Trash.
+          </p>
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="button button-secondary"
+              disabled={emptying}
+              onClick={() => setConfirmEmpty(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="button button-danger"
+              disabled={emptying}
+              onClick={() => void emptyTrash()}
+            >
+              {emptying ? "Emptying…" : "Empty Trash"}
             </button>
           </div>
         </Modal>

@@ -1048,7 +1048,13 @@ function DirectoryBrowser({
     destinationPath?: string,
   ) => {
     setOperation(undefined);
-    if (
+    if (completedOperation.kind === "create-file" && destinationPath) {
+      navigation.go({
+        shareId: share.id,
+        path: route.path,
+        previewPath: destinationPath,
+      });
+    } else if (
       completedOperation.kind === "delete" &&
       activePreview.current === completedOperation.path
     ) {
@@ -1168,140 +1174,145 @@ function DirectoryBrowser({
           onChanged={() => setRefreshKey((value) => value + 1)}
         />
       ) : (
-        <section class="directory-panel" aria-labelledby="directory-title">
-          {deleteError && <Notice tone="danger">{deleteError}</Notice>}
+        <div class="directory-column">
           {recentlyDeleted && (
-            <div class="notice" role="status">
-              Moved {recentlyDeleted.name} to Trash.{" "}
+            <div class="delete-confirmation" role="status">
+              <span>Moved {recentlyDeleted.name} to Trash.</span>
               <button
                 type="button"
-                class="entry-action"
+                class="button button-secondary"
                 onClick={() => void undoDelete()}
               >
                 Undo
               </button>
             </div>
           )}
-          <nav class="breadcrumbs" aria-label="Breadcrumb">
-            <ol>
-              <li>
-                <a
-                  href={directoryUrl(share.id, "")}
-                  aria-current={route.path === "" ? "page" : undefined}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    navigation.go({ shareId: share.id, path: "" });
-                  }}
-                >
-                  {share.name}
-                </a>
-              </li>
-              {crumbs.map((crumb, index) => (
-                <li key={crumb.path}>
-                  <span aria-hidden="true">/</span>
+          <section class="directory-panel" aria-labelledby="directory-title">
+            {deleteError && <Notice tone="danger">{deleteError}</Notice>}
+            <nav class="breadcrumbs" aria-label="Breadcrumb">
+              <ol>
+                <li>
                   <a
-                    href={directoryUrl(share.id, crumb.path)}
-                    aria-current={
-                      index === crumbs.length - 1 ? "page" : undefined
-                    }
+                    href={directoryUrl(share.id, "")}
+                    aria-current={route.path === "" ? "page" : undefined}
                     onClick={(event) => {
                       event.preventDefault();
-                      navigation.go({ shareId: share.id, path: crumb.path });
+                      navigation.go({ shareId: share.id, path: "" });
                     }}
                   >
-                    {crumb.name}
+                    {share.name}
                   </a>
                 </li>
-              ))}
-            </ol>
-          </nav>
+                {crumbs.map((crumb, index) => (
+                  <li key={crumb.path}>
+                    <span aria-hidden="true">/</span>
+                    <a
+                      href={directoryUrl(share.id, crumb.path)}
+                      aria-current={
+                        index === crumbs.length - 1 ? "page" : undefined
+                      }
+                      onClick={(event) => {
+                        event.preventDefault();
+                        navigation.go({ shareId: share.id, path: crumb.path });
+                      }}
+                    >
+                      {crumb.name}
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </nav>
 
-          <div class="directory-heading">
-            <div>
-              <p class="eyebrow">Current folder</p>
-              <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
-                {crumbs.at(-1)?.name ?? share.name}
-              </h1>
-            </div>
-            <div class="directory-heading-actions">
-              {writable && (
-                <WriteToolbar
-                  onCreateFile={() => setOperation({ kind: "create-file" })}
-                  onCreateFolder={() => setOperation({ kind: "create-folder" })}
-                  onUpload={(files) =>
-                    setUploadSelection({ id: crypto.randomUUID(), files })
-                  }
+            <div class="directory-heading">
+              <div>
+                <p class="eyebrow">Current folder</p>
+                <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
+                  {crumbs.at(-1)?.name ?? share.name}
+                </h1>
+              </div>
+              <div class="directory-heading-actions">
+                {writable && (
+                  <WriteToolbar
+                    onCreateFile={() => setOperation({ kind: "create-file" })}
+                    onCreateFolder={() =>
+                      setOperation({ kind: "create-folder" })
+                    }
+                    onUpload={(files) =>
+                      setUploadSelection({ id: crypto.randomUUID(), files })
+                    }
+                  />
+                )}
+                <CopyPathButton
+                  value={`${share.id}${route.path ? `/${route.path}` : ""}`}
+                  label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
                 />
-              )}
-              <CopyPathButton
-                value={`${share.id}${route.path ? `/${route.path}` : ""}`}
-                label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
-              />
+              </div>
             </div>
-          </div>
 
-          <div class="sr-only" role="status" aria-live="polite">
-            {loading
-              ? "Loading folder"
-              : page
-                ? `${visibleEntries.length} items loaded`
-                : "Folder unavailable"}
-          </div>
+            <div class="sr-only" role="status" aria-live="polite">
+              {loading
+                ? "Loading folder"
+                : page
+                  ? `${visibleEntries.length} items loaded`
+                  : "Folder unavailable"}
+            </div>
 
-          {loading ? (
-            <DirectorySkeleton />
-          ) : error && !page ? (
-            <DirectoryError
-              error={error}
-              shareId={share.id}
-              path={route.path}
-              navigation={navigation}
-              retry={() => setRefreshKey((value) => value + 1)}
-            />
-          ) : page && visibleEntries.length === 0 ? (
-            <EmptyState
-              title={
-                showHiddenFiles
-                  ? "This folder is empty"
-                  : "No visible files or folders"
-              }
-              detail={
-                showHiddenFiles
-                  ? "There are no files or folders here."
-                  : "Turn on Show hidden files in Settings to include dotfiles and dotfolders."
-              }
-            />
-          ) : page ? (
-            <>
-              <EntryList
-                entries={visibleEntries}
+            {loading ? (
+              <DirectorySkeleton />
+            ) : error && !page ? (
+              <DirectoryError
+                error={error}
                 shareId={share.id}
                 path={route.path}
                 navigation={navigation}
-                onOpenPreview={openPreview}
-                writable={writable}
-                onOperation={chooseOperation}
+                retry={() => setRefreshKey((value) => value + 1)}
               />
-              {error && (
-                <Notice tone="danger">
-                  More items could not be loaded. The folder may have changed;
-                  use Load more to try again.
-                </Notice>
-              )}
-              {page.nextCursor && (
-                <div class="load-more">
-                  <Button
-                    variant="secondary"
-                    busy={loadingMore}
-                    onClick={loadMore}
-                  >
-                    {loadingMore ? "Loading…" : "Load more"}
-                  </Button>
-                </div>
-              )}
-            </>
-          ) : null}
-        </section>
+            ) : page && visibleEntries.length === 0 ? (
+              <EmptyState
+                title={
+                  showHiddenFiles
+                    ? "This folder is empty"
+                    : "No visible files or folders"
+                }
+                detail={
+                  showHiddenFiles
+                    ? "There are no files or folders here."
+                    : "Turn on Show hidden files in Settings to include dotfiles and dotfolders."
+                }
+              />
+            ) : page ? (
+              <>
+                <EntryList
+                  entries={visibleEntries}
+                  shareId={share.id}
+                  path={route.path}
+                  selectedPath={route.previewPath ?? undefined}
+                  navigation={navigation}
+                  onOpenPreview={openPreview}
+                  writable={writable}
+                  onOperation={chooseOperation}
+                />
+                {error && (
+                  <Notice tone="danger">
+                    More items could not be loaded. The folder may have changed;
+                    use Load more to try again.
+                  </Notice>
+                )}
+                {page.nextCursor && (
+                  <div class="load-more">
+                    <Button
+                      variant="secondary"
+                      busy={loadingMore}
+                      onClick={loadMore}
+                    >
+                      {loadingMore ? "Loading…" : "Load more"}
+                    </Button>
+                  </div>
+                )}
+              </>
+            ) : null}
+          </section>
+        </div>
       )}
       {route.view !== "trash" && route.previewPath && (
         <PreviewPanel
@@ -1387,6 +1398,7 @@ function EntryList({
   entries,
   shareId,
   path,
+  selectedPath,
   navigation,
   onOpenPreview,
   writable,
@@ -1395,6 +1407,7 @@ function EntryList({
   entries: DirectoryEntry[];
   shareId: string;
   path: string;
+  selectedPath?: string;
   navigation: BrowserNavigation;
   onOpenPreview: (path: string, trigger: HTMLAnchorElement) => void;
   writable: boolean;
@@ -1404,9 +1417,11 @@ function EntryList({
     <div class="entry-list" role="list" aria-label="Folder contents">
       {entries.map((entry) => {
         const key = `${entry.kind}:${entry.name}`;
+        const selected =
+          entry.kind === "file" && selectedPath === joinPath(path, entry.name);
         return (
           <div
-            class="entry-row"
+            class={`entry-row${selected ? " is-selected" : ""}`}
             role="listitem"
             key={key}
             draggable={writable}
@@ -1443,6 +1458,7 @@ function EntryList({
                     path,
                     joinPath(path, entry.name),
                   )}
+                  aria-current={selected ? "location" : undefined}
                   onClick={(event) => {
                     event.preventDefault();
                     onOpenPreview(
