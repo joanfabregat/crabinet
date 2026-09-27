@@ -56,7 +56,7 @@ When passkeys are enabled, `POST /api/v1/auth/passkeys/login/start` accepts `{}`
 - A cursor is scoped to the authenticated user, effective share grant, share, path, ordering, and relevant directory generation. Invalid or stale cursors return a structured `409` or `404` without leaking host paths.
 - Access is `read` or `read-write` after resolving user and share policy. The server checks it on every request.
 
-`GET /api/v1/shares/{shareId}/events?path={path}` is an authenticated server-sent-events stream for the currently open directory. It emits `invalidate` when a non-recursive kernel watch observes a change and `resync` if the watch becomes unreliable. A connection is bounded to five minutes and then reconnects through normal authentication. Events carry no names, host paths, or file contents; clients debounce them and fetch a fresh directory page. The endpoint never scans the directory or share.
+`GET /api/v1/shares/{shareId}/events?path={path}` is an authenticated server-sent-events stream for the currently open directory. It emits `invalidate` when a non-recursive kernel watch observes a change and `resync` if the watch becomes unreliable. A connection is bounded to 60 seconds, carries a `retry: 1000` reconnection hint, and then reconnects through normal authentication, so revoked sessions and grants take effect within a minute. Events carry no names, host paths, or file contents; clients debounce them and fetch a fresh directory page. The endpoint never scans the directory or share.
 
 `GET /api/v1/shares/{shareId}/metadata?path={path}` returns mutation validators and optional filesystem timestamps:
 
