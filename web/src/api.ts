@@ -1,4 +1,10 @@
 import { isValidPathComponent, isValidVirtualPath } from "./virtual-path";
+import type {
+  AuthenticationResponseJSON,
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+} from "@simplewebauthn/browser";
 
 export type AccessMode = "read" | "read-write";
 
@@ -36,6 +42,19 @@ export interface LoginCredentials {
 export interface AuthMethods {
   passwordEnabled: boolean;
   oidcEnabled: boolean;
+  passkeyEnabled?: boolean;
+}
+
+export interface Passkey {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+export interface PasskeyChallenge<T> {
+  flowId: string;
+  options: { publicKey: T };
 }
 
 export interface DirectoryEntry {
@@ -160,6 +179,25 @@ export interface ApiClient {
   authMethods(signal?: AbortSignal): Promise<AuthMethods>;
   login(credentials: LoginCredentials, signal?: AbortSignal): Promise<Session>;
   logout(csrfToken: string, signal?: AbortSignal): Promise<void>;
+  passkeys(signal?: AbortSignal): Promise<Passkey[]>;
+  startPasskeyRegistration(
+    name: string,
+    csrfToken: string,
+  ): Promise<PasskeyChallenge<PublicKeyCredentialCreationOptionsJSON>>;
+  finishPasskeyRegistration(
+    flowId: string,
+    credential: RegistrationResponseJSON,
+    csrfToken: string,
+  ): Promise<Passkey>;
+  startPasskeyLogin(
+    username: string,
+  ): Promise<PasskeyChallenge<PublicKeyCredentialRequestOptionsJSON>>;
+  finishPasskeyLogin(
+    flowId: string,
+    credential: AuthenticationResponseJSON,
+  ): Promise<Session>;
+  renamePasskey(id: string, name: string, csrfToken: string): Promise<Passkey>;
+  removePasskey(id: string, csrfToken: string): Promise<void>;
   updateDefaultFolder(
     folder: DefaultFolder | null,
     csrfToken: string,
@@ -327,6 +365,60 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       request<void>("/api/v1/auth/logout", {
         method: "POST",
         signal,
+        headers: { "X-CSRF-Token": csrfToken },
+      }),
+    passkeys: async (signal) => {
+      const result = await request<{ passkeys: Passkey[] }>(
+        "/api/v1/auth/passkeys",
+        { signal },
+        true,
+      );
+      return result.passkeys;
+    },
+    startPasskeyRegistration: (name, csrfToken) =>
+      request("/api/v1/auth/passkeys/register/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({ name }),
+      }),
+    finishPasskeyRegistration: (flowId, credential, csrfToken) =>
+      request("/api/v1/auth/passkeys/register/finish", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({ flowId, credential }),
+      }),
+    startPasskeyLogin: (username) =>
+      request("/api/v1/auth/passkeys/login/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
+      }),
+    finishPasskeyLogin: async (flowId, credential) =>
+      parseSession(
+        await request<unknown>("/api/v1/auth/passkeys/login/finish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ flowId, credential }),
+        }),
+      ),
+    renamePasskey: (id, name, csrfToken) =>
+      request(`/api/v1/auth/passkeys/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({ name }),
+      }),
+    removePasskey: (id, csrfToken) =>
+      request(`/api/v1/auth/passkeys/${encodeURIComponent(id)}`, {
+        method: "DELETE",
         headers: { "X-CSRF-Token": csrfToken },
       }),
     updateDefaultFolder: async (folder, csrfToken) => {

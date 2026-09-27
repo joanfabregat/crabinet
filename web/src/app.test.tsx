@@ -79,6 +79,13 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       vi.fn(async () => ({ passwordEnabled: true, oidcEnabled: false })),
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
+    passkeys: overrides.passkeys ?? vi.fn(async () => []),
+    startPasskeyRegistration: overrides.startPasskeyRegistration ?? vi.fn(),
+    finishPasskeyRegistration: overrides.finishPasskeyRegistration ?? vi.fn(),
+    startPasskeyLogin: overrides.startPasskeyLogin ?? vi.fn(),
+    finishPasskeyLogin: overrides.finishPasskeyLogin ?? vi.fn(),
+    renamePasskey: overrides.renamePasskey ?? vi.fn(),
+    removePasskey: overrides.removePasskey ?? vi.fn(),
     updateDefaultFolder:
       overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
     directory: overrides.directory ?? vi.fn(async () => emptyPage),
@@ -160,8 +167,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 describe("authentication", () => {
-  it("redirects guests in OIDC-only mode and keeps password sign-in in mixed mode", async () => {
-    const redirect = vi.fn();
+  it("shows a login page in OIDC-only mode and keeps password sign-in in mixed mode", async () => {
     const sessionRequest = vi
       .fn()
       .mockRejectedValue(new ApiError("unauthorized", "anonymous"));
@@ -173,15 +179,11 @@ describe("authentication", () => {
       })),
     });
     const first = render(
-      <App
-        api={oidcOnly}
-        onOidcRedirect={redirect}
-        navigation={new MemoryNavigation()}
-      />,
+      <App api={oidcOnly} navigation={new MemoryNavigation()} />,
     );
-    await waitFor(() =>
-      expect(redirect).toHaveBeenCalledWith("/api/v1/auth/oidc/start"),
-    );
+    expect(
+      await screen.findByRole("link", { name: "Sign in with Google" }),
+    ).toHaveAttribute("href", "/api/v1/auth/oidc/start");
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
     first.unmount();
 
@@ -192,13 +194,7 @@ describe("authentication", () => {
         oidcEnabled: true,
       })),
     });
-    render(
-      <App
-        api={mixed}
-        onOidcRedirect={redirect}
-        navigation={new MemoryNavigation()}
-      />,
-    );
+    render(<App api={mixed} navigation={new MemoryNavigation()} />);
     expect(await screen.findByLabelText("Password")).toBeInTheDocument();
     const googleLink = screen.getByRole("link", {
       name: "Sign in with Google",
@@ -210,10 +206,33 @@ describe("authentication", () => {
     );
   });
 
+  it("offers passkey sign-in alongside Google when password sign-in is disabled", async () => {
+    const api = fakeApi({
+      session: vi
+        .fn()
+        .mockRejectedValue(new ApiError("unauthorized", "anonymous")),
+      authMethods: vi.fn(async () => ({
+        passwordEnabled: false,
+        oidcEnabled: true,
+        passkeyEnabled: true,
+      })),
+    });
+    render(<App api={api} navigation={new MemoryNavigation()} />);
+    expect(
+      await screen.findByRole("link", { name: "Sign in with Google" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Email or username for passkey"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Sign in with a passkey" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+  });
+
   it("keeps the unrecognized identity page visible with a Disconnect link", async () => {
     window.history.replaceState(null, "", "/?oidc_error=unrecognized");
     try {
-      const redirect = vi.fn();
       const api = fakeApi({
         session: vi
           .fn()
@@ -223,13 +242,7 @@ describe("authentication", () => {
           oidcEnabled: true,
         })),
       });
-      render(
-        <App
-          api={api}
-          onOidcRedirect={redirect}
-          navigation={new MemoryNavigation()}
-        />,
-      );
+      render(<App api={api} navigation={new MemoryNavigation()} />);
       expect(
         await screen.findByText(/identity is not authorized/),
       ).toBeInTheDocument();
@@ -237,7 +250,6 @@ describe("authentication", () => {
         "href",
         "/api/v1/auth/oidc/disconnect",
       );
-      expect(redirect).not.toHaveBeenCalled();
     } finally {
       window.history.replaceState(null, "", "/");
     }

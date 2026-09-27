@@ -20,7 +20,7 @@ The top-level fields are:
 
 - `version`: must be `1`.
 - `server`: listen address, SQLite path, session-secret file, upload/preview limits, and authentication/session resource limits.
-- `auth`: enable password sign-in, OIDC sign-in, or both; OIDC requires provider and client settings.
+- `auth`: enable password sign-in, OIDC sign-in, or both; optionally enable passkeys with a public origin.
 - `users`: local usernames, optional Argon2id password hashes, and optional OIDC email bindings.
 - `shares`: stable IDs, user-facing display names, absolute filesystem roots, optional global read-only policy, and grants.
 
@@ -54,7 +54,13 @@ Set `auth.oidc_enabled = true` and provide `[auth.oidc]` with the HTTPS issuer U
 
 The provider must return `email` and `email_verified = true` in the signed ID token or at its UserInfo endpoint. Crabinet calls UserInfo only after verifying the ID token and requires its `sub` to match. It matches the email to a unique `users.email` value, ignoring ASCII letter case. An unknown or unverified email receives no local session. Configure only a provider whose verified-email policy you trust: reassignment of a verified address at that provider can transfer the corresponding Crabinet account. Users still receive only their locally configured share grants. The provider's authorization code, access token, and ID token stay on the server.
 
-Password sign-in remains enabled by default. Its form accepts a configured username or email address. With both methods enabled, users can choose either method on the sign-in page. Set `auth.password_enabled = false` for OIDC-only sign-in; anonymous visitors are redirected to the provider. A user without `password_hash` can sign in only by OIDC and must have an email binding. Crabinet rejects an enabled user with no usable method, an OIDC section that is incomplete, and a configuration that disables both methods. To recover from an unavailable provider in OIDC-only mode, an operator must restore provider access or enable password sign-in with a valid hash, validate the configuration, and restart Crabinet.
+Password sign-in remains enabled by default. Its form accepts a configured username or email address. With both methods enabled, users can choose either method on the sign-in page. Set `auth.password_enabled = false` for Google-only initial sign-in; anonymous visitors still see the sign-in page. A user without `password_hash` can sign in by OIDC and must have an email binding. Crabinet rejects an enabled user with no usable initial method, an OIDC section that is incomplete, and a configuration that disables both initial methods. To recover from an unavailable provider in OIDC-only mode, an operator must restore provider access or enable password sign-in with a valid hash, validate the configuration, and restart Crabinet.
+
+## Passkeys
+
+Set `[auth.passkeys] origin = "https://files.example.com"` to enable passkeys. The origin must exactly match the public HTTPS origin used by browsers, including any nondefault port, and cannot include a path, query, or fragment. Crabinet stores WebAuthn credentials and stable user handles in the same SQLite database as sessions. Users first sign in with Google or a password, then add and name passkeys in Settings. They may keep up to 20 keys, rename them, and remove them independently. The sign-in page accepts a username or configured email before offering that account's keys. A passkey signs in to the same configured user account and receives the same session and grants. Lost keys can be replaced after Google or password sign-in; keep one of these initial methods enabled for enrollment and recovery. Challenges expire after five minutes, are single use, and are held in process memory, so an in-progress ceremony must restart if the server restarts or a load balancer routes its two requests to different replicas.
+
+This version migrates the SQLite database to schema version 4 at startup, even if passkeys are not enabled. Take a consistent database backup before upgrading; an older binary rejects the migrated schema, so rollback requires restoring that backup.
 
 An unrecognized identity sees an error page with a Disconnect link. When discovery advertises an OIDC logout endpoint, Disconnect sends the browser there; otherwise the page explains that the user must sign out at the provider separately. The existing Crabinet logout ends only the local session. Behind a reverse proxy, preserve the public `Host` and use HTTPS for the callback and browser traffic. OIDC configuration changes require a restart.
 

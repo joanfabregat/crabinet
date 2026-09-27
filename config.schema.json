@@ -60,6 +60,16 @@
           "type": "boolean",
           "default": false
         },
+        "passkeys": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawPasskeyConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "password_enabled": {
           "type": "boolean",
           "default": true
@@ -107,6 +117,19 @@
         "client_id",
         "client_secret_file",
         "redirect_uri"
+      ]
+    },
+    "RawPasskeyConfig": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "description": "Public HTTPS origin where browsers access Crabinet.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "origin"
       ]
     },
     "RawServerConfig": {

@@ -1,5 +1,7 @@
 //! Local password authentication, opaque server-side sessions, and request protection.
 
+mod passkeys;
+
 use std::{
     collections::HashMap,
     fs::OpenOptions,
@@ -38,7 +40,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SESSION_COOKIE: &str = "crabinet_session";
 const TOKEN_BYTES: usize = 32;
-const SESSION_SCHEMA_VERSION: i64 = 3;
+const SESSION_SCHEMA_VERSION: i64 = 4;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
@@ -52,6 +54,8 @@ pub enum AuthInitError {
     CreateDatabase(#[from] std::io::Error),
     #[error("cannot initialize the session database")]
     Database(#[from] rusqlite::Error),
+    #[error("cannot initialize passkeys: {0}")]
+    Passkeys(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -114,6 +118,7 @@ pub struct AuthService {
 struct AuthInner {
     users: HashMap<String, UserRecord>,
     password_enabled: bool,
+    passkeys: Option<passkeys::PasskeyState>,
     shares: Vec<ShareRecord>,
     store: SessionStore,
     token_key: Vec<u8>,
@@ -280,6 +285,10 @@ impl AuthService {
         self.inner.password_enabled
     }
 
+    pub(crate) fn passkey_enabled(&self) -> bool {
+        self.inner.passkeys.is_some()
+    }
+
     pub(crate) fn absolute_timeout_seconds(&self) -> i64 {
         self.inner.absolute_timeout_seconds
     }
@@ -317,7 +326,7 @@ impl AuthService {
             })
             .collect();
         let server = config.server();
-        Ok(Self::new(
+        let mut auth = Self::new(
             users,
             config.auth().password_enabled(),
             shares,
@@ -330,7 +339,13 @@ impl AuthService {
             server.max_sessions_per_user(),
             server.max_sessions_total(),
             Arc::new(SystemClock),
-        ))
+        );
+        if let Some(origin) = config.auth().passkeys_origin() {
+            Arc::get_mut(&mut auth.inner)
+                .expect("new auth service has one owner")
+                .passkeys = Some(passkeys::PasskeyState::new(origin)?);
+        }
+        Ok(auth)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -352,6 +367,7 @@ impl AuthService {
             inner: Arc::new(AuthInner {
                 users,
                 password_enabled,
+                passkeys: None,
                 shares,
                 store,
                 token_key,
@@ -736,6 +752,27 @@ impl SessionStore {
                  COMMIT;",
             )?;
         }
+        if version < 4 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE passkey_users (
+                   username TEXT PRIMARY KEY NOT NULL,
+                   user_handle BLOB NOT NULL UNIQUE CHECK(length(user_handle) = 16)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE passkeys (
+                   id TEXT PRIMARY KEY NOT NULL,
+                   username TEXT NOT NULL,
+                   credential_id BLOB NOT NULL UNIQUE,
+                   name TEXT NOT NULL,
+                   credential_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_used_at INTEGER
+                 ) WITHOUT ROWID;
+                 CREATE INDEX passkeys_user ON passkeys(username);
+                 PRAGMA user_version = 4;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -948,6 +985,7 @@ pub fn router() -> Router<AppState> {
         .route("/preferences", put(update_preferences))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
+        .merge(passkeys::router())
 }
 
 /// Authenticates a request and inserts [`AuthenticatedPrincipal`] for protected APIs.
@@ -1775,12 +1813,72 @@ mod tests {
         let sessions: i64 = connection
             .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(sessions, 1);
         let picture: Option<String> = connection
             .query_row("SELECT picture_url FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert!(picture.is_none());
+    }
+
+    #[tokio::test]
+    async fn passkey_registration_requires_session_and_csrf_and_returns_browser_options() {
+        let mut test = test_auth(1, 5);
+        Arc::get_mut(&mut test.service.inner).unwrap().passkeys = Some(
+            passkeys::PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap())
+                .unwrap(),
+        );
+        let app = app_router(AppState::with_auth(true, test.service.clone()));
+        let login = login_response(&test.service).await;
+        let cookie = cookie_pair(&login);
+        let json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(login.into_body(), 16_384).await.unwrap()).unwrap();
+        let csrf = json["csrfToken"].as_str().unwrap();
+        let path = "/api/v1/auth/passkeys/register/start";
+        let body = r#"{"name":"My laptop"}"#;
+        assert_eq!(
+            app.clone()
+                .oneshot(post(path, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let without_csrf = Request::post(path)
+            .header(header::HOST, "files.example.test")
+            .header(header::ORIGIN, "https://files.example.test")
+            .header("sec-fetch-site", "same-origin")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, &cookie)
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(without_csrf).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .oneshot(
+                Request::post(path)
+                    .header(header::HOST, "files.example.test")
+                    .header(header::ORIGIN, "https://files.example.test")
+                    .header("sec-fetch-site", "same-origin")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", csrf)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let challenge: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+        assert!(challenge["flowId"].as_str().is_some());
+        assert!(
+            challenge["options"]["publicKey"]["challenge"]
+                .as_str()
+                .is_some()
+        );
     }
 
     #[tokio::test]

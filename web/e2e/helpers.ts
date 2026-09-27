@@ -6,7 +6,7 @@ export async function signIn(
   page: Page,
   username: "reader" | "writer" = "reader",
 ) {
-  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Email or username", { exact: true }).fill(username);
   await page.getByLabel("Password").fill(E2E_PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(

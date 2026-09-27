@@ -1,6 +1,6 @@
 # Authentication and sessions
 
-Crabinet authenticates configuration-defined users with Argon2id v19 passwords, verified-email OpenID Connect sign-in, or both, and keeps opaque sessions in SQLite. Clear-text passwords, PHC strings, provider tokens, raw session identifiers, and CSRF tokens are never logged or stored in the database.
+Crabinet authenticates configuration-defined users with Argon2id v19 passwords, verified-email OpenID Connect sign-in, and optionally WebAuthn passkeys, and keeps opaque sessions in SQLite. Clear-text passwords, PHC strings, provider tokens, raw session identifiers, and CSRF tokens are never logged or stored in the database.
 
 ## Password verification and memory
 
@@ -17,6 +17,10 @@ cargo test --release benchmark_default_argon2_verification_profile -- --ignored 
 On the constrained dev-vm runner on 2026-09-16, three default-profile verifications completed in 413.6 ms (137.9 ms mean). This is a reference measurement, not a capacity promise. For the initial low-memory deployment, the documented maximum safe verifier count is **one**. For a different pod, reserve normal process memory and safety headroom first, then cap concurrency at no more than `floor(remaining bytes / largest configured Argon2 m bytes)` and validate under the real cgroup limit.
 
 The login limiter keys attempts by a fixed-size SHA-256 digest of the trimmed, ASCII-lowercased account identifier plus the transport peer IP. It never retains an attacker-sized identifier, retains at most 4096 recent keys, and never changes the case-sensitive username used for authentication. Password sign-in accepts a configured username or email address. Usernames must satisfy the configured 64-byte ASCII identifier grammar before account lookup. Passwords may contain arbitrary Unicode and are processed without truncation up to 4096 UTF-8 bytes; larger, malformed, or otherwise invalid credentials receive the same generic authentication failure and are never copied into an Argon2 worker or logged.
+
+## Passkey verification
+
+Passkey registration requires an active session and its CSRF token. A registration challenge is bound to that session, used once, and expires after five minutes. WebAuthn validates the configured HTTPS origin and relying party ID, the challenge, the authenticator's proof of possession, and user verification. Each configured user has a stable random WebAuthn user handle and may store up to 20 named credentials. The name is only a local label; renaming it does not change the authenticator. Sign-in begins with a username or configured email so the server can offer that account's credentials; successful verification creates an ordinary Crabinet session. Removing a key deletes its credential record, while the other keys and Google or password sign-in remain available. Unrecognized and disabled users receive no passkey session. Passkey start requests use the same account-and-peer rate limiter as password sign-in; a shared proxy should also enforce a per-client limit.
 
 ## Session design
 

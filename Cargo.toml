@@ -23,6 +23,8 @@ jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hmac = "0.13.0"
 mime_guess = "2.0.5"
+# Keep the WebAuthn crypto self-contained in the scratch-based release image.
+openssl = { version = "0.10.81", features = ["vendored"] }
 rust-embed = { version = "8.12.0", features = ["include-exclude"] }
 rustix = { version = "1.1.5", features = ["fs"] }
 rpassword = "7.5.4"
@@ -42,6 +44,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 unicode-normalization = "0.1.25"
 url = "2.5.8"
+webauthn-rs = "=0.5.5"
 
 [dev-dependencies]
 aws-lc-rs = "1.18.1"

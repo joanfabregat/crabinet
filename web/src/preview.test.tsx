@@ -85,6 +85,13 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       vi.fn(async () => ({ passwordEnabled: true, oidcEnabled: false })),
     login: overrides.login ?? vi.fn(async () => session),
     logout: overrides.logout ?? vi.fn(async () => undefined),
+    passkeys: overrides.passkeys ?? vi.fn(async () => []),
+    startPasskeyRegistration: overrides.startPasskeyRegistration ?? vi.fn(),
+    finishPasskeyRegistration: overrides.finishPasskeyRegistration ?? vi.fn(),
+    startPasskeyLogin: overrides.startPasskeyLogin ?? vi.fn(),
+    finishPasskeyLogin: overrides.finishPasskeyLogin ?? vi.fn(),
+    renamePasskey: overrides.renamePasskey ?? vi.fn(),
+    removePasskey: overrides.removePasskey ?? vi.fn(),
     updateDefaultFolder:
       overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
     directory: overrides.directory ?? vi.fn(async () => files),
