@@ -13,10 +13,14 @@ const at = (href: string) =>
   routeFromUrl(new URL(href, "https://crabinet.test"));
 
 describe("browser navigation", () => {
-  it("round-trips a per-share Trash route", () => {
-    const href = trashUrl("équipe/a");
-    expect(href).toBe("/trash/%C3%A9quipe%2Fa");
-    expect(at(href)).toEqual({
+  it("addresses the one Trash without a share", () => {
+    expect(trashUrl()).toBe("/trash");
+    expect(at("/trash")).toEqual({ shareId: null, path: "", view: "trash" });
+    expect(directoryUrl("work", "")).toBe("/work");
+  });
+
+  it("still opens Trash from a former per-share Trash link", () => {
+    expect(at("/trash/%C3%A9quipe%2Fa")).toEqual({
       shareId: "équipe/a",
       path: "",
       view: "trash",

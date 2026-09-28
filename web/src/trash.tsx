@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { RefreshCw, Shredder, Trash2, Undo2 } from "lucide-preact";
+import { Shredder, Trash2, Undo2 } from "lucide-preact";
 
 import {
   ApiError,
@@ -11,17 +11,31 @@ import {
 } from "./api";
 import { EntryIcon } from "./file-icons";
 import { Modal } from "./operations";
+import { useToast } from "./toast";
 import { FolderPicker } from "./tree";
 import { isValidPathComponent } from "./virtual-path";
 
 interface TrashViewProps {
   api: ApiClient;
-  share: Share;
+  shares: Share[];
   csrfToken: string;
   userId: string;
   onSessionExpired: () => void;
   onSessionRefreshed: (session: Session) => void;
   onChanged: () => void;
+}
+
+/** One share's Trash, shown under its own divider. */
+interface ShareTrash {
+  share: Share;
+  items: TrashItem[];
+  failed: boolean;
+}
+
+/** An item together with the share whose Trash holds it. */
+interface TrashTarget {
+  share: Share;
+  item: TrashItem;
 }
 
 // Matches the timestamps in the preview panel.
@@ -74,56 +88,87 @@ function nameOf(path: string): string {
   return path.split("/").at(-1) ?? path;
 }
 
+function targetKey({ share, item }: TrashTarget): string {
+  return `${share.id}\u0000${item.id}`;
+}
+
 export function TrashView({
   api,
-  share,
+  shares,
   csrfToken,
   userId,
   onSessionExpired,
   onSessionRefreshed,
   onChanged,
 }: TrashViewProps) {
-  const [items, setItems] = useState<TrashItem[]>([]);
+  const [groups, setGroups] = useState<ShareTrash[]>([]);
+  const [retentionDays, setRetentionDays] = useState<number>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [revision, setRevision] = useState(0);
-  const [busyId, setBusyId] = useState<string>();
-  const [restoreItem, setRestoreItem] = useState<TrashItem>();
-  const [purgeItem, setPurgeItem] = useState<TrashItem>();
+  const [busyKey, setBusyKey] = useState<string>();
+  const [restoreTarget, setRestoreTarget] = useState<TrashTarget>();
+  const [purgeTarget, setPurgeTarget] = useState<TrashTarget>();
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [emptying, setEmptying] = useState(false);
   const [destinationDirectory, setDestinationDirectory] = useState("");
   const [destinationName, setDestinationName] = useState("");
+  const showToast = useToast();
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError(undefined);
-    api.trash(share.id, controller.signal).then(
-      (page) => {
-        if (!controller.signal.aborted) {
-          setItems(page.items);
-          setLoading(false);
-        }
-      },
-      (cause: unknown) => {
-        if (controller.signal.aborted) return;
-        if (cause instanceof ApiError && cause.kind === "unauthorized")
-          onSessionExpired();
-        else {
-          setError("Could not load Trash. Try again.");
-          setLoading(false);
-        }
-      },
-    );
+    void Promise.allSettled(
+      shares.map((share) => api.trash(share.id, controller.signal)),
+    ).then((results) => {
+      if (controller.signal.aborted) return;
+      if (
+        results.some(
+          (result) =>
+            result.status === "rejected" &&
+            result.reason instanceof ApiError &&
+            result.reason.kind === "unauthorized",
+        )
+      ) {
+        onSessionExpired();
+        return;
+      }
+      // One server setting, so every share reports the same value.
+      setRetentionDays(
+        results.find((result) => result.status === "fulfilled")?.value
+          .retentionDays,
+      );
+      setGroups(
+        shares.map((share, index) => {
+          const result = results[index]!;
+          return result.status === "fulfilled"
+            ? { share, items: result.value.items, failed: false }
+            : { share, items: [], failed: true };
+        }),
+      );
+      setLoading(false);
+    });
     return () => controller.abort();
-  }, [api, share.id, revision, onSessionExpired]);
+  }, [api, shares, revision, onSessionExpired]);
+
+  const removeItem = ({ share, item }: TrashTarget) =>
+    setGroups((current) =>
+      current.map((group) =>
+        group.share.id === share.id
+          ? {
+              ...group,
+              items: group.items.filter((entry) => entry.id !== item.id),
+            }
+          : group,
+      ),
+    );
 
   const mutate = async (
-    id: string,
+    target: TrashTarget,
     operation: (token: string) => Promise<void>,
   ) => {
-    setBusyId(id);
+    setBusyKey(targetKey(target));
     setError(undefined);
     try {
       await withCsrfRetry(
@@ -133,24 +178,32 @@ export function TrashView({
         onSessionRefreshed,
         operation,
       );
-      setRestoreItem(undefined);
-      setPurgeItem(undefined);
-      setItems((current) => current.filter((item) => item.id !== id));
+      setRestoreTarget(undefined);
+      setPurgeTarget(undefined);
+      removeItem(target);
       onChanged();
     } catch (cause) {
       if (cause instanceof ApiError && cause.kind === "unauthorized")
         onSessionExpired();
       else throw cause;
     } finally {
-      setBusyId(undefined);
+      setBusyKey(undefined);
     }
   };
 
-  const restore = async (item: TrashItem, destination?: string) => {
+  const restore = async (target: TrashTarget, destination?: string) => {
+    const { share, item } = target;
     try {
-      await mutate(item.id, (token) =>
+      await mutate(target, (token) =>
         api.restoreTrash(share.id, item.id, destination, token),
       );
+      const restoredPath = destination ?? item.originalPath;
+      showToast(`Restored ${nameOf(restoredPath)}.`, {
+        action: {
+          label: "Undo",
+          onClick: () => void moveBackToTrash(share, restoredPath),
+        },
+      });
     } catch (cause) {
       if (
         destination === undefined &&
@@ -159,7 +212,7 @@ export function TrashView({
       ) {
         setDestinationDirectory("");
         setDestinationName(nameOf(item.originalPath));
-        setRestoreItem(item);
+        setRestoreTarget(target);
       } else {
         setError(
           "Could not restore this item. Check the destination and try again.",
@@ -168,42 +221,73 @@ export function TrashView({
     }
   };
 
-  const purge = async (item: TrashItem) => {
+  /** Undoes a restore by moving the restored item back to Trash. */
+  const moveBackToTrash = async (share: Share, path: string) => {
     try {
-      await mutate(item.id, (token) =>
-        api.purgeTrash(share.id, item.id, token),
+      const metadata = await api.metadata(share.id, path);
+      await withCsrfRetry(api, csrfToken, userId, onSessionRefreshed, (token) =>
+        api.deleteEntry(share.id, path, metadata.etag, token),
       );
+      showToast(`Moved ${nameOf(path)} back to Trash.`);
+      onChanged();
+      setRevision((value) => value + 1);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.kind === "unauthorized")
+        onSessionExpired();
+      else
+        showToast(`Could not move ${nameOf(path)} back to Trash.`, {
+          tone: "error",
+        });
+    }
+  };
+
+  const purge = async (target: TrashTarget) => {
+    try {
+      await mutate(target, (token) =>
+        api.purgeTrash(target.share.id, target.item.id, token),
+      );
+      showToast(`Permanently deleted ${nameOf(target.item.originalPath)}.`);
     } catch {
       setError("Could not permanently delete this item. Try again.");
     }
   };
 
+  // Only shares with write access can be emptied.
+  const purgeable = groups
+    .filter((group) => group.share.access === "read-write")
+    .flatMap((group) =>
+      group.items.map((item) => ({ share: group.share, item })),
+    );
+
   const emptyTrash = async () => {
     setEmptying(true);
     setError(undefined);
+    let purged = 0;
     try {
       // Empty the displayed snapshot. Items added by another user while this
       // runs are preserved and will appear after the final refresh.
-      for (const item of items) {
+      for (const target of purgeable) {
         await withCsrfRetry(
           api,
           csrfToken,
           userId,
           onSessionRefreshed,
-          (token) => api.purgeTrash(share.id, item.id, token),
+          (token) => api.purgeTrash(target.share.id, target.item.id, token),
         );
-        setItems((current) =>
-          current.filter((currentItem) => currentItem.id !== item.id),
-        );
+        purged += 1;
+        removeItem(target);
       }
       setConfirmEmpty(false);
+      showToast(
+        `Permanently deleted ${purged} ${purged === 1 ? "item" : "items"}.`,
+      );
       onChanged();
       setRevision((value) => value + 1);
     } catch (cause) {
       if (cause instanceof ApiError && cause.kind === "unauthorized")
         onSessionExpired();
       else {
-        setError("Could not empty all of Trash. Refresh to see what remains.");
+        setError("Could not empty all of Trash. What remains is listed below.");
         setRevision((value) => value + 1);
       }
       setConfirmEmpty(false);
@@ -216,30 +300,25 @@ export function TrashView({
     ? `${destinationDirectory}/${destinationName}`
     : destinationName;
   const now = Date.now();
+  const shown = groups.filter(
+    (group) => group.items.length > 0 || group.failed,
+  );
+  const allFailed = groups.length > 0 && groups.every((group) => group.failed);
+  const retry = () => setRevision((value) => value + 1);
 
   return (
     <section class="directory-panel trash-panel" aria-labelledby="trash-title">
       <div class="directory-heading">
         <div>
-          <p class="eyebrow">{share.name}</p>
+          <p class="eyebrow">All shared folders</p>
           <h1 id="trash-title">Trash</h1>
         </div>
         <div class="directory-heading-actions">
-          <button
-            type="button"
-            class="icon-button tooltip-action"
-            aria-label="Refresh Trash"
-            data-tooltip="Refresh Trash"
-            disabled={loading || emptying}
-            onClick={() => setRevision((value) => value + 1)}
-          >
-            <RefreshCw size={18} aria-hidden="true" />
-          </button>
-          {share.access === "read-write" && items.length > 0 && !loading && (
+          {purgeable.length > 0 && !loading && (
             <button
               type="button"
               class="button button-danger"
-              disabled={Boolean(busyId) || emptying}
+              disabled={Boolean(busyKey) || emptying}
               onClick={() => setConfirmEmpty(true)}
             >
               <Trash2 size={18} aria-hidden="true" />
@@ -249,8 +328,10 @@ export function TrashView({
         </div>
       </div>
       <p class="muted">
-        Deleted items remain here until they expire. Restoring and permanent
-        deletion require write access.
+        {retentionDays
+          ? `Deleted items remain here for ${retentionDays} ${retentionDays === 1 ? "day" : "days"}.`
+          : "Deleted items remain here until they expire."}{" "}
+        Restoring and permanent deletion require write access.
       </p>
       {error && (
         <div class="notice notice-danger" role="alert">
@@ -259,68 +340,80 @@ export function TrashView({
       )}
       {loading ? (
         <p role="status">Loading Trash…</p>
-      ) : items.length === 0 ? (
-        <p role="status">Trash is empty.</p>
+      ) : allFailed ? (
+        <div class="notice notice-danger" role="alert">
+          Could not load Trash. <RetryButton onClick={retry} />
+        </div>
+      ) : shown.length === 0 ? (
+        <div class="trash-empty" role="status">
+          <span class="trash-empty-icon" aria-hidden="true">
+            <Trash2 size={30} strokeWidth={1.6} />
+          </span>
+          <h2>Trash is empty.</h2>
+          <p>
+            Deleted files and folders appear here, so they can be restored{" "}
+            {retentionDays
+              ? `for ${retentionDays} ${retentionDays === 1 ? "day" : "days"}.`
+              : "until they expire."}
+          </p>
+        </div>
       ) : (
-        <ul class="trash-list">
-          {items.map((item) => (
-            <li key={item.id} class="trash-item">
-              <EntryIcon
-                entry={{ kind: item.kind, name: nameOf(item.originalPath) }}
-                size={22}
-                aria-hidden="true"
-              />
-              <div class="trash-details">
-                <strong>{nameOf(item.originalPath)}</strong>
-                <span class="entry-meta">
-                  From {parentOf(item.originalPath) || share.name} · Deleted{" "}
-                  <TrashTime value={item.deletedAt} now={now} /> by{" "}
-                  {item.deletedBy} · Expires{" "}
-                  <TrashTime value={item.expiresAt} now={now} />
+        <div class="trash-groups">
+          {shown.map((group, index) => (
+            <section
+              key={group.share.id}
+              class="trash-group"
+              aria-labelledby={`trash-group-${index}`}
+            >
+              <h2 class="trash-group-title" id={`trash-group-${index}`}>
+                {group.share.name}{" "}
+                <span class="trash-group-count">
+                  <span aria-hidden="true">—</span> {group.items.length}{" "}
+                  {group.items.length === 1 ? "item" : "items"}
                 </span>
-              </div>
-              {share.access === "read-write" && (
-                <div class="trash-actions">
-                  <button
-                    type="button"
-                    class="icon-button tooltip-action"
-                    aria-label={`Restore ${nameOf(item.originalPath)}`}
-                    data-tooltip="Restore"
-                    disabled={Boolean(busyId) || emptying}
-                    onClick={() => void restore(item)}
-                  >
-                    <Undo2 size={18} aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    class="icon-button icon-button-danger tooltip-action"
-                    aria-label={`Permanently delete ${nameOf(item.originalPath)}`}
-                    data-tooltip="Delete permanently"
-                    disabled={Boolean(busyId) || emptying}
-                    onClick={() => setPurgeItem(item)}
-                  >
-                    <Shredder size={18} aria-hidden="true" />
-                  </button>
+              </h2>
+              {group.failed ? (
+                <div class="notice notice-danger" role="alert">
+                  Could not load Trash for {group.share.name}.{" "}
+                  <RetryButton onClick={retry} />
                 </div>
+              ) : (
+                <ul class="trash-list">
+                  {group.items.map((item) => (
+                    <TrashRow
+                      key={item.id}
+                      share={group.share}
+                      item={item}
+                      now={now}
+                      disabled={Boolean(busyKey) || emptying}
+                      onRestore={() =>
+                        void restore({ share: group.share, item })
+                      }
+                      onPurge={() =>
+                        setPurgeTarget({ share: group.share, item })
+                      }
+                    />
+                  ))}
+                </ul>
               )}
-            </li>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
-      {restoreItem && (
+      {restoreTarget && (
         <Modal
-          title={`Restore ${nameOf(restoreItem.originalPath)}`}
-          busy={Boolean(busyId)}
-          onClose={() => setRestoreItem(undefined)}
+          title={`Restore ${nameOf(restoreTarget.item.originalPath)}`}
+          busy={Boolean(busyKey)}
+          onClose={() => setRestoreTarget(undefined)}
           wide
         >
           <p>
-            The original path is unavailable. Choose a folder in {share.name}{" "}
-            and a name for the restored item.
+            The original path is unavailable. Choose a folder in{" "}
+            {restoreTarget.share.name} and a name for the restored item.
           </p>
           <FolderPicker
             api={api}
-            share={share}
+            share={restoreTarget.share}
             selected={destinationDirectory}
             onSelect={setDestinationDirectory}
             onSessionExpired={onSessionExpired}
@@ -336,8 +429,8 @@ export function TrashView({
             <button
               type="button"
               class="button button-secondary"
-              disabled={Boolean(busyId)}
-              onClick={() => setRestoreItem(undefined)}
+              disabled={Boolean(busyKey)}
+              onClick={() => setRestoreTarget(undefined)}
             >
               Cancel
             </button>
@@ -345,39 +438,39 @@ export function TrashView({
               type="button"
               class="button button-primary"
               disabled={
-                Boolean(busyId) || !isValidPathComponent(destinationName)
+                Boolean(busyKey) || !isValidPathComponent(destinationName)
               }
-              onClick={() => void restore(restoreItem, destination)}
+              onClick={() => void restore(restoreTarget, destination)}
             >
               Restore here
             </button>
           </div>
         </Modal>
       )}
-      {purgeItem && (
+      {purgeTarget && (
         <Modal
-          title={`Permanently delete ${nameOf(purgeItem.originalPath)}`}
-          busy={Boolean(busyId)}
-          onClose={() => setPurgeItem(undefined)}
+          title={`Permanently delete ${nameOf(purgeTarget.item.originalPath)}`}
+          busy={Boolean(busyKey)}
+          onClose={() => setPurgeTarget(undefined)}
         >
           <p>
-            This permanently deletes {nameOf(purgeItem.originalPath)} from
-            Trash. It cannot be undone.
+            This permanently deletes {nameOf(purgeTarget.item.originalPath)}{" "}
+            from Trash. It cannot be undone.
           </p>
           <div class="dialog-actions">
             <button
               type="button"
               class="button button-secondary"
-              disabled={Boolean(busyId)}
-              onClick={() => setPurgeItem(undefined)}
+              disabled={Boolean(busyKey)}
+              onClick={() => setPurgeTarget(undefined)}
             >
               Cancel
             </button>
             <button
               type="button"
               class="button button-danger"
-              disabled={Boolean(busyId)}
-              onClick={() => void purge(purgeItem)}
+              disabled={Boolean(busyKey)}
+              onClick={() => void purge(purgeTarget)}
             >
               Delete permanently
             </button>
@@ -386,15 +479,15 @@ export function TrashView({
       )}
       {confirmEmpty && (
         <Modal
-          title={`Empty ${share.name} Trash?`}
+          title="Empty Trash?"
           busy={emptying}
           onClose={() => setConfirmEmpty(false)}
         >
           <p>
-            Permanently delete {items.length}{" "}
-            {items.length === 1 ? "item" : "items"} from {share.name} Trash?
-            This cannot be undone. Items added while this runs will remain in
-            Trash.
+            Permanently delete {purgeable.length}{" "}
+            {purgeable.length === 1 ? "item" : "items"} from Trash? This cannot
+            be undone. Items in read-only shared folders, and items added while
+            this runs, will remain in Trash.
           </p>
           <div class="dialog-actions">
             <button
@@ -417,5 +510,72 @@ export function TrashView({
         </Modal>
       )}
     </section>
+  );
+}
+
+function TrashRow({
+  share,
+  item,
+  now,
+  disabled,
+  onRestore,
+  onPurge,
+}: {
+  share: Share;
+  item: TrashItem;
+  now: number;
+  disabled: boolean;
+  onRestore: () => void;
+  onPurge: () => void;
+}) {
+  const name = nameOf(item.originalPath);
+  return (
+    <li class="trash-item">
+      <EntryIcon
+        entry={{ kind: item.kind, name }}
+        size={22}
+        aria-hidden="true"
+      />
+      <div class="trash-details">
+        <strong>{name}</strong>
+        <span class="entry-meta">
+          From {parentOf(item.originalPath) || share.name} · Deleted{" "}
+          <TrashTime value={item.deletedAt} now={now} /> by {item.deletedBy} ·
+          Expires <TrashTime value={item.expiresAt} now={now} />
+        </span>
+      </div>
+      {share.access === "read-write" && (
+        <div class="trash-actions">
+          <button
+            type="button"
+            class="icon-button tooltip-action"
+            aria-label={`Restore ${name}`}
+            data-tooltip="Restore"
+            disabled={disabled}
+            onClick={onRestore}
+          >
+            <Undo2 size={18} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="icon-button icon-button-danger tooltip-action"
+            aria-label={`Permanently delete ${name}`}
+            data-tooltip="Delete permanently"
+            disabled={disabled}
+            onClick={onPurge}
+          >
+            <Shredder size={18} aria-hidden="true" />
+          </button>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" class="notice-action" onClick={onClick}>
+      Try again
+    </button>
   );
 }

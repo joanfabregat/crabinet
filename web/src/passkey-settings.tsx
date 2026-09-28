@@ -15,6 +15,7 @@ import {
   type Passkey,
   type Session,
 } from "./api";
+import { useToast } from "./toast";
 
 interface Props {
   api: ApiClient;
@@ -24,6 +25,8 @@ interface Props {
   onSessionRefreshed: (session: Session) => void;
   /** Reports when a passkey action is in progress so the host can stay open. */
   onBusyChange?: (busy: boolean) => void;
+  /** Reports whether this section shows anything, so the host can list it. */
+  onVisibleChange?: (visible: boolean) => void;
 }
 
 function dateLabel(seconds: number): string {
@@ -53,6 +56,7 @@ export function PasskeySettings({
   onSessionExpired,
   onSessionRefreshed,
   onBusyChange,
+  onVisibleChange,
 }: Props) {
   const [enabled, setEnabled] = useState(false);
   const [keys, setKeys] = useState<Passkey[]>([]);
@@ -66,9 +70,18 @@ export function PasskeySettings({
   const busyChange = useRef(onBusyChange);
   busyChange.current = onBusyChange;
 
+  const showToast = useToast();
+  const visible = enabled || Boolean(error);
+  const visibleChange = useRef(onVisibleChange);
+  visibleChange.current = onVisibleChange;
+
   useEffect(() => {
     busyChange.current?.(busy);
   }, [busy]);
+
+  useEffect(() => {
+    visibleChange.current?.(visible);
+  }, [visible]);
 
   useEffect(
     () => () => {
@@ -153,6 +166,7 @@ export function PasskeySettings({
       if (controller.signal.aborted) return;
       setKeys((current) => [key, ...current]);
       setName("");
+      showToast(`Added passkey ${key.name}.`);
     } catch (cause) {
       if (controller.signal.aborted || isWebAuthnCancellation(cause)) return;
       if (
@@ -186,6 +200,7 @@ export function PasskeySettings({
         current.map((key) => (key.id === id ? updated : key)),
       );
       setEditingId(undefined);
+      showToast(`Renamed passkey to ${updated.name}.`);
     } catch (cause) {
       failed(cause, "Could not rename the passkey. Try again.");
     } finally {
@@ -204,6 +219,7 @@ export function PasskeySettings({
     try {
       await mutate((token) => api.removePasskey(key.id, token));
       setKeys((current) => current.filter((item) => item.id !== key.id));
+      showToast(`Removed passkey ${key.name}.`);
     } catch (cause) {
       failed(cause, "Could not remove the passkey. Try again.");
     } finally {

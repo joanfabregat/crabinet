@@ -74,6 +74,23 @@ function dispatchDrag(
   fireEvent(target, event);
 }
 
+/** Opens Settings on one category; the others stay hidden. */
+async function openSettings(
+  section: "Start folder" | "Files" | "Appearance" | "Passkeys",
+) {
+  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog", { name: "Settings" })).getByRole("tab", {
+      name: section,
+    }),
+  );
+}
+
+/** Answers the confirmation that now precedes every move to Trash. */
+async function confirmMoveToTrash() {
+  fireEvent.click(await screen.findByRole("button", { name: "Move to Trash" }));
+}
+
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     session: overrides.session ?? vi.fn(async () => session),
@@ -476,10 +493,10 @@ describe("directory browser", () => {
       <App api={fakeApi({ updateDefaultFolder })} navigation={navigation} />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Start folder");
     const dialog = screen.getByRole("dialog", { name: "Settings" });
     const select = within(dialog).getByRole("combobox", {
-      name: "Start folder",
+      name: "Folder to open after sign-in",
     });
     expect(select).toHaveValue("");
     expect(within(select).getAllByRole("option")).toHaveLength(3);
@@ -512,10 +529,10 @@ describe("directory browser", () => {
     });
     render(<App api={api} navigation={new MemoryNavigation()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Start folder");
     const select = within(
       screen.getByRole("dialog", { name: "Settings" }),
-    ).getByRole("combobox", { name: "Start folder" });
+    ).getByRole("combobox", { name: "Folder to open after sign-in" });
     expect(select).toHaveValue("/");
     expect(
       within(select).getByRole("option", {
@@ -548,7 +565,7 @@ describe("directory browser", () => {
     const navigation = new MemoryNavigation();
     const first = render(<App api={api} navigation={navigation} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Files");
     const dialog = screen.getByRole("dialog", { name: "Settings" });
     const toggle = within(dialog).getByRole("checkbox", {
       name: "Show hidden files",
@@ -597,7 +614,7 @@ describe("directory browser", () => {
 
     first.unmount();
     render(<App api={api} navigation={new MemoryNavigation()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Files");
     expect(
       within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
         "checkbox",
@@ -652,7 +669,7 @@ describe("directory browser", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Files");
     const toggle = within(
       screen.getByRole("dialog", { name: "Settings" }),
     ).getByRole("checkbox", { name: "Show hidden files" });
@@ -676,10 +693,10 @@ describe("directory browser", () => {
       <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Appearance");
     const appearance = within(
       screen.getByRole("dialog", { name: "Settings" }),
-    ).getByRole("combobox", { name: "Appearance" });
+    ).getByRole("combobox", { name: "Theme" });
     expect(appearance).toHaveValue("dark");
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     // The browser-wide copy keeps the sign-in page and first paint in step.
@@ -713,10 +730,10 @@ describe("directory browser", () => {
     render(
       <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Appearance");
     const reopened = within(
       screen.getByRole("dialog", { name: "Settings" }),
-    ).getByRole("combobox", { name: "Appearance" });
+    ).getByRole("combobox", { name: "Theme" });
     expect(reopened).toHaveValue("light");
     await waitFor(() =>
       expect(document.documentElement).toHaveAttribute("data-theme", "light"),
@@ -743,10 +760,10 @@ describe("directory browser", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Appearance");
     const appearance = within(
       screen.getByRole("dialog", { name: "Settings" }),
-    ).getByRole("combobox", { name: "Appearance" });
+    ).getByRole("combobox", { name: "Theme" });
     fireEvent.change(appearance, { target: { value: "dark" } });
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -778,7 +795,7 @@ describe("directory browser", () => {
       ).toBeNull(),
     );
     expect(account.saved.showHiddenFiles).toBe(true);
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Files");
     expect(
       within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
         "checkbox",
@@ -821,7 +838,7 @@ describe("directory browser", () => {
         "csrf-in-memory",
       ),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Files");
     expect(
       within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
         "checkbox",
@@ -832,11 +849,10 @@ describe("directory browser", () => {
     expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
       "true",
     );
+    const settings = screen.getByRole("dialog", { name: "Settings" });
+    fireEvent.click(within(settings).getByRole("tab", { name: "Appearance" }));
     expect(
-      within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
-        "combobox",
-        { name: "Appearance" },
-      ),
+      within(settings).getByRole("combobox", { name: "Theme" }),
     ).toHaveValue("dark");
     await waitFor(() =>
       expect(document.documentElement).toHaveAttribute("data-theme", "dark"),
@@ -993,6 +1009,34 @@ describe("directory browser", () => {
     expect(screen.queryByRole("img", { name: /Profile image/ })).toBeNull();
   });
 
+  it("selects a sidebar folder without expanding it", async () => {
+    const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      entries: [{ name: "Photos", kind: "directory" }],
+    }));
+    const navigation = new MemoryNavigation();
+    render(<App api={fakeApi({ directory })} navigation={navigation} />);
+
+    const sidebar = within(
+      await screen.findByRole("complementary", { name: "Shared folders" }),
+    );
+    const reference = sidebar.getAllByRole("link", { name: "Reference" })[0]!;
+    fireEvent.click(reference);
+
+    expect(navigation.visits.at(-1)?.route).toEqual({
+      shareId: "read-only",
+      path: "",
+    });
+    await waitFor(() =>
+      expect(reference).toHaveAttribute("aria-current", "page"),
+    );
+    expect(
+      sidebar.getByRole("button", { name: "Expand Reference" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(sidebar.queryByRole("link", { name: "Photos" })).toBeNull();
+  });
+
   it("opens sidebar folders and explains when there are no subfolders", async () => {
     const directory = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
       shareId,
@@ -1011,11 +1055,12 @@ describe("directory browser", () => {
     const sidebar = within(
       await screen.findByRole("complementary", { name: "Shared folders" }),
     );
-    fireEvent.click(sidebar.getAllByRole("link", { name: "Reference" })[0]!);
+    fireEvent.click(sidebar.getByRole("button", { name: "Expand Reference" }));
     const photos = await sidebar.findByRole("link", { name: "Photos" });
     const icon = photos.querySelector("svg");
     expect(icon).not.toBeNull();
     fireEvent.click(icon!);
+    fireEvent.click(sidebar.getByRole("button", { name: "Expand Photos" }));
 
     const hiddenFolder = sidebar.getByRole("link", { name: ".cache" });
     expect(hiddenFolder.querySelector(".lucide-folder-dot")).not.toBeNull();
@@ -1367,6 +1412,7 @@ describe("writable file operations", () => {
       ),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(await screen.findByText("Created todo.md.")).toBeVisible();
     expect(navigation.current()).toEqual({
       shareId: "work",
       path: "projects",
@@ -1527,7 +1573,7 @@ describe("writable file operations", () => {
     ).toBeVisible();
   });
 
-  it("moves folders to Trash without confirmation and reports conflicts", async () => {
+  it("confirms before moving a folder to Trash and reports conflicts", async () => {
     const deleteEntry = vi
       .fn<ApiClient["deleteEntry"]>()
       .mockRejectedValue(
@@ -1554,6 +1600,14 @@ describe("writable file operations", () => {
     fireEvent.click(
       within(actions).getByRole("button", { name: "Delete empty" }),
     );
+    const confirm = await screen.findByRole("dialog", {
+      name: "Move empty to Trash?",
+    });
+    expect(confirm).toHaveTextContent(
+      "empty and everything in it will move to Trash.",
+    );
+    expect(deleteEntry).not.toHaveBeenCalled();
+    await confirmMoveToTrash();
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(await screen.findByRole("alert")).toHaveTextContent("changed");
@@ -1591,10 +1645,12 @@ describe("writable file operations", () => {
     fireEvent.click(
       within(preview).getByRole("button", { name: "Delete notes.txt" }),
     );
+    await confirmMoveToTrash();
 
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Undo" })).toBeVisible();
+    expect(screen.getByText("Moved notes.txt to Trash.")).toBeVisible();
     expect(
       screen.queryByRole("heading", { name: "notes.txt" }),
     ).not.toBeInTheDocument();
@@ -1623,6 +1679,7 @@ describe("writable file operations", () => {
         { name: "Delete notes.txt" },
       ),
     );
+    await confirmMoveToTrash();
     fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() =>
       expect(restoreTrash).toHaveBeenCalledWith(
@@ -1632,6 +1689,7 @@ describe("writable file operations", () => {
         "csrf-in-memory",
       ),
     );
+    expect(await screen.findByText("Restored notes.txt.")).toBeVisible();
   });
 
   it("groups share Trash folders separately and confirms permanent deletion", async () => {
@@ -1648,7 +1706,10 @@ describe("writable file operations", () => {
     render(
       <App
         api={fakeApi({
-          trash: vi.fn(async (shareId) => ({ shareId, items: [item] })),
+          trash: vi.fn(async (shareId) => ({
+            shareId,
+            items: shareId === "work" ? [item] : [],
+          })),
           purgeTrash,
         })}
         navigation={navigation}
@@ -1657,25 +1718,23 @@ describe("writable file operations", () => {
     const sidebar = await screen.findByRole("complementary", {
       name: "Shared folders",
     });
-    expect(
-      within(sidebar).getAllByRole("button", { name: "Trash" }),
-    ).toHaveLength(1);
-    expect(
-      within(sidebar).queryByRole("list", { name: "Trash shares" }),
-    ).toBeNull();
-    fireEvent.click(within(sidebar).getByRole("button", { name: "Trash" }));
-    const trashShares = within(sidebar).getByRole("list", {
-      name: "Trash shares",
-    });
-    fireEvent.click(
-      within(trashShares).getByRole("link", { name: "Working files" }),
-    );
+    // One Trash link, with no per-share list under it.
+    const trashLink = within(sidebar).getByRole("link", { name: "Trash" });
+    expect(trashLink).toHaveAttribute("href", "/trash");
+    expect(within(sidebar).queryByRole("button", { name: "Trash" })).toBeNull();
+    fireEvent.click(trashLink);
     expect(navigation.current()).toEqual({
       shareId: "work",
       path: "",
       view: "trash",
     });
-    const trashName = await screen.findByText("notes.txt");
+    const group = await screen.findByRole("region", {
+      name: /Working files/,
+    });
+    expect(
+      screen.queryByRole("region", { name: /Reference/ }),
+    ).not.toBeInTheDocument();
+    const trashName = within(group).getByText("notes.txt");
     expect(trashName.closest("li")).toHaveTextContent("From projects");
     const restoreButton = screen.getByRole("button", {
       name: "Restore notes.txt",
@@ -1704,7 +1763,7 @@ describe("writable file operations", () => {
     );
   });
 
-  it("confirms Empty Trash and purges only the displayed share snapshot", async () => {
+  it("confirms Empty Trash and purges only the displayed writable snapshot", async () => {
     const items = ["first.txt", "second.txt"].map((name, index) => ({
       id: `deleted-${index}`,
       originalPath: name,
@@ -1730,9 +1789,8 @@ describe("writable file operations", () => {
     });
     expect(emptyButton.querySelector(".lucide-trash-2")).not.toBeNull();
     fireEvent.click(emptyButton);
-    const dialog = screen.getByRole("dialog", {
-      name: "Empty Working files Trash?",
-    });
+    // Reference is read only, so its items stay out of the count.
+    const dialog = screen.getByRole("dialog", { name: "Empty Trash?" });
     expect(
       within(dialog).getByText(/Permanently delete 2 items/),
     ).toBeVisible();
@@ -1773,6 +1831,7 @@ describe("writable file operations", () => {
         { name: "Delete notes.txt" },
       ),
     );
+    await confirmMoveToTrash();
     await screen.findByRole("button", { name: "Undo" });
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "other.txt" })).toBeVisible(),
@@ -1848,6 +1907,69 @@ describe("writable file operations", () => {
       "csrf-in-memory",
       expect.any(AbortSignal),
     );
+  });
+
+  it.each([
+    [
+      "a binary file",
+      () =>
+        Promise.reject(
+          new ApiError("server", "binary", {
+            code: "binary_file",
+            status: 415,
+          }),
+        ),
+    ],
+    [
+      "an oversized file",
+      () =>
+        Promise.reject(
+          new ApiError("server", "too large", {
+            code: "preview_too_large",
+            status: 413,
+          }),
+        ),
+    ],
+    [
+      "an image",
+      () =>
+        Promise.resolve({
+          kind: "image" as const,
+          source: "",
+          mimeType: "image/png" as const,
+          size: 2048,
+          truncated: false,
+        }),
+    ],
+  ])("offers no Edit button for %s", async (label, preview) => {
+    const settledRole = label === "an image" ? "img" : "alert";
+    const navigation = writableNavigation();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/notes.txt",
+    });
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          preview: vi.fn(preview),
+        })}
+        navigation={navigation}
+      />,
+    );
+
+    const panel = await screen.findByRole("complementary", {
+      name: "notes.txt",
+    });
+    // Wait for the preview to settle; while it loads, Edit is hidden anyway.
+    expect(await within(panel).findByRole(settledRole)).toBeVisible();
+    expect(
+      within(panel).getByRole("button", { name: "Rename notes.txt" }),
+    ).toBeVisible();
+    expect(
+      within(panel).queryByRole("button", { name: "Edit notes.txt" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps a denied save draft and retries with a refreshed session", async () => {
@@ -2195,6 +2317,11 @@ describe("security review regressions", () => {
     fireEvent.click(
       within(preview).getByRole("button", { name: "Delete archive" }),
     );
+    // The confirmation reflects the resolved kind.
+    expect(
+      await screen.findByRole("dialog", { name: "Move archive to Trash?" }),
+    ).toHaveTextContent("archive and everything in it will move to Trash.");
+    await confirmMoveToTrash();
     await waitFor(() =>
       expect(deleteEntry).toHaveBeenCalledWith(
         "work",
@@ -2236,6 +2363,7 @@ describe("security review regressions", () => {
         { name: "Delete notes.txt" },
       ),
     );
+    await confirmMoveToTrash();
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
     expect(deleteEntry.mock.calls[0]?.[2]).toBe('W/"reviewed"');
     expect(metadata).toHaveBeenCalledOnce();
@@ -2266,6 +2394,7 @@ describe("security review regressions", () => {
         { name: "Delete notes.txt" },
       ),
     );
+    await confirmMoveToTrash();
     expect(await screen.findByRole("alert")).toHaveTextContent("changed");
     expect(deleteEntry).not.toHaveBeenCalled();
   });
@@ -2531,10 +2660,10 @@ describe("security review regressions", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Start folder");
     const select = within(
       screen.getByRole("dialog", { name: "Settings" }),
-    ).getByRole("combobox", { name: "Start folder" });
+    ).getByRole("combobox", { name: "Folder to open after sign-in" });
     fireEvent.change(select, { target: { value: "work" } });
     await waitFor(() => expect(select).toHaveValue("work"));
     expect(updateDefaultFolder.mock.calls.map((call) => call[1])).toEqual([
@@ -2557,10 +2686,10 @@ describe("security review regressions", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Start folder");
     const select = within(
       screen.getByRole("dialog", { name: "Settings" }),
-    ).getByRole("combobox", { name: "Start folder" });
+    ).getByRole("combobox", { name: "Folder to open after sign-in" });
     expect(select).toHaveValue("/");
     expect(
       within(select).getByRole("option", {

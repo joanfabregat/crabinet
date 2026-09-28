@@ -144,6 +144,9 @@ describe("secure file previews", () => {
       "before save",
     );
 
+    const row = screen.getByRole("link", { name: "code.rs" });
+    const source = screen.getByLabelText("File source");
+
     TestEventSource.instance.dispatchEvent(new Event("invalidate"));
     await waitFor(() =>
       expect(screen.getByLabelText("File source")).toHaveTextContent(
@@ -151,6 +154,10 @@ describe("secure file previews", () => {
       ),
     );
     expect(preview).toHaveBeenCalledTimes(2);
+    // Updated in place: neither the list nor the preview went through a
+    // loading state, which would have replaced these elements.
+    expect(screen.getByRole("link", { name: "code.rs" })).toBe(row);
+    expect(screen.getByLabelText("File source")).toBe(source);
   });
 
   it("renders hostile code as text, supports wrapping, and never writes storage", async () => {
@@ -220,6 +227,48 @@ describe("secure file previews", () => {
     fireEvent.keyDown(sourceTab, { key: "Home" });
     expect(readable).toHaveAttribute("aria-selected", "true");
     expect(readable).toHaveFocus();
+  });
+
+  it("copies a Markdown file's source beside the info button and confirms it", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clipboard = Object.getOwnPropertyDescriptor(
+      Navigator.prototype,
+      "clipboard",
+    );
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      configurable: true,
+      get: () => ({ writeText }),
+    });
+    try {
+      const api = fakeApi({
+        preview: vi.fn(async () =>
+          previewDocument("# Notes\n\nline two", {
+            kind: "markdown_source",
+            language: "markdown",
+          }),
+        ),
+      });
+      render(<App api={api} navigation={new MemoryNavigation()} />);
+      fireEvent.click(await screen.findByRole("link", { name: "unsafe.md" }));
+
+      const copy = await screen.findByRole("button", { name: "Copy source" });
+      expect(copy).toHaveAttribute("data-tooltip", "Copy source");
+      expect(copy.closest(".preview-tabs-row")).not.toBeNull();
+      fireEvent.click(copy);
+
+      await waitFor(() =>
+        expect(writeText).toHaveBeenCalledWith("# Notes\n\nline two"),
+      );
+      expect(
+        await screen.findByText("Copied the source of unsafe.md."),
+      ).toBeVisible();
+    } finally {
+      if (clipboard) {
+        Object.defineProperty(Navigator.prototype, "clipboard", clipboard);
+      } else {
+        Reflect.deleteProperty(Navigator.prototype, "clipboard");
+      }
+    }
   });
 
   it("uses rendered and inert-source HTML tabs in an empty-sandbox iframe", async () => {

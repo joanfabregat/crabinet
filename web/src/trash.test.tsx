@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiClient, Share, TrashItem } from "./api";
+import { ToastProvider } from "./toast";
 import { TrashView } from "./trash";
 
 const now = new Date("2026-09-27T12:00:00Z");
@@ -26,7 +27,7 @@ function item(overrides: Partial<TrashItem> = {}): TrashItem {
 
 function renderTrash(
   trash: ApiClient["trash"],
-  share: Share = writable,
+  shares: Share[] = [writable],
 ): ReturnType<typeof vi.fn> {
   const api = {
     trash: vi.fn(trash),
@@ -36,7 +37,7 @@ function renderTrash(
   render(
     <TrashView
       api={api as unknown as ApiClient}
-      share={share}
+      shares={shares}
       csrfToken="csrf"
       userId="u-1"
       onSessionExpired={vi.fn()}
@@ -102,6 +103,126 @@ describe("TrashView", () => {
     );
   });
 
+  it("lists every share's Trash in one list under a divider per share", async () => {
+    const reference: Share = {
+      id: "ref",
+      name: "Reference",
+      access: "read",
+    };
+    const empty: Share = { id: "empty", name: "Empty", access: "read-write" };
+    renderTrash(
+      async (shareId) => ({
+        shareId,
+        items:
+          shareId === "work"
+            ? [item()]
+            : shareId === "ref"
+              ? [item({ id: "deleted-9", originalPath: "manual.pdf" })]
+              : [],
+      }),
+      [writable, reference, empty],
+    );
+
+    const work = await screen.findByRole("region", { name: /Working files/ });
+    expect(within(work).getByText("notes.txt")).toBeVisible();
+    expect(
+      within(work).getByRole("button", { name: "Restore notes.txt" }),
+    ).toBeVisible();
+    const ref = screen.getByRole("region", { name: /Reference/ });
+    expect(within(ref).getByText("manual.pdf")).toBeVisible();
+    // Read-only shares list their items without actions.
+    expect(within(ref).queryByRole("button")).toBeNull();
+    // A share with an empty Trash gets no divider.
+    expect(screen.queryByRole("region", { name: /Empty/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Empty Trash" }));
+    expect(
+      screen.getByRole("dialog", { name: "Empty Trash?" }),
+    ).toHaveTextContent("Permanently delete 1 item from Trash?");
+  });
+
+  it("states the retention period and counts items after an em dash", async () => {
+    renderTrash(async (shareId) => ({
+      shareId,
+      items: [item()],
+      retentionDays: 14,
+    }));
+
+    const title = await screen.findByRole("heading", {
+      name: /Working files/,
+    });
+    expect(title).toHaveTextContent("Working files — 1 item");
+    expect(title.querySelector(".trash-group-count")).toHaveTextContent(
+      "— 1 item",
+    );
+    expect(
+      screen.getByText(/Deleted items remain here for 14 days\./),
+    ).toBeVisible();
+  });
+
+  it("offers Undo after a restore, moving the item back to Trash", async () => {
+    const deleteEntry = vi.fn(async (shareId: string, path: string) => ({
+      shareId,
+      path,
+      outcome: "success",
+      trashId: "deleted-2",
+    }));
+    const metadata = vi.fn(async (shareId: string, path: string) => ({
+      shareId,
+      path,
+      name: "notes.txt",
+      kind: "file",
+      etag: 'W/"restored"',
+    }));
+    const api = {
+      trash: vi.fn(async (shareId: string) => ({ shareId, items: [item()] })),
+      restoreTrash: vi.fn(async () => undefined),
+      purgeTrash: vi.fn(async () => undefined),
+      metadata,
+      deleteEntry,
+    };
+    render(
+      <ToastProvider>
+        <TrashView
+          api={api as unknown as ApiClient}
+          shares={[writable]}
+          csrfToken="csrf"
+          userId="u-1"
+          onSessionExpired={vi.fn()}
+          onSessionRefreshed={vi.fn()}
+          onChanged={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Restore notes.txt" }),
+    );
+    expect(await screen.findByText("Restored notes.txt.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(
+      await screen.findByText("Moved notes.txt back to Trash."),
+    ).toBeVisible();
+    expect(metadata).toHaveBeenCalledWith("work", "projects/notes.txt");
+    expect(deleteEntry).toHaveBeenCalledWith(
+      "work",
+      "projects/notes.txt",
+      'W/"restored"',
+      "csrf",
+    );
+  });
+
+  it("shows a friendly empty state when no share has deleted items", async () => {
+    renderTrash(async (shareId) => ({ shareId, items: [] }));
+
+    const empty = await screen.findByRole("heading", {
+      name: "Trash is empty.",
+    });
+    expect(empty.closest(".trash-empty")).toHaveTextContent(
+      "Deleted files and folders appear here",
+    );
+  });
+
   it("shows an unparseable timestamp as sent", async () => {
     renderTrash(async (shareId) => ({
       shareId,
@@ -123,45 +244,32 @@ describe("TrashView", () => {
     expect(empty).toHaveClass("button", "button-danger");
     expect(empty).not.toHaveAttribute("aria-label");
     fireEvent.click(empty);
-    expect(
-      screen.getByRole("dialog", { name: "Empty Working files Trash?" }),
-    ).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Empty Trash?" })).toBeVisible();
   });
 
   it("omits Empty Trash for read-only shares", async () => {
-    renderTrash(async (shareId) => ({ shareId, items: [item()] }), {
-      ...writable,
-      access: "read",
-    });
+    renderTrash(
+      async (shareId) => ({ shareId, items: [item()] }),
+      [{ ...writable, access: "read" }],
+    );
 
     await screen.findByRole("listitem");
     expect(screen.queryByRole("button", { name: "Empty Trash" })).toBeNull();
   });
 
-  it("always offers Refresh in the header and reloads the list", async () => {
-    let items = [item()];
-    const trash = renderTrash(async (shareId) => ({ shareId, items }));
+  it("has no Refresh button in the header", async () => {
+    renderTrash(async (shareId) => ({ shareId, items: [item()] }));
 
     await screen.findByRole("listitem");
     const heading = screen
       .getByRole("heading", { name: "Trash" })
       .closest(".directory-heading") as HTMLElement;
-    const refresh = within(heading).getByRole("button", {
-      name: "Refresh Trash",
-    });
-    expect(refresh).toHaveAttribute("data-tooltip", "Refresh Trash");
-    expect(screen.queryByRole("alert")).toBeNull();
-
-    items = [];
-    fireEvent.click(refresh);
-    expect(await screen.findByText("Trash is empty.")).toBeVisible();
-    expect(trash).toHaveBeenCalledTimes(2);
     expect(
-      within(heading).getByRole("button", { name: "Refresh Trash" }),
-    ).toBeEnabled();
+      within(heading).queryByRole("button", { name: /refresh/i }),
+    ).toBeNull();
   });
 
-  it("keeps Refresh available after a load error and recovers with it", async () => {
+  it("recovers from a load error with Try again", async () => {
     let fail = true;
     renderTrash(async (shareId) => {
       if (fail) throw new Error("offline");
@@ -169,10 +277,10 @@ describe("TrashView", () => {
     });
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Could not load Trash. Try again.",
+      "Could not load Trash.",
     );
     fail = false;
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Trash" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("notes.txt")).toBeVisible();
     expect(screen.queryByRole("alert")).toBeNull();
   });

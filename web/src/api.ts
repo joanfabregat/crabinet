@@ -125,6 +125,8 @@ export interface TrashItem {
 export interface TrashPage {
   shareId: string;
   items: TrashItem[];
+  /** Days an item stays in Trash; older servers leave it out. */
+  retentionDays?: number;
 }
 
 export interface TrashResult extends MutationResult {
@@ -1266,7 +1268,12 @@ function parseTrashPage(value: unknown, expectedShareId: string): TrashPage {
         typeof item.deletedAt === "string" &&
         typeof item.deletedBy === "string" &&
         typeof item.expiresAt === "string",
-    )
+    ) ||
+    (value.retentionDays !== undefined &&
+      !(
+        Number.isInteger(value.retentionDays) &&
+        (value.retentionDays as number) > 0
+      ))
   )
     throw invalidResponse();
   return value as unknown as TrashPage;

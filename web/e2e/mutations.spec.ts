@@ -113,7 +113,12 @@ test.describe("writable share operations", () => {
       page.getByRole("heading", { name: "example.toml" }),
     ).toBeVisible();
     await previewAction(page, "example.toml", "Delete").click();
+    await page
+      .getByRole("dialog", { name: "Move example.toml to Trash?" })
+      .getByRole("button", { name: "Move to Trash" })
+      .click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByText("Moved example.toml to Trash.")).toBeVisible();
     await expect(
       directoryListing(page).getByRole("link", { name: "example.toml" }),
     ).toHaveCount(0);
@@ -122,7 +127,7 @@ test.describe("writable share operations", () => {
     ).toHaveCount(0);
     await expect(page).not.toHaveURL(/preview=|example\.toml/);
 
-    await page.goto("/trash/writable");
+    await page.goto("/trash");
     const deletedFile = page.getByRole("listitem").filter({
       has: page.getByText("example.toml", { exact: true }),
       hasText: "From e2e-folder ·",
@@ -133,11 +138,15 @@ test.describe("writable share operations", () => {
 
     await page.goto("/writable");
     await entryAction(page, "e2e-folder", "Delete").click();
+    await page
+      .getByRole("dialog", { name: "Move e2e-folder to Trash?" })
+      .getByRole("button", { name: "Move to Trash" })
+      .click();
     await expect(
       directoryListing(page).getByRole("link", { name: "e2e-folder" }),
     ).toHaveCount(0);
 
-    await page.goto("/trash/writable");
+    await page.goto("/trash");
     const deletedFolder = page.getByRole("listitem").filter({
       has: page.getByText("e2e-folder", { exact: true }),
       hasText: "From Working files ·",
@@ -228,6 +237,10 @@ test.describe("writable share operations", () => {
     ).toBeVisible();
 
     await entryAction(page, "sse-external", "Delete").click();
+    await page
+      .getByRole("dialog", { name: "Move sse-external to Trash?" })
+      .getByRole("button", { name: "Move to Trash" })
+      .click();
     await expect(page.getByRole("link", { name: "sse-external" })).toHaveCount(
       0,
     );
