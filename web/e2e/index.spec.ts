@@ -113,12 +113,19 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(page).toHaveURL(/\/read-only$/);
   sidebar = await openFolders(page);
   await expect(sidebar.getByRole("img", { name: "Read only" })).toBeVisible();
+  // Selecting a folder opens it without expanding it in the tree.
   const nested = sidebar.getByRole("link", { name: "nested" });
+  await expect(nested).toHaveCount(0);
+  await sidebar
+    .getByRole("button", { name: "Expand Reference library" })
+    .click();
   await expect(nested).toBeVisible();
 
   await nested.click();
   await expect(page).toHaveURL(/\/read-only\/nested$/);
   sidebar = await openFolders(page);
+  await expect(sidebar.getByText("No subfolders")).toHaveCount(0);
+  await sidebar.getByRole("button", { name: "Expand nested" }).click();
   await expect(sidebar.getByText("No subfolders")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
@@ -185,10 +192,14 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(page.getByRole("tooltip")).toHaveText("Sign out");
   await settingsButton.click();
   const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByRole("tab", { name: "Files" }).click();
   await expect(
     settings.getByRole("checkbox", { name: "Show hidden files" }),
   ).toBeVisible();
-  const startFolder = settings.getByRole("combobox", { name: "Start folder" });
+  await settings.getByRole("tab", { name: "Start folder" }).click();
+  const startFolder = settings.getByRole("combobox", {
+    name: "Folder to open after sign-in",
+  });
   await expect(startFolder.locator("option")).toHaveCount(3);
   await startFolder.selectOption("writable");
   await expect(startFolder).toHaveValue("writable");
@@ -466,6 +477,69 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toEqual([]);
 });
 
+test("the folder toolbar drops its labels before leaving the title's line", async ({
+  page,
+}) => {
+  const actions = page.locator(".directory-heading-actions");
+  // Buttons differ in height, so compare vertical centres: a wrapped button
+  // shows up as a second row.
+  const rows = () =>
+    actions.evaluate((element) => {
+      const centres = Array.from(element.querySelectorAll("button")).map(
+        (button) => {
+          const box = button.getBoundingClientRect();
+          return Math.round(box.top + box.height / 2);
+        },
+      );
+      return {
+        rows: new Set(centres).size,
+        overflow:
+          element.scrollWidth > element.clientWidth ||
+          element.querySelector("button")!.getBoundingClientRect().left <
+            element.getBoundingClientRect().left,
+        compact: element.classList.contains("is-compact"),
+        beside:
+          element.getBoundingClientRect().top <
+          document.querySelector("#directory-title")!.getBoundingClientRect()
+            .bottom,
+      };
+    });
+
+  // Labels fit beside the title at some width only without a preview; with
+  // one open, whether they ever fit depends on the fonts installed.
+  for (const [route, expectLabels] of [
+    ["/writable/Projects", true],
+    ["/writable/Projects/example.toml", false],
+  ] as const) {
+    if (route.endsWith(".toml")) await page.goto(route);
+    else await openSignedIn(page, route, "writer");
+    await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
+    let sawCompact = false;
+    let sawLabels = false;
+    let sawIconsBeside = false;
+    for (let width = 300; width <= 1400; width += 20) {
+      await page.setViewportSize({ width, height: 800 });
+      // Two frames let the resize observer deliver and the class apply.
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          ),
+      );
+      await expect
+        .poll(rows, { message: `${route} at ${width}px` })
+        .toMatchObject({ rows: 1, overflow: false });
+      const state = await rows();
+      sawCompact ||= state.compact;
+      sawLabels ||= !state.compact;
+      sawIconsBeside ||= state.compact && state.beside;
+    }
+    expect(sawCompact).toBe(true);
+    if (expectLabels) expect(sawLabels).toBe(true);
+    expect(sawIconsBeside).toBe(true);
+  }
+});
+
 test("an iPad in portrait shows two columns", async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 1180 });
   await openSignedIn(page);
@@ -549,7 +623,8 @@ test("night mode follows the system, can be pinned, and passes axe", async ({
         response.ok(),
     );
   const savedLight = savedAppearance("light");
-  await dialog.getByLabel("Appearance").selectOption("light");
+  await dialog.getByRole("tab", { name: "Appearance" }).click();
+  await dialog.getByLabel("Theme").selectOption("light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   expect(await pageBackground()).toContain("rgb(242, 244, 239)");
   await savedLight;
@@ -566,7 +641,8 @@ test("night mode follows the system, can be pinned, and passes axe", async ({
   // same user would inherit it; restore the default.
   await page.getByRole("button", { name: "Settings" }).click();
   const savedSystem = savedAppearance("system");
-  await dialog.getByLabel("Appearance").selectOption("system");
+  await dialog.getByRole("tab", { name: "Appearance" }).click();
+  await dialog.getByLabel("Theme").selectOption("system");
   await savedSystem;
   await expect(page.locator("html")).not.toHaveAttribute("data-theme");
 });

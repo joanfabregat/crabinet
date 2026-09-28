@@ -37,11 +37,13 @@ export const browserNavigation: BrowserNavigation = {
     const url = new URL(window.location.href);
     const route = historyRoute(url);
     const canonical = browserUrl(route);
-    // Rewrite bookmarks from the former /browse/, ?path= and ?preview= forms.
+    // Rewrite bookmarks from the former /browse/, /trash/<share>, ?path= and
+    // ?preview= forms.
     if (
       route.shareId &&
       canonical !== url.pathname + url.search &&
       (url.pathname.startsWith("/browse/") ||
+        url.pathname.startsWith("/trash/") ||
         url.searchParams.has("path") ||
         url.searchParams.has("preview"))
     ) {
@@ -67,16 +69,18 @@ export const browserNavigation: BrowserNavigation = {
 };
 
 export function routeFromUrl(url: URL): BrowserRoute {
-  const trashMatch = /^\/trash\/([^/]+)\/?$/.exec(url.pathname);
+  // One Trash lists every share. A former per-share `/trash/<share>` link
+  // still opens it, starting from that share.
+  const trashMatch = /^\/trash(?:\/([^/]+))?\/?$/.exec(url.pathname);
   if (trashMatch) {
     try {
       return {
-        shareId: decodeURIComponent(trashMatch[1]!),
+        shareId: trashMatch[1] ? decodeURIComponent(trashMatch[1]) : null,
         path: "",
         view: "trash",
       };
     } catch {
-      return { shareId: null, path: "" };
+      return { shareId: null, path: "", view: "trash" };
     }
   }
   // `/browse/` is the former prefix; links using it still resolve.
@@ -138,8 +142,8 @@ export function directoryUrl(shareId: string | null, path: string): string {
   return browserUrl({ shareId, path });
 }
 
-export function trashUrl(shareId: string): string {
-  return `/trash/${encodeURIComponent(shareId)}`;
+export function trashUrl(): string {
+  return "/trash";
 }
 
 export function previewRouteUrl(
@@ -153,8 +157,8 @@ export function previewRouteUrl(
 
 function browserUrl(route: BrowserRoute): string {
   const { shareId } = route;
+  if (route.view === "trash") return trashUrl();
   if (!shareId) return "/";
-  if (route.view === "trash") return trashUrl(shareId);
   const query = new URLSearchParams();
   const safePath = isValidVirtualPath(route.path) ? route.path : "";
   const previewPath =

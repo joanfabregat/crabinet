@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/preact";
+import { fireEvent, render, screen } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
 import { type ApiClient, type Share } from "./api";
@@ -54,49 +54,30 @@ describe("ShareTree", () => {
     expect(screen.queryByLabelText("Read and write")).not.toBeInTheDocument();
   });
 
-  it("keeps the Trash group collapsed while browsing", () => {
-    renderTree();
-
-    expect(screen.getByRole("button", { name: "Trash" })).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
-  });
-
-  it("expands the Trash group while viewing a trash", () => {
-    renderTree("trash");
-
-    expect(screen.getByRole("button", { name: "Trash" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
-    const trashShares = screen.getByRole("list", { name: "Trash shares" });
-    expect(
-      within(trashShares).getByRole("link", { name: "Working files" }),
-    ).toHaveAttribute("aria-current", "page");
-  });
-
-  it("expands the Trash group when navigating into a trash", () => {
+  it("offers one Trash link for every share, current while viewing Trash", () => {
     const view = renderTree();
 
-    view.rerender(
-      <ShareTree
-        api={{} as ApiClient}
-        shares={shares}
-        revision={0}
-        showHidden={false}
-        activeShareId="work"
-        activePath=""
-        activeView="trash"
-        navigation={navigation}
-        onMove={vi.fn()}
-        onSessionExpired={vi.fn()}
-      />,
-    );
+    const trash = screen.getByRole("link", { name: "Trash" });
+    expect(trash).toHaveAttribute("href", "/trash");
+    expect(trash).not.toHaveAttribute("aria-current");
+    expect(screen.queryByRole("list", { name: "Trash shares" })).toBeNull();
 
-    expect(screen.getByRole("button", { name: "Trash" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
+    view.unmount();
+    renderTree("trash");
+    expect(screen.getByRole("link", { name: "Trash" })).toHaveAttribute(
+      "aria-current",
+      "page",
     );
+  });
+
+  it("opens Trash from the current share", () => {
+    renderTree();
+
+    fireEvent.click(screen.getByRole("link", { name: "Trash" }));
+    expect(navigation.go).toHaveBeenCalledWith({
+      shareId: "work",
+      path: "",
+      view: "trash",
+    });
   });
 });

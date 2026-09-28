@@ -261,6 +261,8 @@ struct TrashedResponse {
 struct TrashListResponse {
     share_id: String,
     items: Vec<TrashItemResponse>,
+    /// How many days a deleted item stays in Trash before it expires.
+    retention_days: u16,
 }
 
 #[derive(Serialize)]
@@ -608,6 +610,7 @@ async fn list_trash_items(
         TrashListResponse {
             share_id: share_id.to_string(),
             items: entries.into_iter().map(TrashItemResponse::from).collect(),
+            retention_days: state.trash_retention_days(),
         },
     ))
 }
@@ -1536,6 +1539,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["items"][0]["originalPath"], "nonempty");
         assert_eq!(value["items"][0]["kind"], "directory");
+        assert_eq!(value["retentionDays"], 30);
     }
 
     #[tokio::test]

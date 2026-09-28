@@ -61,7 +61,7 @@ export function WriteToolbar({
         onClick={onCreateFile}
       >
         <FilePlus2 size={18} aria-hidden="true" />
-        New file
+        <span class="toolbar-label">New file</span>
       </button>
       <button
         class="button button-secondary toolbar-button"
@@ -69,7 +69,7 @@ export function WriteToolbar({
         onClick={onCreateFolder}
       >
         <FolderPlus size={18} aria-hidden="true" />
-        New folder
+        <span class="toolbar-label">New folder</span>
       </button>
       <button
         class="button button-secondary toolbar-button"
@@ -77,7 +77,7 @@ export function WriteToolbar({
         onClick={() => input.current?.click()}
       >
         <Upload size={18} aria-hidden="true" />
-        Upload files
+        <span class="toolbar-label">Upload files</span>
       </button>
       <input
         ref={input}
@@ -1200,12 +1200,15 @@ export function Modal({
   onClose,
   busy,
   wide = false,
+  className,
 }: {
   title: string;
   children: preact.ComponentChildren;
   onClose: () => void;
   busy: boolean;
   wide?: boolean;
+  /** An extra class on the panel, for a dialog with its own layout. */
+  className?: string;
 }) {
   const titleId = `dialog-${title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`;
   const panel = useRef<HTMLDivElement>(null);
@@ -1262,7 +1265,7 @@ export function Modal({
     >
       <div
         ref={panel}
-        class={`modal-panel${wide ? " modal-panel-wide" : ""}`}
+        class={`modal-panel${wide ? " modal-panel-wide" : ""}${className ? ` ${className}` : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

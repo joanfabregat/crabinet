@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CopyPathButton } from "./copy-path-button";
+import { ToastProvider } from "./toast";
 
 const originalClipboard = Object.getOwnPropertyDescriptor(
   Navigator.prototype,
@@ -24,10 +25,12 @@ describe("CopyPathButton", () => {
       get: () => ({ writeText }),
     });
     render(
-      <CopyPathButton
-        value="scratch/blog/Café notes.md"
-        label="Copy full path for Café notes.md"
-      />,
+      <ToastProvider>
+        <CopyPathButton
+          value="scratch/blog/Café notes.md"
+          label="Copy full path for Café notes.md"
+        />
+      </ToastProvider>,
     );
 
     const button = screen.getByRole("button", {

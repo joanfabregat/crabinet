@@ -52,6 +52,7 @@
   --code-bg: #f6f8fa;
   --code-border: #d0d7de;
   --code-ink: #1f2328;
+  --glass-highlight: rgb(255 255 255 / 70%);
   --google-bg: #ffffff;
   --google-hover-bg: #f7f8f8;
   --google-border: #747775;
@@ -111,6 +112,7 @@
     --code-bg: #0b100d;
     --code-border: #2b3731;
     --code-ink: #f0f3f6;
+    --glass-highlight: rgb(255 255 255 / 16%);
     --google-bg: #131314;
     --google-hover-bg: #1f1f21;
     --google-border: #8e918f;
@@ -168,6 +170,7 @@
   --code-bg: #0b100d;
   --code-border: #2b3731;
   --code-ink: #f0f3f6;
+  --glass-highlight: rgb(255 255 255 / 16%);
   --google-bg: #131314;
   --google-hover-bg: #1f1f21;
   --google-border: #8e918f;
@@ -438,6 +441,19 @@ select {
   color: var(--warning-ink);
 }
 
+/* A text button inside a notice, in the notice's own colour. */
+.notice-action {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
 .account-actions {
   align-items: center;
   display: flex;
@@ -456,49 +472,133 @@ select {
   width: 2rem;
 }
 
-.settings-content {
-  display: grid;
-  gap: 0.5rem;
+.settings-dialog {
+  max-width: 50rem;
 }
 
-.settings-content > label:first-child {
+/* Categories on the left, the chosen category's settings on the right. */
+.settings-layout {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: 12rem minmax(0, 1fr);
+  min-height: 22rem;
+}
+
+.settings-nav {
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding-right: 1rem;
+}
+
+.settings-nav button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0.5rem;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  font-weight: 680;
+  gap: 0.6rem;
+  min-height: 2.6rem;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.settings-nav button:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.settings-nav button[aria-selected="true"] {
+  background: var(--selected-bg);
+  color: var(--accent);
+}
+
+.settings-panel {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.settings-content {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.settings-content[hidden] {
+  display: none;
+}
+
+.settings-content h3 {
+  font-size: 1.05rem;
+  margin: 0 0 0.35rem;
+}
+
+.settings-content label {
   font-size: 0.9rem;
-  font-weight: 720;
+  font-weight: 700;
 }
 
 .settings-content p {
   margin: 0;
 }
 
-.settings-content select {
-  width: 100%;
-}
-
 .settings-content .muted {
   font-size: 0.85rem;
 }
 
-.settings-content .hidden-files-toggle,
-.settings-content .settings-subsection {
-  border-top: 1px solid var(--line);
-  margin-top: 0.75rem;
-  padding-top: 1rem;
+/* A select drawn by the page, so its padding and height hold everywhere. */
+.select-field {
+  position: relative;
 }
 
-.settings-content .settings-subsection {
-  font-size: 0.9rem;
-  font-weight: 720;
+.select-field select {
+  appearance: none;
+  cursor: pointer;
+  min-height: 3rem;
+  padding: 0.7rem 2.75rem 0.7rem 0.9rem;
+  width: 100%;
+}
+
+.select-field svg {
+  color: var(--muted);
+  pointer-events: none;
+  position: absolute;
+  right: 0.9rem;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+@media (max-width: 40rem) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .settings-nav {
+    border-bottom: 1px solid var(--line);
+    border-right: 0;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 0 0 0.75rem;
+  }
+
+  .settings-nav button {
+    flex: none;
+  }
 }
 
 .passkey-settings {
-  border-top: 1px solid var(--line);
   display: grid;
   gap: 0.75rem;
-  margin-top: 0.75rem;
-  padding-top: 1rem;
 }
 
 .passkey-settings h3 {
+  font-size: 1.05rem;
   margin: 0;
 }
 
@@ -708,72 +808,137 @@ select {
   padding-top: 0.65rem;
 }
 
-.tree-special-toggle,
+/* Lines up its icon with the folder icons in the share rows above. */
 .tree-trash-link {
   align-items: center;
-  background: transparent;
-  border: 0;
   border-radius: 0.45rem;
   color: var(--muted);
   display: flex;
-  gap: 0.45rem;
+  font-weight: 650;
+  gap: 0.3rem;
   min-height: 2.75rem;
-  padding: 0.4rem 0.6rem;
-  text-align: left;
+  padding: 0.4rem 0.6rem 0.4rem 3.05rem;
   text-decoration: none;
-  width: 100%;
 }
 
-.tree-special-toggle {
-  cursor: pointer;
-  font-weight: 700;
-  /* Centres the chevron like .tree-toggle in the share rows' first column. */
-  padding-left: calc((2.75rem - 16px) / 2);
-}
-
-.tree-special-toggle:hover,
 .tree-trash-link:hover,
 .tree-trash-link.is-selected {
-  background: var(--surface-hover);
-}
-
-.tree-trash-link {
-  padding-left: 2.55rem;
+  background: var(--selected-bg);
+  color: var(--ink);
 }
 
 .tree-trash-link.is-selected {
-  color: var(--ink);
   font-weight: 700;
 }
 
-.tree-trash-link span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.undo-toast {
-  align-items: center;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-left: 4px solid var(--accent);
-  border-radius: 0.8rem;
-  bottom: max(1.25rem, env(safe-area-inset-bottom));
-  box-shadow: var(--shadow);
+/* Bottom right; the newest toast is the lowest. */
+.toast-region {
+  align-items: flex-end;
+  bottom: max(1rem, env(safe-area-inset-bottom));
   display: flex;
-  gap: 1rem;
-  justify-content: space-between;
-  left: 50%;
-  max-width: calc(100vw - 2rem);
-  padding: 0.75rem 0.9rem 0.75rem 1.1rem;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
   position: fixed;
-  transform: translateX(-50%);
-  width: max-content;
-  z-index: 40;
+  right: max(1rem, env(safe-area-inset-right));
+  width: min(30rem, calc(100vw - 2rem));
+  z-index: 1200;
 }
 
-.undo-toast .button {
+/*
+ * Liquid glass: a translucent pane, lightly blurred so the page shows
+ * through, with a clear wash of the tone's colour, a lit top edge, and a
+ * soft drop shadow.
+ */
+.toast {
+  --toast-tone: var(--accent);
+  align-items: center;
+  animation: toast-in 180ms ease-out;
+  backdrop-filter: blur(3px) saturate(1.5);
+  -webkit-backdrop-filter: blur(3px) saturate(1.5);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--glass-highlight) 18%, transparent),
+      transparent 60%
+    ),
+    color-mix(
+      in srgb,
+      var(--toast-tone) 16%,
+      color-mix(in srgb, var(--surface) 25%, transparent)
+    );
+  border: 1px solid color-mix(in srgb, var(--toast-tone) 35%, transparent);
+  border-radius: 1.1rem;
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    inset 0 -1px 0 color-mix(in srgb, var(--glass-highlight) 35%, transparent),
+    0 0.75rem 2rem rgb(0 0 0 / 14%);
+  display: flex;
+  font-size: 1.02rem;
+  gap: 0.75rem;
+  max-width: 100%;
+  padding: 1.15rem 0.75rem 1.15rem 1.2rem;
+  pointer-events: auto;
+}
+
+.toast-warning {
+  --toast-tone: var(--warning-ink);
+}
+
+.toast-error {
+  --toast-tone: var(--danger);
+}
+
+.toast-icon {
+  color: var(--toast-tone);
   flex: none;
+}
+
+.toast-message {
+  flex: 1;
+  font-weight: 650;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast .button {
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  flex: none;
+  min-height: 2.1rem;
+  padding: 0.25rem 0.8rem;
+}
+
+.toast-close {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0.4rem;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  height: 2rem;
+  justify-content: center;
+  width: 2rem;
+}
+
+.toast-close:hover {
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem);
+  }
+}
+
+.copy-fallback-text {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+  width: 100%;
 }
 
 .trash-panel > .muted,
@@ -792,10 +957,80 @@ select {
   text-underline-offset: 0.2em;
 }
 
+.trash-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin: 0.75rem 1.25rem 0;
+}
+
+/* A divider naming the shared folder whose items follow. */
+.trash-group-title {
+  align-items: baseline;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  font-size: 0.78rem;
+  font-weight: 750;
+  gap: 0.35rem;
+  letter-spacing: 0.06em;
+  margin: 0;
+  padding-bottom: 0.45rem;
+  text-transform: uppercase;
+}
+
+.trash-group-count {
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.trash-group .notice {
+  margin-top: 0.75rem;
+}
+
 .trash-list {
   list-style: none;
-  margin: 1.5rem 1.25rem 0;
+  margin: 0;
   padding: 0;
+}
+
+.trash-list .trash-item:first-child {
+  border-top: 0;
+}
+
+.trash-empty {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 1.25rem 2rem;
+  padding: 1.25rem 1.25rem 2rem;
+  text-align: center;
+}
+
+.trash-empty-icon {
+  align-items: center;
+  background: var(--surface-subtle);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  height: 4rem;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+  width: 4rem;
+}
+
+.trash-empty h2 {
+  font-size: 1.15rem;
+  margin: 0;
+}
+
+.trash-empty p {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+  max-width: 28rem;
 }
 
 .trash-item {
@@ -1249,6 +1484,19 @@ html.preview-fullscreen-open body {
   margin-bottom: 0.25rem;
 }
 
+/* The info and copy buttons sit on the tab rule without their own frame. */
+.security-note-button,
+.preview-tab-action {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.security-note-button:hover:not(:disabled),
+.preview-tab-action:hover:not(:disabled) {
+  color: var(--ink);
+}
+
 .preview-tabs {
   display: flex;
   flex: 1;
@@ -1355,11 +1603,20 @@ html.preview-fullscreen-open body {
   text-decoration: none;
 }
 
+/* The actions sit beside the title and wrap under it only when even their
+   icon-only form does not fit there (see useCompactHeadingActions). */
 .directory-heading {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
   justify-content: space-between;
   padding: 1.4rem 1.25rem;
+}
+
+.directory-heading > :first-child {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .directory-heading-actions {
@@ -1367,7 +1624,9 @@ html.preview-fullscreen-open body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
-  justify-content: flex-end;
+  /* The heading places the group; starting at the left keeps any overflow on
+     the measurable side (scrollWidth ignores overflow to the left). */
+  justify-content: flex-start;
   max-width: 100%;
   min-width: 0;
 }
@@ -1393,9 +1652,49 @@ html.preview-fullscreen-open body {
   padding: 0.45rem 0.85rem;
 }
 
-/* The toolbar's buttons flow with the copy button, so they wrap as one row. */
+/* The toolbar's buttons share one row with the copy button and never wrap;
+   a narrow screen hides their labels instead, so no icon drops to a line of
+   its own. */
 .write-toolbar {
   display: contents;
+}
+
+.directory-heading-actions {
+  flex: none;
+  flex-wrap: nowrap;
+}
+
+.toolbar-button,
+.directory-heading-actions > * {
+  flex: none;
+}
+
+/* Set when the labelled buttons would not fit on one line. */
+.directory-heading-actions.is-compact .toolbar-button {
+  min-height: 2.35rem;
+  min-width: 2.35rem;
+  padding: 0;
+  width: 2.35rem;
+}
+
+/* Still the accessible name, only not drawn. */
+.directory-heading-actions.is-compact .toolbar-label {
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+/* Matches the copy button's touch size. */
+@media (pointer: coarse) {
+  .directory-heading-actions.is-compact .toolbar-button {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+    width: 2.75rem;
+  }
 }
 
 .write-actions,
@@ -1477,7 +1776,7 @@ html.preview-fullscreen-open body {
 
 .entry-actions-inline {
   display: flex;
-  gap: 0.55rem;
+  gap: 0.2rem;
   justify-content: flex-end;
 }
 
@@ -1725,6 +2024,7 @@ html.preview-fullscreen-open body {
 .entry-primary {
   display: flex;
   flex-direction: column;
+  gap: 0.25rem;
   min-width: 0;
 }
 
@@ -2031,40 +2331,12 @@ html.preview-fullscreen-open body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .directory-skeleton span {
+  .directory-skeleton span,
+  .toast {
     animation: none;
   }
 
   .app-footer {
     transition: none;
-  }
-}
-
-/* Where the folder list is narrow (tablets and phones, or beside a preview on
-   a laptop), the heading's buttons go under the title instead of wrapping
-   beside it. */
-@media (max-width: 66rem) {
-  .directory-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .directory-heading-actions {
-    justify-content: flex-start;
-    width: 100%;
-  }
-}
-
-@media (min-width: 66.0625rem) and (max-width: 90rem) {
-  .browser-workspace.has-preview:not(.preview-full) .directory-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .browser-workspace.has-preview:not(.preview-full) .directory-heading-actions {
-    justify-content: flex-start;
-    width: 100%;
   }
 }

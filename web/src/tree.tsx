@@ -144,9 +144,6 @@ export function ShareTree({
   onSessionExpired,
 }: ShareTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [trashExpanded, setTrashExpanded] = useState(
-    () => activeView === "trash",
-  );
   const [state, setState] = useState<Record<string, TreeState>>({});
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
@@ -225,11 +222,6 @@ export function ShareTree({
     }
   }, [expanded, load, revision]);
 
-  // Viewing a trash keeps its group open so the current share stays visible.
-  useEffect(() => {
-    if (activeView === "trash") setTrashExpanded(true);
-  }, [activeView]);
-
   const toggle = (shareId: string, path: string) => {
     const nodeKey = key(shareId, path);
     const opening = !expanded.has(nodeKey);
@@ -239,13 +231,6 @@ export function ShareTree({
       else next.delete(nodeKey);
       return next;
     });
-  };
-
-  const expand = (shareId: string, path: string) => {
-    const nodeKey = key(shareId, path);
-    setExpanded((current) =>
-      current.has(nodeKey) ? current : new Set(current).add(nodeKey),
-    );
   };
 
   const drop = (
@@ -284,7 +269,6 @@ export function ShareTree({
                 activeView={activeView}
                 navigation={navigation}
                 onToggle={toggle}
-                onExpand={expand}
                 onLoadMore={load}
                 onDrop={drop}
               />
@@ -292,53 +276,25 @@ export function ShareTree({
           ))}
         </ul>
         <div class="tree-special" aria-label="Special folders">
-          <button
-            type="button"
-            class={`tree-special-toggle${activeView === "trash" ? " is-active" : ""}`}
-            aria-expanded={trashExpanded}
-            aria-controls="tree-trash-shares"
-            onClick={() => setTrashExpanded((value) => !value)}
+          {/* One Trash for every shared folder; it lists them by share. */}
+          <a
+            class={`tree-trash-link${activeView === "trash" ? " is-selected" : ""}`}
+            href={trashUrl()}
+            aria-current={activeView === "trash" ? "page" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              // The route keeps the current share, so leaving Trash returns
+              // to it; the URL stays /trash.
+              navigation.go({
+                shareId: activeShareId,
+                path: "",
+                view: "trash",
+              });
+            }}
           >
-            {trashExpanded ? (
-              <ChevronDown size={16} />
-            ) : (
-              <ChevronRight size={16} />
-            )}
             <Trash2 size={17} aria-hidden="true" />
             <span>Trash</span>
-          </button>
-          {trashExpanded && (
-            <ul
-              id="tree-trash-shares"
-              class="tree-list tree-trash-shares"
-              aria-label="Trash shares"
-            >
-              {shares.map((share) => (
-                <li class="tree-item" key={share.id}>
-                  <a
-                    class={`tree-trash-link${activeView === "trash" && activeShareId === share.id ? " is-selected" : ""}`}
-                    href={trashUrl(share.id)}
-                    aria-current={
-                      activeView === "trash" && activeShareId === share.id
-                        ? "page"
-                        : undefined
-                    }
-                    onClick={(event) => {
-                      event.preventDefault();
-                      navigation.go({
-                        shareId: share.id,
-                        path: "",
-                        view: "trash",
-                      });
-                    }}
-                  >
-                    <Folder size={17} aria-hidden="true" />
-                    <span>{share.name}</span>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          )}
+          </a>
         </div>
       </div>
     </aside>
@@ -358,7 +314,6 @@ interface TreeNodeProps {
   activeView?: "trash";
   navigation: BrowserNavigation;
   onToggle: (shareId: string, path: string) => void;
-  onExpand: (shareId: string, path: string) => void;
   onLoadMore: (shareId: string, path: string, cursor?: string) => Promise<void>;
   onDrop: (event: DragEvent, share: Share, path: string) => void;
 }
@@ -377,7 +332,6 @@ function TreeNode(props: TreeNodeProps) {
     activeView,
     navigation,
     onToggle,
-    onExpand,
     onLoadMore,
     onDrop,
   } = props;
@@ -415,7 +369,6 @@ function TreeNode(props: TreeNodeProps) {
           aria-current={selected ? "page" : undefined}
           onClick={(event) => {
             event.preventDefault();
-            onExpand(share.id, path);
             navigation.go({ shareId: share.id, path });
           }}
         >

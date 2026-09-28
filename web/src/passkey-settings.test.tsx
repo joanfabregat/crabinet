@@ -310,6 +310,8 @@ describe("passkey settings", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    // Passkeys is listed once the server reports it is enabled.
+    fireEvent.click(await screen.findByRole("tab", { name: "Passkeys" }));
     await requestNewPasskey();
     await waitFor(() => expect(webauthn.startRegistration).toHaveBeenCalled());
 

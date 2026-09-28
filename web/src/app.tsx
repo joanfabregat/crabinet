@@ -1,22 +1,32 @@
 import { type JSX } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "preact/hooks";
 import {
   browserSupportsWebAuthn,
   startAuthentication,
 } from "@simplewebauthn/browser";
 import {
+  ChevronDown,
   Download,
   ExternalLink,
+  EyeOff,
   FilePenLine,
   FolderInput,
   FolderOpen,
   FolderTree,
   Info,
+  KeyRound,
   LogOut,
   Maximize2,
   Minimize2,
   Pencil,
   Settings2,
+  SunMoon,
   Trash2,
   Upload,
   X,
@@ -66,6 +76,7 @@ import {
 import { SafeMarkdown } from "./safe-markdown";
 import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
+import { ToastProvider, useToast } from "./toast";
 import { TrashView } from "./trash";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 import {
@@ -177,6 +188,8 @@ export function App({
   useEffect(() => {
     if (auth.status !== "authenticated" || auth.session.shares.length === 0)
       return;
+    // Trash spans every share, so it needs no share of its own.
+    if (route.view === "trash") return;
     const routeIsAllowed = auth.session.shares.some(
       (share) => share.id === route.shareId,
     );
@@ -188,7 +201,7 @@ export function App({
         { replace: true },
       );
     }
-  }, [auth, navigation, route.shareId]);
+  }, [auth, navigation, route.shareId, route.view]);
 
   if (auth.status === "loading") return <LoadingScreen />;
 
@@ -216,33 +229,35 @@ export function App({
   }
 
   return (
-    <AuthenticatedShell
-      api={api}
-      navigation={navigation}
-      route={route}
-      session={auth.session}
-      onSessionExpired={handleSessionExpired}
-      onSignedOut={handleSignedOut}
-      onDefaultFolderChanged={(folder) =>
-        setAuth((current) =>
-          current.status === "authenticated"
-            ? {
-                ...current,
-                session: { ...current.session, defaultFolder: folder },
-              }
-            : current,
-        )
-      }
-      onPreferencesChanged={handlePreferencesChanged}
-      onSessionRefreshed={(session) =>
-        setAuth((current) =>
-          current.status === "authenticated" &&
-          current.session.user.id === session.user.id
-            ? { status: "authenticated", session }
-            : current,
-        )
-      }
-    />
+    <ToastProvider>
+      <AuthenticatedShell
+        api={api}
+        navigation={navigation}
+        route={route}
+        session={auth.session}
+        onSessionExpired={handleSessionExpired}
+        onSignedOut={handleSignedOut}
+        onDefaultFolderChanged={(folder) =>
+          setAuth((current) =>
+            current.status === "authenticated"
+              ? {
+                  ...current,
+                  session: { ...current.session, defaultFolder: folder },
+                }
+              : current,
+          )
+        }
+        onPreferencesChanged={handlePreferencesChanged}
+        onSessionRefreshed={(session) =>
+          setAuth((current) =>
+            current.status === "authenticated" &&
+            current.session.user.id === session.user.id
+              ? { status: "authenticated", session }
+              : current,
+          )
+        }
+      />
+    </ToastProvider>
   );
 }
 
@@ -493,13 +508,17 @@ function AuthenticatedShell({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [passkeysVisible, setPasskeysVisible] = useState(false);
+  const showToast = useToast();
   const [preferencesError, setPreferencesError] = useState<string>();
   const { showHiddenFiles, theme: themePreference } = session.preferences;
   const legacyCheckedUser = useRef<string>();
   const carryingTheme = useRef<ThemePreference>();
-  const selectedShare = session.shares.find(
-    (share) => share.id === route.shareId,
-  );
+  // Trash opened from a link has no share; the folder tree then starts from
+  // the first one.
+  const selectedShare =
+    session.shares.find((share) => share.id === route.shareId) ??
+    (route.view === "trash" ? session.shares[0] : undefined);
   const defaultFolder = session.defaultFolder ?? null;
   const defaultShare = session.shares.find(
     (share) => share.id === defaultFolder?.shareId,
@@ -539,6 +558,15 @@ function AuthenticatedShell({
       );
       // Only the fields sent here: another change may still be in flight.
       onPreferencesChanged(pickPreferences(saved, update));
+      if (!carryOver) {
+        showToast(
+          update.theme !== undefined
+            ? "Appearance saved."
+            : update.showHiddenFiles
+              ? "Hidden files are now shown."
+              : "Hidden files are now hidden.",
+        );
+      }
       return true;
     } catch (error) {
       if (carryOver) return false;
@@ -632,6 +660,7 @@ function AuthenticatedShell({
         (token) => api.updateDefaultFolder(folder, token),
       );
       onDefaultFolderChanged(saved);
+      showToast("Start folder saved.");
     } catch (error) {
       if (isUnauthorized(error)) {
         onSessionExpired();
@@ -712,80 +741,116 @@ function AuthenticatedShell({
           title="Settings"
           onClose={() => setSettingsOpen(false)}
           busy={savingPreferences || passkeyBusy}
+          className="settings-dialog"
         >
-          <div class="settings-content">
-            <label for="start-folder">Start folder</label>
-            <select
-              id="start-folder"
-              value={startFolderValue}
-              disabled={savingPreferences}
-              onChange={(event) => {
-                const shareId = event.currentTarget.value;
-                if (shareId === "/") return;
-                void saveDefaultFolder(shareId ? { shareId, path: "" } : null);
-              }}
-            >
-              <option value="">First shared folder</option>
-              {showCurrentStartFolder && (
-                <option value="/" disabled>
-                  {defaultShare
-                    ? `Current: ${defaultShare.name} / ${defaultFolder?.path}`
-                    : "Current: a folder you can no longer access"}
-                </option>
-              )}
-              {session.shares.map((share) => (
-                <option key={share.id} value={share.id}>
-                  {share.name}
-                </option>
-              ))}
-            </select>
-            <p class="muted">
-              This choice follows your account across devices.
-            </p>
-            <label class="hidden-files-toggle">
-              <input
-                type="checkbox"
-                checked={showHiddenFiles}
-                onChange={(event) =>
-                  updateShowHiddenFiles(event.currentTarget.checked)
-                }
-              />
-              Show hidden files
-            </label>
-            <p class="muted">
-              This setting follows your account across devices.
-            </p>
-            <label class="settings-subsection" for="theme-preference">
-              Appearance
-            </label>
-            <select
-              id="theme-preference"
-              value={themePreference}
-              onChange={(event) =>
-                updateThemePreference(
-                  event.currentTarget.value as ThemePreference,
-                )
-              }
-            >
-              <option value="system">Match system</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-            <p class="muted">
-              This setting follows your account across devices.
-            </p>
-            {preferencesError && (
-              <Notice tone="danger">{preferencesError}</Notice>
+          <SettingsLayout
+            sections={[
+              { id: "start-folder", label: "Start folder", icon: FolderOpen },
+              { id: "files", label: "Files", icon: EyeOff },
+              { id: "appearance", label: "Appearance", icon: SunMoon },
+              ...(passkeysVisible
+                ? [{ id: "passkeys", label: "Passkeys", icon: KeyRound }]
+                : []),
+            ]}
+          >
+            {(section) => (
+              <>
+                {preferencesError && (
+                  <Notice tone="danger">{preferencesError}</Notice>
+                )}
+                <div
+                  class="settings-content"
+                  hidden={section !== "start-folder"}
+                >
+                  <h3>Start folder</h3>
+                  <label for="start-folder">Folder to open after sign-in</label>
+                  <div class="select-field">
+                    <select
+                      id="start-folder"
+                      value={startFolderValue}
+                      disabled={savingPreferences}
+                      onChange={(event) => {
+                        const shareId = event.currentTarget.value;
+                        if (shareId === "/") return;
+                        void saveDefaultFolder(
+                          shareId ? { shareId, path: "" } : null,
+                        );
+                      }}
+                    >
+                      <option value="">First shared folder</option>
+                      {showCurrentStartFolder && (
+                        <option value="/" disabled>
+                          {defaultShare
+                            ? `Current: ${defaultShare.name} / ${defaultFolder?.path}`
+                            : "Current: a folder you can no longer access"}
+                        </option>
+                      )}
+                      {session.shares.map((share) => (
+                        <option key={share.id} value={share.id}>
+                          {share.name}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown size={18} aria-hidden="true" />
+                  </div>
+                  <p class="muted">
+                    This choice follows your account across devices.
+                  </p>
+                </div>
+                <div class="settings-content" hidden={section !== "files"}>
+                  <h3>Files</h3>
+                  <label class="hidden-files-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showHiddenFiles}
+                      onChange={(event) =>
+                        updateShowHiddenFiles(event.currentTarget.checked)
+                      }
+                    />
+                    Show hidden files
+                  </label>
+                  <p class="muted">
+                    This setting follows your account across devices.
+                  </p>
+                </div>
+                <div class="settings-content" hidden={section !== "appearance"}>
+                  <h3>Appearance</h3>
+                  <label for="theme-preference">Theme</label>
+                  <div class="select-field">
+                    <select
+                      id="theme-preference"
+                      value={themePreference}
+                      onChange={(event) =>
+                        updateThemePreference(
+                          event.currentTarget.value as ThemePreference,
+                        )
+                      }
+                    >
+                      <option value="system">Match system</option>
+                      <option value="light">Light</option>
+                      <option value="dark">Dark</option>
+                    </select>
+                    <ChevronDown size={18} aria-hidden="true" />
+                  </div>
+                  <p class="muted">
+                    This setting follows your account across devices.
+                  </p>
+                </div>
+                {/* Stays mounted, so it can report whether passkeys are on. */}
+                <div class="settings-content" hidden={section !== "passkeys"}>
+                  <PasskeySettings
+                    api={api}
+                    csrfToken={session.csrfToken}
+                    userId={session.user.id}
+                    onSessionExpired={onSessionExpired}
+                    onSessionRefreshed={onSessionRefreshed}
+                    onBusyChange={setPasskeyBusy}
+                    onVisibleChange={setPasskeysVisible}
+                  />
+                </div>
+              </>
             )}
-            <PasskeySettings
-              api={api}
-              csrfToken={session.csrfToken}
-              userId={session.user.id}
-              onSessionExpired={onSessionExpired}
-              onSessionRefreshed={onSessionRefreshed}
-              onBusyChange={setPasskeyBusy}
-            />
-          </div>
+          </SettingsLayout>
         </Modal>
       )}
       {logoutError && (
@@ -859,12 +924,12 @@ function DirectoryBrowser({
   const [fileDragActive, setFileDragActive] = useState(false);
   const [previewOperationError, setPreviewOperationError] = useState<string>();
   const [deleteError, setDeleteError] = useState<string>();
-  const [recentlyDeleted, setRecentlyDeleted] = useState<{
-    shareId: string;
-    id: string;
-    name: string;
+  const [pendingDelete, setPendingDelete] = useState<{
+    entry: DirectoryEntry;
+    path: string;
   }>();
   const [deletingPath, setDeletingPath] = useState<string>();
+  const showToast = useToast();
   // On narrow screens the tree lives in a drawer opened from "Folders".
   const [treeOpen, setTreeOpen] = useState(false);
   const treeToggleRef = useRef<HTMLButtonElement>(null);
@@ -875,9 +940,15 @@ function DirectoryBrowser({
   const previewTriggerRef = useRef<HTMLAnchorElement>();
   const operationLocation = useRef(`${share.id}\u0000${route.path}`);
   const focusedLocation = useRef<string>();
+  const shownListing = useRef<string>();
   const activePreview = useRef(route.previewPath);
   activePreview.current = route.previewPath;
   const writable = share.access === "read-write";
+  // The preview's opening, closing, and full-screen mode change the heading's
+  // width, so they re-measure at once instead of waiting for the observer.
+  const [headingRowRef, headingActionsCompact] = useCompactHeadingActions(
+    `${writable}\0${share.id}\0${route.path}\0${route.previewPath ?? ""}\0${route.previewMode ?? ""}`,
+  );
   const visibleEntries =
     page?.entries.filter(
       (entry) =>
@@ -900,13 +971,14 @@ function DirectoryBrowser({
         onSessionRefreshed,
         (token) => api.deleteEntry(share.id, path, metadata.etag, token),
       );
-      setRecentlyDeleted({
-        shareId: share.id,
-        id: result.trashId,
-        name: entry.name,
+      setPendingDelete(undefined);
+      const deleted = { shareId: share.id, id: result.trashId, entry, path };
+      showToast(`Moved ${entry.name} to Trash.`, {
+        action: { label: "Undo", onClick: () => void undoDelete(deleted) },
       });
       changed({ kind: "delete", entry, path });
     } catch (cause) {
+      setPendingDelete(undefined);
       if (isUnauthorized(cause)) onSessionExpired();
       else
         setDeleteError(
@@ -919,18 +991,31 @@ function DirectoryBrowser({
     }
   };
 
-  const undoDelete = async () => {
-    const deleted = recentlyDeleted;
-    if (!deleted) return;
+  const undoDelete = async (deleted: {
+    shareId: string;
+    id: string;
+    entry: DirectoryEntry;
+    path: string;
+  }) => {
     try {
       await withCsrfRetry(api, csrfToken, userId, onSessionRefreshed, (token) =>
         api.restoreTrash(deleted.shareId, deleted.id, undefined, token),
       );
-      setRecentlyDeleted(undefined);
+      // Undoing the restore moves it back without asking again: the
+      // person already confirmed this deletion once.
+      showToast(`Restored ${deleted.entry.name}.`, {
+        action: {
+          label: "Undo",
+          onClick: () => void deleteToTrash(deleted.entry, deleted.path),
+        },
+      });
       setRefreshKey((value) => value + 1);
     } catch (cause) {
       if (isUnauthorized(cause)) onSessionExpired();
-      else setDeleteError("Could not undo. Open Trash to restore the item.");
+      else
+        showToast("Could not undo. Open Trash to restore the item.", {
+          tone: "error",
+        });
     }
   };
 
@@ -954,6 +1039,7 @@ function DirectoryBrowser({
     if (operationLocation.current !== nextLocation) {
       operationLocation.current = nextLocation;
       setOperation(undefined);
+      setPendingDelete(undefined);
       setUploadSelection(undefined);
     }
   }, [route.path, share.id]);
@@ -1070,8 +1156,15 @@ function DirectoryBrowser({
     const shouldFocusHeading = focusedLocation.current !== location;
     focusedLocation.current = location;
     loadMoreController.current?.abort();
-    setLoading(true);
-    setPage(undefined);
+    // A change event reloads the listing already on screen. Keep it until the
+    // new one arrives, so the rows are replaced in place instead of flashing
+    // through the loading skeleton.
+    const listing = `${location}\u0000${showHiddenFiles}`;
+    if (shownListing.current !== listing) {
+      shownListing.current = listing;
+      setLoading(true);
+      setPage(undefined);
+    }
     setError(undefined);
 
     api
@@ -1098,6 +1191,7 @@ function DirectoryBrowser({
             onSessionExpired();
             return;
           }
+          setPage(undefined);
           const error = asApiError(cause);
           // A link may end in a file name: open its folder and preview it.
           if (error.kind === "not-found" && route.path && !route.previewPath) {
@@ -1247,7 +1341,18 @@ function DirectoryBrowser({
     destinationPath?: string,
   ) => {
     setOperation(undefined);
+    if (completedOperation.kind === "move" && destinationPath !== undefined) {
+      const folder = parentPath(destinationPath);
+      showToast(
+        `Moved ${completedOperation.entry.name} to ${folder ? folder.split("/").at(-1) : share.name}.`,
+      );
+    } else if (completedOperation.kind === "rename" && destinationPath) {
+      showToast(
+        `Renamed ${completedOperation.entry.name} to ${destinationPath.split("/").at(-1)}.`,
+      );
+    }
     if (completedOperation.kind === "create-file" && destinationPath) {
+      showToast(`Created ${destinationPath.split("/").at(-1)}.`);
       navigation.go({
         shareId: share.id,
         path: route.path,
@@ -1289,7 +1394,7 @@ function DirectoryBrowser({
     if (listedEntry) {
       if (kind === "edit" && listedEntry.kind !== "file") return;
       if (kind === "delete") {
-        void deleteToTrash(listedEntry, previewPath);
+        setPendingDelete({ entry: listedEntry, path: previewPath });
         return;
       }
       setOperation({ kind, entry: listedEntry, path: previewPath });
@@ -1313,10 +1418,10 @@ function DirectoryBrowser({
           return;
         }
         if (kind === "delete") {
-          void deleteToTrash(
-            { name: metadata.name, kind: metadata.kind },
-            previewPath,
-          );
+          setPendingDelete({
+            entry: { name: metadata.name, kind: metadata.kind },
+            path: previewPath,
+          });
           return;
         }
         setOperation({
@@ -1340,7 +1445,7 @@ function DirectoryBrowser({
 
   const chooseOperation = (operation: EntryOperation) => {
     if (operation.kind === "delete")
-      void deleteToTrash(operation.entry, operation.path);
+      setPendingDelete({ entry: operation.entry, path: operation.path });
     else setOperation(operation);
   };
 
@@ -1395,7 +1500,7 @@ function DirectoryBrowser({
       {route.view === "trash" ? (
         <TrashView
           api={api}
-          share={share}
+          shares={shares}
           csrfToken={csrfToken}
           userId={userId}
           onSessionExpired={onSessionExpired}
@@ -1404,14 +1509,39 @@ function DirectoryBrowser({
         />
       ) : (
         <div class="directory-column">
-          {recentlyDeleted && (
-            <UndoToast
-              key={recentlyDeleted.id}
-              onUndo={() => void undoDelete()}
-              onExpire={() => setRecentlyDeleted(undefined)}
+          {pendingDelete && (
+            <Modal
+              title={`Move ${pendingDelete.entry.name} to Trash?`}
+              busy={Boolean(deletingPath)}
+              onClose={() => setPendingDelete(undefined)}
             >
-              Moved {recentlyDeleted.name} to Trash.
-            </UndoToast>
+              <p>
+                {pendingDelete.entry.kind === "directory"
+                  ? `${pendingDelete.entry.name} and everything in it will move to Trash.`
+                  : `${pendingDelete.entry.name} will move to Trash.`}{" "}
+                You can restore it from Trash until it expires.
+              </p>
+              <div class="dialog-actions">
+                <button
+                  type="button"
+                  class="button button-secondary"
+                  disabled={Boolean(deletingPath)}
+                  onClick={() => setPendingDelete(undefined)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="button button-danger"
+                  disabled={Boolean(deletingPath)}
+                  onClick={() =>
+                    void deleteToTrash(pendingDelete.entry, pendingDelete.path)
+                  }
+                >
+                  {deletingPath ? "Moving…" : "Move to Trash"}
+                </button>
+              </div>
+            </Modal>
           )}
           <section class="directory-panel" aria-labelledby="directory-title">
             {deleteError && <Notice tone="danger">{deleteError}</Notice>}
@@ -1449,13 +1579,15 @@ function DirectoryBrowser({
               </ol>
             </nav>
 
-            <div class="directory-heading">
+            <div class="directory-heading" ref={headingRowRef}>
               <div>
                 <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
                   {crumbs.at(-1)?.name ?? share.name}
                 </h1>
               </div>
-              <div class="directory-heading-actions">
+              <div
+                class={`directory-heading-actions${headingActionsCompact ? " is-compact" : ""}`}
+              >
                 {writable && (
                   <WriteToolbar
                     onCreateFile={() => setOperation({ kind: "create-file" })}
@@ -1776,11 +1908,18 @@ function PreviewPanel({
   const titleRef = useRef<HTMLHeadingElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const filename = path.split("/").at(-1) ?? path;
+  const shownPath = useRef<string>();
 
   useEffect(() => {
     const controller = new AbortController();
-    setState({ status: "loading" });
-    setMetadataState({ status: "loading" });
+    // A change event reloads the file already on screen; keep it until the
+    // new content arrives instead of flashing through the loading state.
+    const shown = `${shareId}\u0000${path}`;
+    if (shownPath.current !== shown) {
+      shownPath.current = shown;
+      setState({ status: "loading" });
+      setMetadataState({ status: "loading" });
+    }
     const load = async () => {
       try {
         const document = await api.preview(shareId, path, controller.signal);
@@ -1861,8 +2000,13 @@ function PreviewPanel({
   const metadata =
     metadataState.status === "ready" ? metadataState.metadata : undefined;
   const previewDocument = state.status === "ready" ? state.document : undefined;
-  // The editor handles text only; images keep the other actions.
-  const editable = previewDocument?.kind !== "image";
+  // The editor accepts the same UTF-8 text, within the same size limit, that
+  // the preview does. Binary, oversized, and unreadable files fail to preview,
+  // and images preview without being text, so none of them offer Edit.
+  const editable =
+    previewDocument !== undefined &&
+    previewDocument.kind !== "image" &&
+    !previewDocument.truncated;
   const assetRevision = `${revision}-${refreshKey}`;
 
   return (
@@ -2035,6 +2179,7 @@ function PreviewContent({
     return (
       <HtmlPreview
         filename={filename}
+        source={document.source}
         renderedUrl={htmlRenderedUrl}
         sourceUrl={htmlSourceUrl}
       />
@@ -2068,7 +2213,7 @@ function PreviewContent({
   }
 
   if (document.kind === "markdown_source") {
-    return <MarkdownPreview document={document} />;
+    return <MarkdownPreview document={document} filename={filename} />;
   }
 
   return <SourcePreview document={document} />;
@@ -2076,10 +2221,12 @@ function PreviewContent({
 
 function HtmlPreview({
   filename,
+  source,
   renderedUrl,
   sourceUrl,
 }: {
   filename: string;
+  source: string;
   renderedUrl: string;
   sourceUrl: string;
 }) {
@@ -2145,6 +2292,7 @@ function HtmlPreview({
           Rendered HTML runs in an isolated sandbox. Scripts, forms, navigation,
           storage, popups, and network requests are disabled.
         </SecurityNote>
+        <CopySourceButton source={source} filename={filename} />
       </div>
       <iframe
         class="html-source-frame"
@@ -2197,7 +2345,13 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
   );
 }
 
-function MarkdownPreview({ document }: { document: PreviewDocument }) {
+function MarkdownPreview({
+  document,
+  filename,
+}: {
+  document: PreviewDocument;
+  filename: string;
+}) {
   const [mode, setMode] = useState<"readable" | "source">("readable");
   const readableTab = useRef<HTMLButtonElement>(null);
   const sourceTab = useRef<HTMLButtonElement>(null);
@@ -2254,6 +2408,7 @@ function MarkdownPreview({ document }: { document: PreviewDocument }) {
           Raw HTML, links, images, and embeds are displayed as text and are
           never activated.
         </SecurityNote>
+        <CopySourceButton source={document.source} filename={filename} />
       </div>
       {mode === "readable" ? (
         <div
@@ -2298,6 +2453,26 @@ function SecurityNote({ children }: { children: string }) {
     <TooltipButton className="security-note-button" label={children}>
       <Info size={18} aria-hidden="true" />
     </TooltipButton>
+  );
+}
+
+function CopySourceButton({
+  source,
+  filename,
+}: {
+  source: string;
+  filename: string;
+}) {
+  return (
+    <CopyPathButton
+      value={source}
+      label="Copy source"
+      className="icon-button preview-tab-action"
+      size={18}
+      copiedMessage={`Copied the source of ${filename}.`}
+      fallbackTitle="Copy source"
+      fallbackLabel="Select and copy the source"
+    />
   );
 }
 
@@ -2436,59 +2611,150 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-const undoToastDurationMs = 12_000;
+/**
+ * Whether a heading's actions should drop their labels. The heading wraps its
+ * actions under the title only as a last resort: labelled buttons beside the
+ * title, then icon-only buttons beside it, then under it, labelled again if
+ * they fit the full width. It is measured rather than guessed from a
+ * breakpoint, so each step happens exactly when the previous one no longer
+ * fits. `contentKey` re-measures when the title or buttons change without a
+ * resize.
+ */
+function useCompactHeadingActions(contentKey: unknown) {
+  const [heading, setHeading] = useState<HTMLElement | null>(null);
+  const [compact, setCompact] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!heading || typeof ResizeObserver === "undefined") return;
+    const title = heading.firstElementChild as HTMLElement | null;
+    const actions = heading.querySelector<HTMLElement>(
+      ".directory-heading-actions",
+    );
+    if (!title || !actions) return;
+    const measure = () => {
+      // Measure both sizes, then restore the class before the browser
+      // paints, so nothing flickers.
+      const wasCompact = actions.classList.contains("is-compact");
+      actions.classList.remove("is-compact");
+      const full = actions.scrollWidth;
+      actions.classList.add("is-compact");
+      const iconsOnly = actions.scrollWidth;
+      if (!wasCompact) actions.classList.remove("is-compact");
+
+      const style = getComputedStyle(heading);
+      const available =
+        heading.clientWidth -
+        parseFloat(style.paddingLeft) -
+        parseFloat(style.paddingRight);
+      const beside =
+        title.getBoundingClientRect().width + parseFloat(style.columnGap);
+      const fullFitsBeside = beside + full <= available;
+      const iconsFitBeside = beside + iconsOnly <= available;
+      setCompact(!fullFitsBeside && (iconsFitBeside || full > available));
+    };
+    measure();
+    // The title and buttons also change size without the heading doing so,
+    // for example when the web font replaces the fallback.
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    observer.observe(title);
+    observer.observe(actions);
+    let active = true;
+    void document.fonts?.ready.then(() => {
+      if (active) measure();
+    });
+    return () => {
+      active = false;
+      observer.disconnect();
+    };
+  }, [heading, contentKey]);
+
+  return [setHeading, compact] as const;
+}
+
+interface SettingsSection {
+  id: string;
+  label: string;
+  icon: typeof Info;
+}
 
 /**
- * A toast pinned to the bottom of the viewport, so the list does not jump.
- * Its countdown pauses while the pointer or keyboard focus is on it.
+ * Settings categories listed in a column of vertical tabs, beside the chosen
+ * category's settings. Every panel stays mounted and only the chosen one is
+ * shown, so a section can load or report its state while hidden.
  */
-function UndoToast({
+function SettingsLayout({
+  sections,
   children,
-  onUndo,
-  onExpire,
 }: {
-  children: preact.ComponentChildren;
-  onUndo: () => void;
-  onExpire: () => void;
+  sections: SettingsSection[];
+  children: (section: string) => preact.ComponentChildren;
 }) {
-  const [paused, setPaused] = useState({ hover: false, focus: false });
-  const remaining = useRef(undoToastDurationMs);
-  const onExpireRef = useRef(onExpire);
-  onExpireRef.current = onExpire;
-  const running = !paused.hover && !paused.focus;
+  const [chosen, setChosen] = useState(sections[0]!.id);
+  const tabs = useRef<Record<string, HTMLButtonElement | null>>({});
+  // A section can disappear, such as Passkeys when the server turns it off.
+  const active = sections.some((section) => section.id === chosen)
+    ? chosen
+    : sections[0]!.id;
 
-  useEffect(() => {
-    if (!running) return;
-    const startedAt = Date.now();
-    const timer = window.setTimeout(
-      () => onExpireRef.current(),
-      remaining.current,
-    );
-    return () => {
-      window.clearTimeout(timer);
-      remaining.current = Math.max(
-        0,
-        remaining.current - (Date.now() - startedAt),
-      );
-    };
-  }, [running]);
+  const choose = (id: string) => {
+    setChosen(id);
+    tabs.current[id]?.focus();
+  };
+
+  const handleKeys = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
+    const index = sections.findIndex((section) => section.id === active);
+    const next =
+      event.key === "ArrowDown" || event.key === "ArrowRight"
+        ? sections[(index + 1) % sections.length]
+        : event.key === "ArrowUp" || event.key === "ArrowLeft"
+          ? sections[(index - 1 + sections.length) % sections.length]
+          : event.key === "Home"
+            ? sections[0]
+            : event.key === "End"
+              ? sections.at(-1)
+              : undefined;
+    if (!next) return;
+    event.preventDefault();
+    choose(next.id);
+  };
 
   return (
-    <div
-      class="undo-toast"
-      role="status"
-      onMouseEnter={() => setPaused((value) => ({ ...value, hover: true }))}
-      onMouseLeave={() => setPaused((value) => ({ ...value, hover: false }))}
-      onFocusIn={() => setPaused((value) => ({ ...value, focus: true }))}
-      onFocusOut={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-          setPaused((value) => ({ ...value, focus: false }));
-      }}
-    >
-      <span>{children}</span>
-      <button type="button" class="button button-secondary" onClick={onUndo}>
-        Undo
-      </button>
+    <div class="settings-layout">
+      <div
+        class="settings-nav"
+        role="tablist"
+        aria-label="Settings categories"
+        aria-orientation="vertical"
+      >
+        {sections.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            ref={(element) => {
+              tabs.current[id] = element;
+            }}
+            type="button"
+            role="tab"
+            id={`settings-tab-${id}`}
+            aria-controls="settings-panel"
+            aria-selected={active === id}
+            tabIndex={active === id ? 0 : -1}
+            onClick={() => choose(id)}
+            onKeyDown={handleKeys}
+          >
+            <Icon size={18} aria-hidden="true" />
+            {label}
+          </button>
+        ))}
+      </div>
+      <div
+        class="settings-panel"
+        id="settings-panel"
+        role="tabpanel"
+        aria-labelledby={`settings-tab-${active}`}
+      >
+        {children(active)}
+      </div>
     </div>
   );
 }
