@@ -2161,15 +2161,6 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
   const [wrap, setWrap] = useState(true);
   return (
     <div class="source-preview">
-      <div class="preview-options">
-        <Button
-          variant="secondary"
-          aria-pressed={wrap}
-          onClick={() => setWrap((value) => !value)}
-        >
-          Wrap lines
-        </Button>
-      </div>
       {document.truncated && (
         <Notice tone="warning">
           This preview is truncated. Download the file to see all content.
@@ -2191,6 +2182,16 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
         >
           <code>{document.source}</code>
         </pre>
+      )}
+      {document.source !== "" && (
+        <label class="preview-options">
+          <input
+            type="checkbox"
+            checked={wrap}
+            onChange={(event) => setWrap(event.currentTarget.checked)}
+          />
+          Wrap lines
+        </label>
       )}
     </div>
   );

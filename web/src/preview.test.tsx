@@ -173,11 +173,11 @@ describe("secure file previews", () => {
     expect(document.querySelector("script")).toBeNull();
     expect(storageSpy).not.toHaveBeenCalled();
 
-    const wrapToggle = screen.getByRole("button", { name: "Wrap lines" });
-    expect(wrapToggle).toHaveAttribute("aria-pressed", "true");
+    const wrapToggle = screen.getByRole("checkbox", { name: "Wrap lines" });
+    expect(wrapToggle).toBeChecked();
     fireEvent.click(wrapToggle);
     expect(sourceRegion).not.toHaveClass("source-code-wrap");
-    expect(wrapToggle).toHaveAttribute("aria-pressed", "false");
+    expect(wrapToggle).not.toBeChecked();
     storageSpy.mockRestore();
   });
 
