@@ -1,3 +1,4 @@
+import { type JSX } from "preact";
 import { Check, Copy, X } from "lucide-preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 
@@ -6,11 +7,16 @@ export function CopyPathButton({
   label,
   className = "icon-button",
   size = 19,
+  text,
+  role,
 }: {
   value: string;
   label: string;
   className?: string;
   size?: number;
+  /** A visible label, for menus; icon-only buttons use a tooltip instead. */
+  text?: string;
+  role?: JSX.AriaRole;
 }) {
   const [copied, setCopied] = useState(false);
   const [showFallback, setShowFallback] = useState(false);
@@ -38,10 +44,11 @@ export function CopyPathButton({
   return (
     <>
       <button
-        class={`${className} tooltip-action`}
+        class={text ? className : `${className} tooltip-action`}
+        role={role}
         type="button"
         aria-label={label}
-        data-tooltip={copied ? "Copied" : label}
+        data-tooltip={text ? undefined : copied ? "Copied" : label}
         onClick={() => void copy()}
       >
         {copied ? (
@@ -49,6 +56,7 @@ export function CopyPathButton({
         ) : (
           <Copy size={size} aria-hidden="true" />
         )}
+        {text && <span>{copied ? "Copied" : text}</span>}
       </button>
       <span class="sr-only" role="status" aria-live="polite">
         {copied ? `Copied ${value}` : ""}
@@ -61,7 +69,7 @@ export function CopyPathButton({
             aria-modal="true"
             aria-labelledby="copy-path-title"
           >
-            <header class="modal-header">
+            <div class="modal-header">
               <h2 id="copy-path-title">Copy full path</h2>
               <button
                 class="modal-close"
@@ -71,7 +79,7 @@ export function CopyPathButton({
               >
                 <X size={20} aria-hidden="true" />
               </button>
-            </header>
+            </div>
             <div class="modal-content operation-form">
               <label for="copy-path-value">Select and copy this path</label>
               <input

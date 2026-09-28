@@ -44,6 +44,7 @@
   --success-border: #a7cbb0;
   --success-ink: #1f6737;
   --folder-icon: #b0701e;
+  --development-banner-bg: #b93815;
   --tooltip-bg: #17211c;
   --backdrop: rgb(10 20 15 / 52%);
   --skeleton: #e9ece7;
@@ -102,6 +103,7 @@
     --success-border: #2f6a45;
     --success-ink: #93ddb4;
     --folder-icon: #e0a352;
+    --development-banner-bg: #b93815;
     --tooltip-bg: #34423b;
     --backdrop: rgb(0 0 0 / 65%);
     --skeleton: #1f2823;
@@ -158,6 +160,7 @@
   --success-border: #2f6a45;
   --success-ink: #93ddb4;
   --folder-icon: #e0a352;
+  --development-banner-bg: #b93815;
   --tooltip-bg: #34423b;
   --backdrop: rgb(0 0 0 / 65%);
   --skeleton: #1f2823;
@@ -207,6 +210,12 @@ a {
 :focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
+}
+
+/* Headings take focus after navigation so screen readers announce them;
+   they are not controls, so they show no focus ring. */
+[tabindex="-1"]:focus {
+  outline: none;
 }
 
 .app-frame {
@@ -373,6 +382,7 @@ select {
   border-radius: 0.55rem;
   cursor: pointer;
   display: inline-flex;
+  gap: 0.45rem;
   font-weight: 750;
   justify-content: center;
   min-height: 2.65rem;
@@ -574,7 +584,7 @@ select {
 }
 
 .development-banner {
-  background: #b93815;
+  background: var(--development-banner-bg);
   color: white;
   font-size: 0.78rem;
   font-weight: 750;
@@ -742,21 +752,27 @@ select {
   white-space: nowrap;
 }
 
-.delete-confirmation {
+.undo-toast {
   align-items: center;
   background: var(--surface);
   border: 1px solid var(--line);
   border-left: 4px solid var(--accent);
   border-radius: 0.8rem;
+  bottom: max(1.25rem, env(safe-area-inset-bottom));
   box-shadow: var(--shadow);
   display: flex;
   gap: 1rem;
   justify-content: space-between;
-  margin-bottom: 1rem;
-  padding: 0.9rem 1.1rem;
+  left: 50%;
+  max-width: calc(100vw - 2rem);
+  padding: 0.75rem 0.9rem 0.75rem 1.1rem;
+  position: fixed;
+  transform: translateX(-50%);
+  width: max-content;
+  z-index: 40;
 }
 
-.delete-confirmation .button {
+.undo-toast .button {
   flex: none;
 }
 
@@ -1158,19 +1174,12 @@ html.preview-fullscreen-open body {
   margin-bottom: 0.75rem;
 }
 
-.file-type-label {
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
 .source-code,
 .markdown-code {
-  background: #111b17;
-  border: 1px solid #273a32;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
   border-radius: 0.65rem;
-  color: #f2f7f3;
+  color: var(--code-ink);
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
   font-size: 0.82rem;
   line-height: 1.55;
@@ -1187,12 +1196,6 @@ html.preview-fullscreen-open body {
   white-space: pre-wrap;
 }
 
-.shiki-source {
-  background: var(--code-bg);
-  border-color: var(--code-border);
-  color: var(--code-ink);
-}
-
 .shiki-source span {
   color: var(--shiki-light);
   font-style: var(--shiki-light-font-style);
@@ -1202,12 +1205,6 @@ html.preview-fullscreen-open body {
 
 .shiki-line {
   display: inline;
-}
-
-.preview-size,
-.preview-security-note {
-  color: var(--muted);
-  font-size: 0.82rem;
 }
 
 .preview-empty,
@@ -1224,11 +1221,27 @@ html.preview-fullscreen-open body {
   color: var(--muted);
 }
 
-.preview-tabs {
+.preview-tabs-row {
+  align-items: flex-end;
   border-bottom: 1px solid var(--line);
   display: flex;
   gap: 0.25rem;
   margin: 1rem 0;
+}
+
+.preview-edit-button {
+  min-height: 2.35rem;
+  padding: 0.3rem 0.85rem;
+}
+
+.preview-tabs-row .icon-button {
+  margin-bottom: 0.25rem;
+}
+
+.preview-tabs {
+  display: flex;
+  flex: 1;
+  gap: 0.25rem;
 }
 
 .preview-tabs button {
@@ -1363,12 +1376,15 @@ html.preview-fullscreen-open body {
   width: 1rem;
 }
 
+.toolbar-button {
+  gap: 0.4rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.85rem;
+}
+
+/* The toolbar's buttons flow with the copy button, so they wrap as one row. */
 .write-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  justify-content: flex-end;
-  min-width: 0;
+  display: contents;
 }
 
 .write-actions,
@@ -1446,6 +1462,58 @@ html.preview-fullscreen-open body {
 
 .entry-actions {
   justify-content: flex-end;
+}
+
+.entry-actions-inline {
+  display: flex;
+  gap: 0.55rem;
+  justify-content: flex-end;
+}
+
+/* Keeps Delete apart from the harmless actions. */
+.entry-actions-inline .entry-action-danger {
+  margin-left: 0.5rem;
+}
+
+.entry-menu {
+  display: none;
+}
+
+.entry-menu-list {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  min-width: 12rem;
+  padding: 0.3rem;
+  position: fixed;
+  z-index: 45;
+}
+
+.entry-menu-item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0.45rem;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  font-weight: 650;
+  gap: 0.65rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.entry-menu-item:hover,
+.entry-menu-item:focus-visible {
+  background: var(--surface-hover);
+}
+
+.entry-menu-item.entry-action-danger {
+  color: var(--danger);
 }
 
 .entry-action-danger {
@@ -1650,9 +1718,14 @@ html.preview-fullscreen-open body {
 }
 
 .entry-name {
+  align-self: flex-start;
   color: var(--ink);
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.entry-name:focus-visible {
+  outline-offset: 1px;
 }
 
 .entry-kind,
@@ -1756,30 +1829,19 @@ html.preview-fullscreen-open body {
     padding-top: max(1rem, env(safe-area-inset-top));
   }
 
-  .directory-heading {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .directory-heading-actions {
-    justify-content: flex-start;
-    width: 100%;
-  }
-
-  .write-toolbar {
-    justify-content: flex-start;
-  }
-
   .entry-row {
-    grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+    grid-template-columns: 1.25rem minmax(0, 1fr) auto auto;
     padding-left: 1rem;
     padding-right: 1rem;
   }
 
-  .entry-actions {
-    grid-column: 2 / -1;
-    justify-content: flex-start;
+  /* One "⋯" button per row, so rows stay a single line. */
+  .entry-actions-inline {
+    display: none;
+  }
+
+  .entry-menu {
+    display: block;
   }
 
   .preview-header {
@@ -1792,8 +1854,9 @@ html.preview-fullscreen-open body {
   }
 
   .preview-actions {
-    align-items: stretch;
-    flex-direction: column;
+    gap: 0.4rem;
+    padding-left: 1rem;
+    padding-right: 1rem;
   }
 
   .preview-metadata,
@@ -1832,9 +1895,60 @@ html.preview-fullscreen-open body {
   }
 }
 
+/* The tree sits in the grid on wide screens. Where there is no room for it,
+   it moves into a drawer opened from the "Folders" button. */
+.tree-drawer {
+  display: contents;
+}
+
+.tree-drawer-toggle,
+.tree-drawer-backdrop {
+  display: none;
+}
+
+.tree-drawer-toggle {
+  gap: 0.45rem;
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+@media (max-width: 66rem) {
+  .tree-drawer.is-open {
+    background: var(--page-bg);
+    bottom: 0;
+    box-shadow: var(--shadow);
+    display: block;
+    left: 0;
+    overflow-y: auto;
+    padding: max(1rem, env(safe-area-inset-top)) 1rem 1rem
+      max(1rem, env(safe-area-inset-left));
+    position: fixed;
+    top: 0;
+    width: min(20rem, 85vw);
+    z-index: 60;
+  }
+
+  .tree-drawer.is-open .share-tree {
+    display: block;
+    position: static;
+  }
+
+  .tree-drawer.is-open .tree-scroll {
+    max-height: none;
+  }
+
+  .tree-drawer-backdrop {
+    background: var(--backdrop);
+    display: block;
+    inset: 0;
+    position: fixed;
+    z-index: 59;
+  }
+}
+
 /* Tablets (iPad portrait is 744–834px): two columns instead of stacking. With
-   a preview open, the list and preview share the width and the tree hides;
-   the breadcrumb still navigates. */
+   a preview open, the list and preview share the width and the tree moves
+   into the drawer. */
 @media (min-width: 44.0625rem) and (max-width: 66rem) {
   .browser-workspace,
   .browser-workspace.preview-full {
@@ -1845,7 +1959,23 @@ html.preview-fullscreen-open body {
     grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
   }
 
-  .browser-workspace.has-preview:not(.preview-full) .share-tree {
+  .browser-workspace.has-preview:not(.preview-full) .tree-drawer-toggle {
+    display: inline-flex;
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) .entry-row {
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto auto;
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) .entry-actions-inline {
+    display: none;
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) .entry-menu {
+    display: block;
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) .tree-drawer:not(.is-open) {
     display: none;
   }
 }
@@ -1861,16 +1991,13 @@ html.preview-fullscreen-open body {
     grid-column: 1;
   }
 
-  .share-tree {
-    position: static;
+  .tree-drawer-toggle {
+    display: inline-flex;
   }
 
-  .tree-scroll {
-    max-height: 18rem;
-  }
-
-  .browser-workspace.has-preview {
-    grid-template-columns: minmax(0, 1fr);
+  .browser-workspace.has-preview .tree-drawer-toggle,
+  .tree-drawer:not(.is-open) {
+    display: none;
   }
 }
 
@@ -1895,5 +2022,34 @@ html.preview-fullscreen-open body {
 
   .app-footer {
     transition: none;
+  }
+}
+
+/* Where the folder list is narrow (tablets and phones, or beside a preview on
+   a laptop), the heading's buttons go under the title instead of wrapping
+   beside it. */
+@media (max-width: 66rem) {
+  .directory-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .directory-heading-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
+
+@media (min-width: 66.0625rem) and (max-width: 90rem) {
+  .browser-workspace.has-preview:not(.preview-full) .directory-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) .directory-heading-actions {
+    justify-content: flex-start;
+    width: 100%;
   }
 }

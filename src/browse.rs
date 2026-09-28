@@ -482,6 +482,8 @@ struct EntryResponse {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at_ms: Option<u64>,
 }
 
 async fn list_directory(
@@ -841,6 +843,7 @@ fn entry_response(entry: &DirectoryEntry) -> EntryResponse {
         name: entry.name.as_str().to_owned(),
         kind: kind_name(entry.kind),
         size: (entry.kind == EntryKind::File).then_some(entry.size),
+        modified_at_ms: system_time_millis(entry.modified),
     }
 }
 
@@ -1403,6 +1406,9 @@ mod tests {
         assert_eq!(first["entries"][0]["kind"], "directory");
         assert!(first["entries"][0].get("size").is_none());
         assert_eq!(first["entries"][1]["name"], "a.txt");
+        for entry in first["entries"].as_array().expect("entries") {
+            assert!(entry["modifiedAtMs"].as_u64().is_some());
+        }
         let cursor = first["nextCursor"].as_str().expect("next cursor");
 
         let second = send(

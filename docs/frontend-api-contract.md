@@ -53,13 +53,13 @@ Trash is a separate per-share view, not a virtual `.crabinet` folder. `GET /api/
     {
       "name": "src",
       "kind": "directory",
-      "modifiedAt": "2026-09-16T18:30:00Z"
+      "modifiedAtMs": 1789599000000
     },
     {
       "name": "README.md",
       "kind": "file",
       "size": 2048,
-      "modifiedAt": "2026-09-16T18:30:00Z"
+      "modifiedAtMs": 1789599000000
     }
   ],
   "nextCursor": "opaque-or-omitted"

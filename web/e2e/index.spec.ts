@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-import { csrfToken, openSignedIn, signIn } from "./helpers";
+import { csrfToken, openFolders, openSignedIn, signIn } from "./helpers";
 
 test("login, secure session cookie, read-only enforcement, and logout", async ({
   context,
@@ -18,7 +18,9 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   await expect(page.getByRole("alert")).toContainText("Sign-in failed");
 
   await signIn(page, "reader");
-  await expect(page.getByRole("img", { name: "Read only" })).toBeVisible();
+  await expect(
+    page.getByRole("img", { name: "Read only", includeHidden: true }),
+  ).toHaveCount(1);
   await expect(
     page.getByRole("region", { name: "File operations" }),
   ).toHaveCount(0);
@@ -26,7 +28,9 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
     page.getByRole("button", { name: /^(Edit|Rename|Move|Delete) / }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: /^Copy full path for / }).first(),
+    page
+      .locator(".directory-heading-actions")
+      .getByRole("button", { name: /^Copy full path for / }),
   ).toBeVisible();
 
   const cookies = await context.cookies();
@@ -104,16 +108,19 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(page).toHaveURL(/\/writable\/Projects$/);
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
-  const sidebar = page.getByLabel("Shared folders", { exact: true });
+  let sidebar = await openFolders(page);
   await sidebar.getByRole("link", { name: "Reference library" }).click();
   await expect(page).toHaveURL(/\/read-only$/);
-  await expect(page.getByRole("img", { name: "Read only" })).toBeVisible();
+  sidebar = await openFolders(page);
+  await expect(sidebar.getByRole("img", { name: "Read only" })).toBeVisible();
   const nested = sidebar.getByRole("link", { name: "nested" });
   await expect(nested).toBeVisible();
 
   await nested.click();
   await expect(page).toHaveURL(/\/read-only\/nested$/);
+  sidebar = await openFolders(page);
   await expect(sidebar.getByText("No subfolders")).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
@@ -145,11 +152,13 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(newFolder).toBeVisible();
   await expect(upload).toBeVisible();
   await expect(copyPath).toBeVisible();
-  await expect(newFile).toHaveText("");
-  await expect(newFolder).toHaveText("");
-  await expect(upload).toHaveText("");
-  await newFile.focus();
-  await expect(page.getByRole("tooltip")).toHaveText("New file");
+  await expect(newFile).toHaveText("New file");
+  await expect(newFolder).toHaveText("New folder");
+  await expect(upload).toHaveText("Upload files");
+  await copyPath.focus();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Copy full path for Projects",
+  );
   const sidebar = page.getByRole("complementary", { name: "Shared folders" });
   await expect(sidebar.getByRole("button", { name: "New file" })).toHaveCount(
     0,
@@ -204,14 +213,14 @@ test("action tooltips escape clipped panels and remain inside the viewport", asy
   page,
 }) => {
   await openSignedIn(page, "/writable", "writer");
-  const copyPath = page.getByRole("button", {
-    name: "Copy full path for README.md",
-  });
+  const copyPath = page
+    .locator(".directory-heading-actions")
+    .getByRole("button", { name: "Copy full path for Working files" });
   await copyPath.scrollIntoViewIfNeeded();
   await copyPath.focus();
 
   const tooltip = page.getByRole("tooltip");
-  await expect(tooltip).toHaveText("Copy full path for README.md");
+  await expect(tooltip).toHaveText("Copy full path for Working files");
   await expect(tooltip).toBeVisible();
   expect(
     await tooltip.evaluate((element) =>

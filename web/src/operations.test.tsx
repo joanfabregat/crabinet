@@ -8,7 +8,11 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { type ApiClient, type DirectoryPage } from "./api";
-import { OperationDialog, type EntryOperation } from "./operations";
+import {
+  EntryActionButtons,
+  OperationDialog,
+  type EntryOperation,
+} from "./operations";
 
 const pages: Record<string, DirectoryPage> = {
   "": {
@@ -174,5 +178,83 @@ describe("OperationDialog", () => {
     expect(
       screen.getByRole("button", { name: "Shared folder" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("row action menu", () => {
+  const entry = { name: "notes.txt", kind: "file" as const, size: 5 };
+
+  it("lists the row's actions and closes with Escape back on its button", async () => {
+    const onOperation = vi.fn();
+    render(
+      <EntryActionButtons
+        entry={entry}
+        path="projects/notes.txt"
+        copyPath="work/projects/notes.txt"
+        writable
+        onOperation={onOperation}
+      />,
+    );
+    const trigger = screen.getByRole("button", {
+      name: "More actions for notes.txt",
+    });
+    expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const menu = screen.getByRole("menu", { name: "Actions for notes.txt" });
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Copy full path",
+      "Rename",
+      "Move to…",
+      "Move to Trash",
+    ]);
+    await waitFor(() => expect(items[0]).toHaveFocus());
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(items[3]).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(onOperation).not.toHaveBeenCalled();
+  });
+
+  it("runs the chosen action and offers only copying on a read-only share", () => {
+    const onOperation = vi.fn();
+    const { rerender } = render(
+      <EntryActionButtons
+        entry={entry}
+        path="projects/notes.txt"
+        copyPath="work/projects/notes.txt"
+        writable
+        onOperation={onOperation}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "More actions for notes.txt" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    expect(onOperation).toHaveBeenCalledWith({
+      kind: "rename",
+      entry,
+      path: "projects/notes.txt",
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    rerender(
+      <EntryActionButtons
+        entry={entry}
+        path="projects/notes.txt"
+        copyPath="work/projects/notes.txt"
+        writable={false}
+        onOperation={onOperation}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "More actions for notes.txt" }),
+    );
+    expect(
+      within(screen.getByRole("menu")).getAllByRole("menuitem"),
+    ).toHaveLength(1);
   });
 });

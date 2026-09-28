@@ -76,7 +76,7 @@ export interface DirectoryEntry {
   name: string;
   kind: "directory" | "file";
   size?: number;
-  modifiedAt?: string;
+  modifiedAtMs?: number;
 }
 
 export interface DirectoryPage {
@@ -1314,7 +1314,7 @@ function isDirectoryEntry(value: unknown): boolean {
       (typeof value.size === "number" &&
         Number.isFinite(value.size) &&
         value.size >= 0)) &&
-    (value.modifiedAt === undefined || typeof value.modifiedAt === "string")
+    isOptionalTimestamp(value.modifiedAtMs)
   );
 }
 

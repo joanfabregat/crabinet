@@ -1,6 +1,7 @@
 import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
+  Ellipsis,
   FilePlus2,
   FolderInput,
   FolderPlus,
@@ -55,31 +56,28 @@ export function WriteToolbar({
   return (
     <section class="write-toolbar" aria-label="File operations">
       <button
-        class="icon-button icon-button-primary tooltip-action"
+        class="button button-primary toolbar-button"
         type="button"
-        aria-label="New file"
-        data-tooltip="New file"
         onClick={onCreateFile}
       >
-        <FilePlus2 size={19} aria-hidden="true" />
+        <FilePlus2 size={18} aria-hidden="true" />
+        New file
       </button>
       <button
-        class="icon-button tooltip-action"
+        class="button button-secondary toolbar-button"
         type="button"
-        aria-label="New folder"
-        data-tooltip="New folder"
         onClick={onCreateFolder}
       >
-        <FolderPlus size={19} aria-hidden="true" />
+        <FolderPlus size={18} aria-hidden="true" />
+        New folder
       </button>
       <button
-        class="icon-button tooltip-action"
+        class="button button-secondary toolbar-button"
         type="button"
-        aria-label="Upload files"
-        data-tooltip="Upload files"
         onClick={() => input.current?.click()}
       >
-        <Upload size={19} aria-hidden="true" />
+        <Upload size={18} aria-hidden="true" />
+        Upload files
       </button>
       <input
         ref={input}
@@ -112,44 +110,205 @@ export function EntryActionButtons({
       role="group"
       aria-label={`Actions for ${entry.name}`}
     >
-      {writable && (
-        <>
-          <button
-            class="entry-action tooltip-action"
-            type="button"
-            aria-label={`Rename ${entry.name}`}
-            data-tooltip="Rename"
-            onClick={() => onOperation({ kind: "rename", entry, path })}
-          >
-            <Pencil size={18} aria-hidden="true" />
-          </button>
-          <button
-            class="entry-action tooltip-action"
-            type="button"
-            aria-label={`Move ${entry.name}`}
-            data-tooltip="Move to…"
-            onClick={() => onOperation({ kind: "move", entry, path })}
-          >
-            <FolderInput size={18} aria-hidden="true" />
-          </button>
-        </>
-      )}
-      <CopyPathButton
-        value={copyPath}
-        label={`Copy full path for ${entry.name}`}
-        className="entry-action"
-        size={18}
+      <div class="entry-actions-inline">
+        <CopyPathButton
+          value={copyPath}
+          label={`Copy full path for ${entry.name}`}
+          className="entry-action"
+          size={18}
+        />
+        {writable && (
+          <>
+            <button
+              class="entry-action tooltip-action"
+              type="button"
+              aria-label={`Rename ${entry.name}`}
+              data-tooltip="Rename"
+              onClick={() => onOperation({ kind: "rename", entry, path })}
+            >
+              <Pencil size={18} aria-hidden="true" />
+            </button>
+            <button
+              class="entry-action tooltip-action"
+              type="button"
+              aria-label={`Move ${entry.name}`}
+              data-tooltip="Move to…"
+              onClick={() => onOperation({ kind: "move", entry, path })}
+            >
+              <FolderInput size={18} aria-hidden="true" />
+            </button>
+            <button
+              class="entry-action entry-action-danger tooltip-action"
+              type="button"
+              aria-label={`Delete ${entry.name}`}
+              data-tooltip="Delete"
+              onClick={() => onOperation({ kind: "delete", entry, path })}
+            >
+              <Trash2 size={18} aria-hidden="true" />
+            </button>
+          </>
+        )}
+      </div>
+      <EntryActionMenu
+        entry={entry}
+        path={path}
+        copyPath={copyPath}
+        writable={writable}
+        onOperation={onOperation}
       />
-      {writable && (
-        <button
-          class="entry-action entry-action-danger tooltip-action"
-          type="button"
-          aria-label={`Delete ${entry.name}`}
-          data-tooltip="Delete"
-          onClick={() => onOperation({ kind: "delete", entry, path })}
+    </div>
+  );
+}
+
+/**
+ * On phones the row's actions fold into one "⋯" button so each row stays a
+ * single line. Wider screens show the icon buttons instead (see styles.css).
+ */
+function EntryActionMenu({
+  entry,
+  path,
+  copyPath,
+  writable,
+  onOperation,
+}: {
+  entry: DirectoryEntry;
+  path: string;
+  copyPath: string;
+  writable: boolean;
+  onOperation: (operation: EntryOperation) => void;
+}) {
+  // The list is fixed-positioned from the trigger, because the folder panel
+  // clips overflow; it opens upward when the row is near the bottom.
+  const [open, setOpen] = useState<JSX.CSSProperties>();
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const isOpen = open !== undefined;
+
+  useEffect(() => {
+    if (!isOpen) return;
+    root.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    const closeOutside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(undefined);
+    };
+    // A fixed list would drift from its row while the page scrolls.
+    const closeOnScroll = () => setOpen(undefined);
+    document.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("scroll", closeOnScroll, { passive: true });
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("scroll", closeOnScroll);
+    };
+  }, [isOpen]);
+
+  const close = () => {
+    setOpen(undefined);
+    trigger.current?.focus();
+  };
+
+  const choose = (operation: EntryOperation) => {
+    setOpen(undefined);
+    onOperation(operation);
+  };
+
+  const handleKeys = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    );
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      items[(index + 1) % items.length]?.focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      items[(index - 1 + items.length) % items.length]?.focus();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      items[0]?.focus();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      items.at(-1)?.focus();
+    } else if (event.key === "Tab") {
+      setOpen(undefined);
+    }
+  };
+
+  return (
+    <div class="entry-menu" ref={root}>
+      <button
+        ref={trigger}
+        class="entry-action"
+        type="button"
+        aria-label={`More actions for ${entry.name}`}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          if (isOpen) {
+            setOpen(undefined);
+            return;
+          }
+          const rect = event.currentTarget.getBoundingClientRect();
+          const right = `${window.innerWidth - rect.right}px`;
+          setOpen(
+            rect.bottom + 240 > window.innerHeight
+              ? { bottom: `${window.innerHeight - rect.top + 4}px`, right }
+              : { top: `${rect.bottom + 4}px`, right },
+          );
+        }}
+      >
+        <Ellipsis size={18} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          class="entry-menu-list"
+          style={open}
+          role="menu"
+          aria-label={`Actions for ${entry.name}`}
+          onKeyDown={handleKeys}
         >
-          <Trash2 size={18} aria-hidden="true" />
-        </button>
+          <CopyPathButton
+            value={copyPath}
+            label={`Copy full path for ${entry.name}`}
+            className="entry-menu-item"
+            size={17}
+            text="Copy full path"
+            role="menuitem"
+          />
+          {writable && (
+            <>
+              <button
+                class="entry-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "rename", entry, path })}
+              >
+                <Pencil size={17} aria-hidden="true" />
+                Rename
+              </button>
+              <button
+                class="entry-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "move", entry, path })}
+              >
+                <FolderInput size={17} aria-hidden="true" />
+                Move to…
+              </button>
+              <button
+                class="entry-menu-item entry-action-danger"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "delete", entry, path })}
+              >
+                <Trash2 size={17} aria-hidden="true" />
+                Move to Trash
+              </button>
+            </>
+          )}
+        </div>
       )}
     </div>
   );

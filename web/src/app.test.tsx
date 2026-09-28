@@ -760,15 +760,15 @@ describe("directory browser", () => {
   });
 
   it("carries a browser-only hidden-files choice over to the account once", async () => {
-    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "false");
-    const account = accountPreferences({ showHiddenFiles: true });
+    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "true");
+    const account = accountPreferences();
     const first = render(
       <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
 
     await waitFor(() =>
       expect(account.api.updatePreferences).toHaveBeenCalledWith(
-        { showHiddenFiles: false },
+        { showHiddenFiles: true },
         "csrf-in-memory",
       ),
     );
@@ -777,14 +777,14 @@ describe("directory browser", () => {
         window.localStorage.getItem("crabinet.showHiddenFiles.u-1"),
       ).toBeNull(),
     );
-    expect(account.saved.showHiddenFiles).toBe(false);
+    expect(account.saved.showHiddenFiles).toBe(true);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     expect(
       within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
         "checkbox",
         { name: "Show hidden files" },
       ),
-    ).not.toBeChecked();
+    ).toBeChecked();
 
     first.unmount();
     render(
@@ -795,7 +795,7 @@ describe("directory browser", () => {
   });
 
   it("keeps browser-only choices for a later visit when carrying them over fails", async () => {
-    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "false");
+    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "true");
     window.localStorage.setItem("crabinet.theme", "dark");
     const updatePreferences = vi.fn<ApiClient["updatePreferences"]>(
       async () => {
@@ -804,14 +804,20 @@ describe("directory browser", () => {
     );
     render(
       <App
-        api={fakeApi({ updatePreferences })}
+        api={fakeApi({
+          updatePreferences,
+          session: vi.fn(async () => ({
+            ...session,
+            preferences: defaultUserPreferences,
+          })),
+        })}
         navigation={new MemoryNavigation()}
       />,
     );
 
     await waitFor(() =>
       expect(updatePreferences).toHaveBeenCalledWith(
-        { showHiddenFiles: false, theme: "dark" },
+        { showHiddenFiles: true, theme: "dark" },
         "csrf-in-memory",
       ),
     );
@@ -821,10 +827,10 @@ describe("directory browser", () => {
         "checkbox",
         { name: "Show hidden files" },
       ),
-    ).not.toBeChecked();
+    ).toBeChecked();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
-      "false",
+      "true",
     );
     expect(
       within(screen.getByRole("dialog", { name: "Settings" })).getByRole(
@@ -839,9 +845,9 @@ describe("directory browser", () => {
     expect(window.localStorage.getItem("crabinet.theme.synced")).toBeNull();
   });
 
-  it("drops a browser-only hidden-files choice that the account already covers", async () => {
-    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "true");
-    const account = accountPreferences({ showHiddenFiles: true });
+  it("drops a browser-only hidden-files choice that the account already matches", async () => {
+    window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "false");
+    const account = accountPreferences();
     render(
       <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
@@ -933,8 +939,8 @@ describe("directory browser", () => {
       const button = within(actions as HTMLElement).getByRole("button", {
         name: label,
       });
-      expect(button).toHaveTextContent("");
-      expect(button).toHaveAttribute("data-tooltip", label);
+      expect(button).toHaveTextContent(label);
+      expect(button).not.toHaveAttribute("data-tooltip");
     }
     const sidebar = screen.getByRole("complementary", {
       name: "Shared folders",
@@ -1488,7 +1494,7 @@ describe("writable file operations", () => {
       name: "Move notes.txt",
     });
     fireEvent.click(
-      await within(dialog).findByRole("button", { name: "Shared folder" }),
+      await within(dialog).findByRole("button", { name: "Working files" }),
     );
     await waitFor(() =>
       expect(

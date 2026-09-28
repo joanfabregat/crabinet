@@ -11,7 +11,7 @@ export async function signIn(
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(
     page.getByLabel("Shared folders", { exact: true }),
-  ).toBeVisible();
+  ).toBeAttached();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
 }
 
@@ -78,4 +78,18 @@ export async function chooseFiles(input: Locator, files: BrowserFile[]) {
       buffer: Buffer.from(file.contents),
     })),
   );
+}
+
+/** The folder tree, opening its drawer first on screens too narrow for it. */
+export async function openFolders(page: Page): Promise<Locator> {
+  const toggle = page.getByRole("button", { name: "Folders" });
+  if (
+    (await toggle.isVisible()) &&
+    (await toggle.getAttribute("aria-expanded")) !== "true"
+  ) {
+    await toggle.click();
+  }
+  const tree = page.getByLabel("Shared folders", { exact: true });
+  await expect(tree).toBeVisible();
+  return tree;
 }
