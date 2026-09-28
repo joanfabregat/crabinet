@@ -457,6 +457,36 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toEqual([]);
 });
 
+test("an iPad in portrait shows two columns", async ({ page }) => {
+  await page.setViewportSize({ width: 820, height: 1180 });
+  await openSignedIn(page);
+
+  const tree = page.getByRole("complementary", { name: "Shared folders" });
+  const list = page.locator(".directory-column");
+  await expect(tree).toBeVisible();
+  const treeBox = (await tree.boundingBox())!;
+  const listBox = (await list.boundingBox())!;
+  expect(listBox.x).toBeGreaterThanOrEqual(treeBox.x + treeBox.width);
+  expect(Math.abs(listBox.y - treeBox.y)).toBeLessThan(2);
+
+  await page.getByRole("link", { name: "hello.rs" }).click();
+  const preview = page.locator(".preview-panel");
+  await expect(page.getByLabel("File source")).toBeVisible();
+  await expect(tree).toBeHidden();
+  const openListBox = (await list.boundingBox())!;
+  const previewBox = (await preview.boundingBox())!;
+  expect(previewBox.x).toBeGreaterThanOrEqual(
+    openListBox.x + openListBox.width,
+  );
+  expect(Math.abs(previewBox.y - openListBox.y)).toBeLessThan(2);
+
+  const dimensions = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    content: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
+});
+
 test("night mode follows the system, can be pinned, and passes axe", async ({
   page,
 }) => {

@@ -1820,7 +1820,25 @@ html.preview-fullscreen-open body {
   }
 }
 
-@media (max-width: 66rem) {
+/* Tablets (iPad portrait is 744–834px): two columns instead of stacking. With
+   a preview open, the list and preview share the width and the tree hides;
+   the breadcrumb still navigates. */
+@media (min-width: 44.0625rem) and (max-width: 66rem) {
+  .browser-workspace,
+  .browser-workspace.preview-full {
+    grid-template-columns: 14rem minmax(0, 1fr);
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  }
+
+  .browser-workspace.has-preview:not(.preview-full) .share-tree {
+    display: none;
+  }
+}
+
+@media (max-width: 44rem) {
   .browser-workspace,
   .browser-workspace.has-preview,
   .browser-workspace.preview-full {
