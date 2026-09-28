@@ -124,7 +124,8 @@ test.describe("writable share operations", () => {
 
     await page.goto("/trash/writable");
     const deletedFile = page.getByRole("listitem").filter({
-      hasText: "Original path: e2e-folder/example.toml",
+      has: page.getByText("example.toml", { exact: true }),
+      hasText: "From e2e-folder ·",
     });
     await expect(deletedFile).toBeVisible();
     await deletedFile.getByRole("button", { name: "Restore" }).click();
@@ -138,7 +139,8 @@ test.describe("writable share operations", () => {
 
     await page.goto("/trash/writable");
     const deletedFolder = page.getByRole("listitem").filter({
-      hasText: "Original path: e2e-folder",
+      has: page.getByText("e2e-folder", { exact: true }),
+      hasText: "From Working files ·",
     });
     await expect(deletedFolder).toBeVisible();
     await deletedFolder.getByRole("button", { name: "Restore" }).click();

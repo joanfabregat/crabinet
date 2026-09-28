@@ -45,7 +45,7 @@ export interface UserPreferences {
 }
 
 export const defaultUserPreferences: UserPreferences = {
-  showHiddenFiles: true,
+  showHiddenFiles: false,
   theme: "system",
 };
 
@@ -92,6 +92,7 @@ export interface EntryMetadata {
   name: string;
   kind: "directory" | "file";
   size?: number;
+  modifiedAtMs?: number;
   accessedAtMs?: number;
   createdAtMs?: number;
   etag: string;
@@ -1185,6 +1186,7 @@ function parseMetadata(
       (typeof value.size !== "number" ||
         !Number.isSafeInteger(value.size) ||
         value.size < 0)) ||
+    !isOptionalTimestamp(value.modifiedAtMs) ||
     !isOptionalTimestamp(value.accessedAtMs) ||
     !isOptionalTimestamp(value.createdAtMs)
   ) {

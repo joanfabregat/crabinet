@@ -24,9 +24,50 @@ interface TrashViewProps {
   onChanged: () => void;
 }
 
-function displayTime(value: string): string {
+// Matches the timestamps in the preview panel.
+const absoluteTimeFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+const relativeTimeFormat = new Intl.RelativeTimeFormat(undefined, {
+  numeric: "auto",
+});
+
+const relativeUnits: [Intl.RelativeTimeFormatUnit, number][] = [
+  ["second", 60],
+  ["minute", 60],
+  ["hour", 24],
+  ["day", 60],
+  ["month", 12],
+];
+
+/** "3 minutes ago" or "in 30 days", in the largest unit that stays readable. */
+function relativeTime(time: Date, now: number): string {
+  let value = (time.valueOf() - now) / 1000;
+  for (const [unit, limit] of relativeUnits) {
+    if (Math.abs(value) < limit) {
+      return relativeTimeFormat.format(Math.round(value), unit);
+    }
+    // Days carry over into months at their average length.
+    value /= unit === "day" ? 30.44 : limit;
+  }
+  return relativeTimeFormat.format(Math.round(value), "year");
+}
+
+/** A relative time whose absolute date stays available as a tooltip. */
+function TrashTime({ value, now }: { value: string; now: number }) {
   const time = new Date(value);
-  return Number.isNaN(time.valueOf()) ? value : time.toLocaleString();
+  if (Number.isNaN(time.valueOf())) return <>{value}</>;
+  return (
+    <time dateTime={value} title={absoluteTimeFormat.format(time)}>
+      {relativeTime(time, now)}
+    </time>
+  );
+}
+
+function parentOf(path: string): string {
+  return path.split("/").slice(0, -1).join("/");
 }
 
 function nameOf(path: string): string {
@@ -174,6 +215,7 @@ export function TrashView({
   const destination = destinationDirectory
     ? `${destinationDirectory}/${destinationName}`
     : destinationName;
+  const now = Date.now();
 
   return (
     <section class="directory-panel trash-panel" aria-labelledby="trash-title">
@@ -182,18 +224,29 @@ export function TrashView({
           <p class="eyebrow">{share.name}</p>
           <h1 id="trash-title">Trash</h1>
         </div>
-        {share.access === "read-write" && items.length > 0 && !loading && (
+        <div class="directory-heading-actions">
           <button
             type="button"
-            class="icon-button icon-button-danger tooltip-action"
-            aria-label="Empty Trash"
-            data-tooltip="Empty Trash"
-            disabled={Boolean(busyId) || emptying}
-            onClick={() => setConfirmEmpty(true)}
+            class="icon-button tooltip-action"
+            aria-label="Refresh Trash"
+            data-tooltip="Refresh Trash"
+            disabled={loading || emptying}
+            onClick={() => setRevision((value) => value + 1)}
           >
-            <Trash2 size={18} aria-hidden="true" />
+            <RefreshCw size={18} aria-hidden="true" />
           </button>
-        )}
+          {share.access === "read-write" && items.length > 0 && !loading && (
+            <button
+              type="button"
+              class="button button-danger"
+              disabled={Boolean(busyId) || emptying}
+              onClick={() => setConfirmEmpty(true)}
+            >
+              <Trash2 size={18} aria-hidden="true" />
+              Empty Trash
+            </button>
+          )}
+        </div>
       </div>
       <p class="muted">
         Deleted items remain here until they expire. Restoring and permanent
@@ -201,16 +254,7 @@ export function TrashView({
       </p>
       {error && (
         <div class="notice notice-danger" role="alert">
-          {error}{" "}
-          <button
-            type="button"
-            class="icon-button tooltip-action"
-            aria-label="Refresh Trash"
-            data-tooltip="Refresh Trash"
-            onClick={() => setRevision((value) => value + 1)}
-          >
-            <RefreshCw size={18} aria-hidden="true" />
-          </button>
+          {error}
         </div>
       )}
       {loading ? (
@@ -229,13 +273,10 @@ export function TrashView({
               <div class="trash-details">
                 <strong>{nameOf(item.originalPath)}</strong>
                 <span class="entry-meta">
-                  Original path: {item.originalPath}
-                </span>
-                <span class="entry-meta">
-                  Deleted: {displayTime(item.deletedAt)} by {item.deletedBy}
-                </span>
-                <span class="entry-meta">
-                  Expires: {displayTime(item.expiresAt)}
+                  From {parentOf(item.originalPath) || share.name} · Deleted{" "}
+                  <TrashTime value={item.deletedAt} now={now} /> by{" "}
+                  {item.deletedBy} · Expires{" "}
+                  <TrashTime value={item.expiresAt} now={now} />
                 </span>
               </div>
               {share.access === "read-write" && (

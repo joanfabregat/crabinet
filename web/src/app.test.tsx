@@ -543,7 +543,7 @@ describe("directory browser", () => {
             : [],
       }),
     );
-    const account = accountPreferences();
+    const account = accountPreferences({ showHiddenFiles: true });
     const api = fakeApi({ ...account.api, directory });
     const navigation = new MemoryNavigation();
     const first = render(<App api={api} navigation={navigation} />);
@@ -761,7 +761,7 @@ describe("directory browser", () => {
 
   it("carries a browser-only hidden-files choice over to the account once", async () => {
     window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "false");
-    const account = accountPreferences();
+    const account = accountPreferences({ showHiddenFiles: true });
     const first = render(
       <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
@@ -841,7 +841,7 @@ describe("directory browser", () => {
 
   it("drops a browser-only hidden-files choice that the account already covers", async () => {
     window.localStorage.setItem("crabinet.showHiddenFiles.u-1", "true");
-    const account = accountPreferences();
+    const account = accountPreferences({ showHiddenFiles: true });
     render(
       <App api={fakeApi(account.api)} navigation={new MemoryNavigation()} />,
     );
@@ -1669,9 +1669,8 @@ describe("writable file operations", () => {
       path: "",
       view: "trash",
     });
-    expect(
-      await screen.findByText("Original path: projects/notes.txt"),
-    ).toBeVisible();
+    const trashName = await screen.findByText("notes.txt");
+    expect(trashName.closest("li")).toHaveTextContent("From projects");
     const restoreButton = screen.getByRole("button", {
       name: "Restore notes.txt",
     });

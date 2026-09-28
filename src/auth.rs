@@ -326,7 +326,7 @@ struct DisplayPreferences {
 impl Default for DisplayPreferences {
     fn default() -> Self {
         Self {
-            show_hidden_files: true,
+            show_hidden_files: false,
             theme: ThemePreference::System,
         }
     }
@@ -818,7 +818,7 @@ fn delete_default_preferences(
 ) -> Result<(), rusqlite::Error> {
     connection.execute(
         "DELETE FROM user_preferences
-         WHERE username = ?1 AND default_share_id = '' AND show_hidden_files = 1
+         WHERE username = ?1 AND default_share_id = '' AND show_hidden_files = 0
            AND theme = 'system'",
         params![username],
     )?;
@@ -927,7 +927,7 @@ impl SessionStore {
             connection.execute_batch(
                 "BEGIN IMMEDIATE;
                  ALTER TABLE user_preferences
-                   ADD COLUMN show_hidden_files INTEGER NOT NULL DEFAULT 1;
+                   ADD COLUMN show_hidden_files INTEGER NOT NULL DEFAULT 0;
                  ALTER TABLE user_preferences
                    ADD COLUMN theme TEXT NOT NULL DEFAULT 'system'
                    CHECK (theme IN ('system', 'light', 'dark'));
@@ -2148,7 +2148,7 @@ mod tests {
 
         assert_eq!(
             session_body(alice_cookie.clone()).await["preferences"],
-            serde_json::json!({"showHiddenFiles": true, "theme": "system"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "system"})
         );
 
         let forbidden = app
@@ -2180,7 +2180,7 @@ mod tests {
         }
         assert_eq!(
             session_body(alice_cookie.clone()).await["preferences"],
-            serde_json::json!({"showHiddenFiles": true, "theme": "system"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "system"})
         );
 
         let folder = app
@@ -2205,32 +2205,32 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             body,
-            serde_json::json!({"showHiddenFiles": true, "theme": "dark"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "dark"})
         );
 
         let saved = app
             .clone()
-            .oneshot(put(path, Some(&alice_csrf), r#"{"showHiddenFiles":false}"#))
+            .oneshot(put(path, Some(&alice_csrf), r#"{"showHiddenFiles":true}"#))
             .await
             .unwrap();
         let body = to_bytes(saved.into_body(), 16_384).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             body,
-            serde_json::json!({"showHiddenFiles": false, "theme": "dark"})
+            serde_json::json!({"showHiddenFiles": true, "theme": "dark"})
         );
 
         let session = session_body(alice_cookie.clone()).await;
         assert_eq!(
             session["preferences"],
-            serde_json::json!({"showHiddenFiles": false, "theme": "dark"})
+            serde_json::json!({"showHiddenFiles": true, "theme": "dark"})
         );
         assert_eq!(session["defaultFolder"]["shareId"], "documents");
 
         let (bob_cookie, _) = login_as(&app, "Bob", "bob password").await;
         assert_eq!(
             session_body(bob_cookie).await["preferences"],
-            serde_json::json!({"showHiddenFiles": true, "theme": "system"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "system"})
         );
     }
 
@@ -2272,7 +2272,7 @@ mod tests {
         assert_eq!(
             saved,
             DisplayPreferences {
-                show_hidden_files: true,
+                show_hidden_files: false,
                 theme: ThemePreference::Light,
             }
         );
@@ -2282,7 +2282,7 @@ mod tests {
             .update_display_preferences(
                 "Alice",
                 DisplayPreferencesUpdate {
-                    show_hidden_files: Some(false),
+                    show_hidden_files: Some(true),
                     ..DisplayPreferencesUpdate::default()
                 },
             )
@@ -2300,7 +2300,7 @@ mod tests {
         assert_eq!(
             store.display_preferences("Alice").await.unwrap(),
             DisplayPreferences {
-                show_hidden_files: false,
+                show_hidden_files: true,
                 theme: ThemePreference::Light,
             }
         );
@@ -2310,7 +2310,7 @@ mod tests {
         assert_eq!(
             store.display_preferences("Alice").await.unwrap(),
             DisplayPreferences {
-                show_hidden_files: false,
+                show_hidden_files: true,
                 theme: ThemePreference::Light,
             }
         );
@@ -2320,7 +2320,7 @@ mod tests {
             .update_display_preferences(
                 "Alice",
                 DisplayPreferencesUpdate {
-                    show_hidden_files: Some(true),
+                    show_hidden_files: Some(false),
                     theme: Some(ThemePreference::System),
                 },
             )

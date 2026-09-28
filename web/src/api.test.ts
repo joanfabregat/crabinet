@@ -746,6 +746,17 @@ describe("API client", () => {
           accessedAtMs: -1,
           etag: 'W/"v"',
         }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "c.txt",
+          name: "c.txt",
+          kind: "file",
+          size: 1,
+          modifiedAtMs: "2026-09-16T18:30:00Z",
+          etag: 'W/"v"',
+        }),
       );
     const api = createApiClient({ fetch });
 
@@ -758,6 +769,46 @@ describe("API client", () => {
     await expect(api.metadata("docs", "b.txt")).rejects.toMatchObject({
       kind: "invalid-response",
     });
+    await expect(api.metadata("docs", "c.txt")).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+  });
+
+  it("parses optional metadata timestamps, including the modification time", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "a.txt",
+          name: "a.txt",
+          kind: "file",
+          size: 1,
+          modifiedAtMs: 1_789_599_000_000,
+          accessedAtMs: 1_789_599_600_000,
+          createdAtMs: 1_789_513_200_000,
+          etag: 'W/"v"',
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "folder",
+          name: "folder",
+          kind: "directory",
+          etag: 'W/"d"',
+        }),
+      );
+    const api = createApiClient({ fetch });
+
+    await expect(api.metadata("docs", "a.txt")).resolves.toMatchObject({
+      modifiedAtMs: 1_789_599_000_000,
+      accessedAtMs: 1_789_599_600_000,
+      createdAtMs: 1_789_513_200_000,
+    });
+    const directory = await api.metadata("docs", "folder");
+    expect(directory.modifiedAtMs).toBeUndefined();
+    expect(directory.kind).toBe("directory");
   });
 
   it("streams a browser File through FormData with progress, CSRF, and replace preconditions", async () => {

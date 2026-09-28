@@ -30,7 +30,7 @@ Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem l
 
 The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores runtime sessions and each user's chosen start folder. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
 
-Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files and Appearance settings in Settings follow the account across devices as well.
+Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files (off by default) and Appearance settings in Settings follow the account across devices as well.
 
 Account pictures use an accepted Google profile image when available or, when an operator enables `auth.gravatar_enabled`, a Gravatar image keyed by the configured email address. These are browser requests to external hosts; see [authentication and account pictures](docs/authentication.md#account-pictures).
 

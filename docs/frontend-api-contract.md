@@ -20,7 +20,7 @@ This document records the assumptions made by the Preact file-browser shell. The
   "user": { "id": "user-id", "username": "joan", "displayName": "Joan" },
   "shares": [{ "id": "docs", "name": "Documents", "access": "read-write" }],
   "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" },
-  "preferences": { "showHiddenFiles": true, "theme": "system" },
+  "preferences": { "showHiddenFiles": false, "theme": "system" },
   "csrfToken": "opaque-value"
 }
 ```
@@ -31,7 +31,7 @@ An anonymous or expired session returns `401`. `csrfToken` is held in memory and
 
 `defaultFolder` is `null` when no start folder is selected or the saved folder is no longer accessible. Opening `/` goes to this folder when present; a direct `/{shareId}/…` link keeps its own destination. `PUT /api/v1/preferences` accepts `{ "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" } }` or `{ "defaultFolder": null }`, with same-origin and session-bound CSRF checks. The server accepts only an existing directory in a share granted to the current user, stores its virtual share ID and path in SQLite, and returns the new `defaultFolder` value. Passwords and host filesystem paths are not stored in this preference.
 
-`preferences` holds the account's display settings, with `{ "showHiddenFiles": true, "theme": "system" }` for an account that never changed them. `theme` is `system`, `light` or `dark`. `PUT /api/v1/preferences/display` accepts any subset of these fields, such as `{ "theme": "dark" }`, with the same same-origin and session-bound CSRF checks. Omitted fields and the start folder keep their saved values; `null`, an unknown theme or an unknown field returns `400 invalid_request`. The response is the full saved `preferences` object. The browser also keeps a copy of the theme in `localStorage` so the sign-in page and first paint use it; a signed-in session replaces that copy with the account's value. A light or dark choice or a hidden-files choice saved in the browser before these settings followed the account is sent to the account once, when the account still has the default.
+`preferences` holds the account's display settings, with `{ "showHiddenFiles": false, "theme": "system" }` for an account that never changed them. `theme` is `system`, `light` or `dark`. `PUT /api/v1/preferences/display` accepts any subset of these fields, such as `{ "theme": "dark" }`, with the same same-origin and session-bound CSRF checks. Omitted fields and the start folder keep their saved values; `null`, an unknown theme or an unknown field returns `400 invalid_request`. The response is the full saved `preferences` object. The browser also keeps a copy of the theme in `localStorage` so the sign-in page and first paint use it; a signed-in session replaces that copy with the account's value. A light or dark choice or a hidden-files choice saved in the browser before these settings followed the account is sent to the account once, when the account still has the default.
 
 `GET /api/v1/auth/methods` reports the enabled sign-in methods, including `passkeyEnabled`. `POST /api/v1/auth/login` accepts `{ "username": string, "password": string }`, where `username` may be a configured username or email address. It rotates the session identifier and returns the same session shape. Login failures return a generic `401` response. The server validates `Origin`/`Sec-Fetch-Site`, rate-limits attempts, and never includes credential details in responses or logs. When OIDC is enabled, the browser starts at `GET /api/v1/auth/oidc/start`; the server handles the fixed callback and creates the same local session after verifying the provider identity. The sign-in page is always shown before choosing a method.
 
@@ -83,13 +83,14 @@ Trash is a separate per-share view, not a virtual `.crabinet` folder. `GET /api/
   "name": "README.md",
   "kind": "file",
   "size": 2048,
+  "modifiedAtMs": 1789599000000,
   "accessedAtMs": 1789599600000,
   "createdAtMs": 1789513200000,
   "etag": "W/\"opaque-validator\""
 }
 ```
 
-`accessedAtMs` and `createdAtMs` are Unix-epoch milliseconds and are omitted when the filesystem does not expose them. Access time is filesystem metadata, not an application audit trail, and may be approximate under `relatime` or unavailable under `noatime`. Neither timestamp participates in the mutation validator.
+`modifiedAtMs`, `accessedAtMs` and `createdAtMs` are Unix-epoch milliseconds and are omitted when the filesystem does not expose them; clients must treat all three as optional. Access time is filesystem metadata, not an application audit trail, and may be approximate under `relatime` or unavailable under `noatime`. The modification time is the same filesystem value the mutation validator covers, so a change to it also changes `etag`; the access and creation times do not participate in the validator.
 
 ## Browser routes
 

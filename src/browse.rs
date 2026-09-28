@@ -637,6 +637,8 @@ struct MetadataResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     accessed_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<u64>,
@@ -669,6 +671,7 @@ async fn read_metadata(
         name: name.to_owned(),
         kind: kind_name(metadata.kind),
         size: (metadata.kind == EntryKind::File).then_some(metadata.size),
+        modified_at_ms: system_time_millis(metadata.modified),
         accessed_at_ms: system_time_millis(metadata.accessed),
         created_at_ms: system_time_millis(metadata.created),
         etag: etag.clone(),
@@ -1638,7 +1641,7 @@ mod tests {
         assert_eq!(value["size"], 6);
         assert_eq!(value["etag"], header_etag.to_str().unwrap());
         assert!(value.get("modifiedAt").is_none());
-        for timestamp in ["accessedAtMs", "createdAtMs"] {
+        for timestamp in ["modifiedAtMs", "accessedAtMs", "createdAtMs"] {
             if let Some(timestamp) = value.get(timestamp) {
                 assert!(timestamp.as_u64().is_some());
             }
@@ -1680,6 +1683,44 @@ mod tests {
         )
         .await;
         assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn metadata_reports_modification_time_in_epoch_milliseconds() {
+        let fixture = fixture(BrowseLimits::default());
+        let set_modified = |time: SystemTime| {
+            fs::File::options()
+                .write(true)
+                .open(fixture._root.path().join("a.txt"))
+                .and_then(|file| file.set_modified(time))
+                .expect("modification time fixture");
+        };
+        let modified = UNIX_EPOCH + std::time::Duration::from_millis(1_789_599_600_123);
+        set_modified(modified);
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/metadata?path=a.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = json(response).await;
+        assert_eq!(value["modifiedAtMs"], 1_789_599_600_123_u64);
+
+        set_modified(modified + std::time::Duration::from_secs(60));
+        let touched = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/metadata?path=a.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let touched = json(touched).await;
+        assert_eq!(touched["modifiedAtMs"], 1_789_599_660_123_u64);
+        assert_ne!(touched["etag"], value["etag"]);
     }
 
     #[tokio::test]
