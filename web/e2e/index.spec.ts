@@ -505,10 +505,12 @@ test("the folder toolbar drops its labels before leaving the title's line", asyn
       };
     });
 
-  for (const route of [
-    "/writable/Projects",
-    "/writable/Projects/example.toml",
-  ]) {
+  // Labels fit beside the title at some width only without a preview; with
+  // one open, whether they ever fit depends on the fonts installed.
+  for (const [route, expectLabels] of [
+    ["/writable/Projects", true],
+    ["/writable/Projects/example.toml", false],
+  ] as const) {
     if (route.endsWith(".toml")) await page.goto(route);
     else await openSignedIn(page, route, "writer");
     await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
@@ -517,6 +519,13 @@ test("the folder toolbar drops its labels before leaving the title's line", asyn
     let sawIconsBeside = false;
     for (let width = 300; width <= 1400; width += 20) {
       await page.setViewportSize({ width, height: 800 });
+      // Two frames let the resize observer deliver and the class apply.
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          ),
+      );
       await expect
         .poll(rows, { message: `${route} at ${width}px` })
         .toMatchObject({ rows: 1, overflow: false });
@@ -526,7 +535,7 @@ test("the folder toolbar drops its labels before leaving the title's line", asyn
       sawIconsBeside ||= state.compact && state.beside;
     }
     expect(sawCompact).toBe(true);
-    expect(sawLabels).toBe(true);
+    if (expectLabels) expect(sawLabels).toBe(true);
     expect(sawIconsBeside).toBe(true);
   }
 });
