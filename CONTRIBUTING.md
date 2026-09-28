@@ -94,7 +94,7 @@ Examples must not contain real secrets or usable credentials. Commands should be
 
 ## Pull requests and release preparation
 
-Keep a pull request focused and explain user-visible behavior, security impact, test evidence, and operational changes. Link the issue with `Fixes #N`. All required CI jobs must pass: frontend, Rust, dependency policy/review, workflow lint, Semgrep, and Trivy.
+Keep a pull request focused and explain user-visible behavior, security impact, test evidence, and operational changes. Link the issue with `Fixes #N`. All required CI jobs must pass: frontend, Rust, Clippy, browser E2E, dependency policy/review, workflow lint, Semgrep, and Trivy.
 
 Releases are created from signed semantic-version tags matching `vX.Y.Z`. Before tagging:
 
