@@ -245,7 +245,7 @@ export function PasskeySettings({
                     />
                     <div class="passkey-actions">
                       <button
-                        class="button"
+                        class="button button-secondary"
                         type="button"
                         disabled={busy || !editedName.trim()}
                         onClick={() => void rename(key.id)}
@@ -314,7 +314,7 @@ export function PasskeySettings({
               disabled={busy}
             />
             <button
-              class="button"
+              class="button button-primary"
               type="button"
               disabled={
                 busy ||
