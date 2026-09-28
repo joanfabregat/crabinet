@@ -2020,6 +2020,10 @@ html.preview-fullscreen-open body {
     width: 2.75rem;
   }
 
+  .preview-edit-button {
+    min-height: 2.75rem;
+  }
+
   .tree-row,
   .picker-row {
     min-height: 3rem;
