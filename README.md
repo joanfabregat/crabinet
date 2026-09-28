@@ -208,6 +208,6 @@ Crabinet emits structured JSON logs to standard output. Set `RUST_LOG=crabinet=d
 
 ## Development and security
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the containerized Rust/Node workflow and required checks, [development preview](docs/development-preview.md) for the agent-held HMR preview, and [dependency licensing](docs/dependency-licenses.md) for the enforced policy and release notices. Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/joanfabregat/crabinet/security/advisories/new), following [SECURITY.md](SECURITY.md); do not open a public issue for an unpatched vulnerability or include active credentials in any report.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the containerized Rust/Node workflow, required checks, and development server, and [dependency licensing](docs/dependency-licenses.md) for the enforced policy and release notices. Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/joanfabregat/crabinet/security/advisories/new), following [SECURITY.md](SECURITY.md); do not open a public issue for an unpatched vulnerability or include active credentials in any report.
 
 Crabinet is released under the [MIT License](LICENSE). Bundled dependencies retain their own terms, collected in [Third-party licenses](THIRD_PARTY_LICENSES.md). Releases built from this revision include both files in archives and container images.

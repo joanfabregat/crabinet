@@ -12,38 +12,30 @@ Thank you for improving Crabinet. Security-sensitive changes need evidence: a cl
 
 ## Toolchains and isolation
 
-The supported toolchains are pinned in CI: Rust 1.90 and Node 24. Do not execute project Rust, JavaScript, TypeScript, build scripts, or package lifecycle scripts directly on an untrusted host. Use the repository's approved constrained container runner or an equivalent locked-down rootless Podman environment.
+The supported toolchains are pinned in CI: Rust 1.90 and Node 24. Do not execute project Rust, JavaScript, TypeScript, build scripts, or package lifecycle scripts directly on an untrusted host. Run them in a locked-down container, such as rootless Podman with no host credentials mounted, and split dependency work into two phases: fetch and audit with the network but without running any dependency code, then build and test offline.
 
-On Joan's dev-vm, use the shared runners described by the `run-rust`, `run-node`, and `run-playwright` skills. `web/.npmrc` sets `ignore-scripts=true`, so installs never run lifecycle scripts implicitly. Fetch and audit the locked dependencies with lifecycle scripts disabled:
+`web/.npmrc` sets `ignore-scripts=true`, so installs never run lifecycle scripts implicitly. Fetch and audit the locked dependencies with lifecycle scripts disabled:
 
 ```sh
 cd web
-~/bin/run-podman \
-  --network \
-  --project "$PWD" \
-  --cache npm \
-  --memory 4g \
-  --cpus 2 \
-  --timeout 30m \
+podman run --rm \
+  --userns=keep-id \
+  --volume "$PWD:/workspace" \
+  --workdir /workspace \
   docker.io/library/node:24-bookworm-slim \
-  /bin/sh -lc '
-    set -eu
-    npm ci --ignore-scripts
-    npm audit --audit-level=high
-  '
+  /bin/sh -c 'npm ci --ignore-scripts && npm audit --audit-level=high'
 ```
 
-Then run esbuild's reviewed install script, the one lifecycle script the build needs, and the checks offline with a read-only cache:
+Then run esbuild's reviewed install script, the one lifecycle script the build needs, and the checks offline:
 
 ```sh
-~/bin/run-podman \
-  --project "$PWD" \
-  --cache-ro npm \
-  --memory 4g \
-  --cpus 2 \
-  --timeout 30m \
+podman run --rm \
+  --network none \
+  --userns=keep-id \
+  --volume "$PWD:/workspace" \
+  --workdir /workspace \
   docker.io/library/node:24-bookworm-slim \
-  /bin/sh -lc '
+  /bin/sh -c '
     set -eu
     export npm_config_nodedir=/usr/local
     npm rebuild esbuild --ignore-scripts=false
@@ -55,16 +47,20 @@ Then run esbuild's reviewed install script, the one lifecycle script the build n
   '
 ```
 
-Rust commands use the constrained wrapper from the repository root:
+Rust checks, from the repository root in a Rust 1.90 container with `rustfmt`, `clippy`, and `cargo-audit`. Run `cargo fetch --locked` with the network first, then the rest offline, because build scripts and procedural macros execute at compile time:
 
 ```sh
-~/.claude/local/scripts/run-rust audit
-~/.claude/local/scripts/run-rust fmt --all -- --check
-~/.claude/local/scripts/run-rust clippy --all-targets --all-features -- -D warnings
-~/.claude/local/scripts/run-rust test --all-targets --all-features
+cargo audit
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
 ```
 
 CI rebuilds the frontend before compiling Rust. If you build locally, do the same so `rust-embed` sees current assets. Never commit `node_modules`, `target`, generated frontend bundles, session databases, secrets, test credentials, or share fixtures containing private data.
+
+### Development server
+
+`npm run dev` in `web` serves the frontend with hot module replacement. To route it through a TLS reverse proxy against a running debug backend, set `CRABINET_DEV_BACKEND_URL` (the backend's base URL, proxied for `/api` and `/health`) and `CRABINET_DEV_PUBLIC_HOST` (the public hostname; HMR then connects over `wss` on port 443). `CRABINET_DEV_GIT_DIR` points at a `.git` directory to show the revision in the UI, and `CRABINET_VITE_CACHE_DIR` moves Vite's cache. Use the synthetic fixtures under `web/e2e/fixtures` as shares, never private data.
 
 ## Change expectations
 

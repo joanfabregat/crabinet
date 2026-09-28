@@ -12,7 +12,7 @@ cargo build --locked --release
 cd web && npm run test:e2e
 ```
 
-On the dev VM these commands must run through the repository's constrained Node, Rust, and Playwright container workflows. The Playwright image tag must match the locked `@playwright/test` version.
+Run these commands in locked-down containers, as [CONTRIBUTING.md](../CONTRIBUTING.md) describes. The Playwright image tag must match the locked `@playwright/test` version.
 
 `npm run test:e2e` is the single test command after the production artifact exists. It covers desktop and narrow/mobile Chromium with one worker so state and logs remain deterministic. CI builds the artifact first and uploads the HTML report, trace, screenshot, and video directory on failure.
 
