@@ -20,6 +20,7 @@ import type { BrowserNavigation, BrowserRoute } from "./navigation";
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
   shares: [{ id: "docs", name: "Documents", access: "read" }],
+  preferences: { showHiddenFiles: true, theme: "system" },
   csrfToken: "memory-only-csrf",
 };
 
@@ -94,6 +95,9 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     removePasskey: overrides.removePasskey ?? vi.fn(),
     updateDefaultFolder:
       overrides.updateDefaultFolder ?? vi.fn(async (folder) => folder),
+    updatePreferences:
+      overrides.updatePreferences ??
+      vi.fn(async (update) => ({ ...session.preferences, ...update })),
     directory: overrides.directory ?? vi.fn(async () => files),
     preview:
       overrides.preview ?? vi.fn(async () => previewDocument("plain text")),
@@ -169,13 +173,11 @@ describe("secure file previews", () => {
     expect(document.querySelector("script")).toBeNull();
     expect(storageSpy).not.toHaveBeenCalled();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Disable line wrapping" }),
-    );
+    const wrapToggle = screen.getByRole("checkbox", { name: "Wrap lines" });
+    expect(wrapToggle).toBeChecked();
+    fireEvent.click(wrapToggle);
     expect(sourceRegion).not.toHaveClass("source-code-wrap");
-    expect(
-      screen.getByRole("button", { name: "Enable line wrapping" }),
-    ).toHaveAttribute("aria-pressed", "false");
+    expect(wrapToggle).not.toBeChecked();
     storageSpy.mockRestore();
   });
 
@@ -251,25 +253,33 @@ describe("secure file previews", () => {
     expect(frame.getAttribute("sandbox")?.split(/\s+/).filter(Boolean)).toEqual(
       [],
     );
-    expect(panel).toHaveTextContent(
-      "Scripts, forms, navigation, storage, popups, and network requests are disabled",
-    );
-    fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
-    expect(frame).toHaveAttribute(
-      "src",
-      "/api/v1/shares/docs/preview/html?path=demo.html&v=0-0",
-    );
+    expect(
+      within(panel).getByRole("button", {
+        name: /Scripts, forms, navigation, storage, popups, and network requests are disabled/,
+      }),
+    ).toBeInTheDocument();
     const renderedNewTab = within(panel).getByRole("link", {
       name: "Open rendered HTML in new tab",
     });
     expect(renderedNewTab).toHaveAttribute(
       "href",
-      "/api/v1/shares/docs/preview/html/rendered?path=demo.html",
+      "/api/v1/shares/docs/preview/html/rendered?path=demo.html&v=0-0",
     );
+    expect(renderedNewTab).toHaveAttribute("target", "_blank");
     expect(renderedNewTab).toHaveAttribute("rel", "noopener noreferrer");
-    expect(
-      within(panel).getByRole("link", { name: "Open HTML source in new tab" }),
-    ).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
+    expect(frame).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/html?path=demo.html&v=0-0",
+    );
+    const sourceNewTab = within(panel).getByRole("link", {
+      name: "Open HTML source in new tab",
+    });
+    expect(sourceNewTab).toHaveAttribute(
+      "href",
+      "/api/v1/shares/docs/preview/html?path=demo.html&v=0-0",
+    );
+    expect(sourceNewTab).toHaveAttribute("rel", "noopener noreferrer");
     expect(
       within(panel).getByRole("link", { name: "Download demo.html" }),
     ).toHaveAttribute("href", "/api/v1/shares/docs/download?path=demo.html");
@@ -329,6 +339,7 @@ describe("secure file previews", () => {
         name: "photo.png",
         kind: "file" as const,
         size: 2048,
+        modifiedAtMs: 1_699_000_000_000,
         accessedAtMs: 1_700_000_000_000,
         createdAtMs: 1_690_000_000_000,
         etag: 'W/"photo"',

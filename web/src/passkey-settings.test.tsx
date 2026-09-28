@@ -28,6 +28,7 @@ import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
   shares: [{ id: "work", name: "Working files", access: "read-write" }],
+  preferences: { showHiddenFiles: true, theme: "system" },
   csrfToken: "csrf",
 };
 

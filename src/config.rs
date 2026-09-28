@@ -516,6 +516,15 @@ impl Config {
         let mut shares = Vec::with_capacity(raw.shares.len());
         for share in raw.shares {
             validate_identifier("share id", &share.id)?;
+            if RESERVED_SHARE_IDS
+                .iter()
+                .any(|reserved| share.id.eq_ignore_ascii_case(reserved))
+            {
+                return Err(ConfigError::Validation(format!(
+                    "share id {:?} is reserved because it is a top-level URL of the app",
+                    share.id
+                )));
+            }
             validate_display_name(&share.id, &share.name)?;
             if !share_ids.insert(share.id.clone()) {
                 return Err(ConfigError::Validation(format!(
@@ -821,6 +830,23 @@ fn resolve_path(base: &Path, path: &Path) -> PathBuf {
     }
     normalized
 }
+
+/// Share ids form the first URL segment (`/<share>/<path>`), so they must not
+/// shadow server routes, embedded assets, legacy routes, or Vite dev paths.
+/// Keep in sync with `reservedShareIds` in `web/src/navigation.ts`.
+const RESERVED_SHARE_IDS: &[&str] = &[
+    "api",
+    "assets",
+    "browse",
+    "crabinet.png",
+    "favicon.ico",
+    "google-g.png",
+    "health",
+    "index.html",
+    "node_modules",
+    "src",
+    "trash",
+];
 
 fn validate_identifier(kind: &str, value: &str) -> Result<(), ConfigError> {
     let valid = (1..=64).contains(&value.len())
@@ -1311,6 +1337,26 @@ permission = "write"
                 .unwrap_err()
                 .to_string()
                 .contains("duplicate email")
+        );
+    }
+
+    #[test]
+    fn share_ids_that_shadow_top_level_urls_are_rejected() {
+        let tree = TestTree::new();
+        for reserved in ["api", "Assets", "trash", "src", "crabinet.png"] {
+            let text = tree
+                .valid_text()
+                .replace("id = \"files\"", &format!("id = {reserved:?}"));
+            let error = tree.load(&text).unwrap_err().to_string();
+            assert!(error.contains("is reserved"), "{reserved}: {error}");
+        }
+        assert!(
+            tree.load(
+                &tree
+                    .valid_text()
+                    .replace("id = \"files\"", "id = \"api-docs\"")
+            )
+            .is_ok()
         );
     }
 

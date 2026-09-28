@@ -7,6 +7,7 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
   window.sessionStorage.clear();
+  delete document.documentElement.dataset.theme;
 });
 
 globalThis.requestAnimationFrame = (callback: FrameRequestCallback) => {

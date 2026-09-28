@@ -15,20 +15,52 @@ export interface BrowserNavigation {
   subscribe(listener: (route: BrowserRoute) => void): () => void;
 }
 
+/**
+ * A URL ending in a file name reads the same as one ending in a folder
+ * name, so each history entry keeps the route the app resolved for it.
+ */
+function historyRoute(url: URL): BrowserRoute {
+  const saved: unknown = (window.history.state as { route?: unknown } | null)
+    ?.route;
+  if (
+    saved &&
+    typeof saved === "object" &&
+    browserUrl(saved as BrowserRoute) === url.pathname + url.search
+  ) {
+    return { ...(saved as BrowserRoute) };
+  }
+  return routeFromUrl(url);
+}
+
 export const browserNavigation: BrowserNavigation = {
-  current: () => routeFromUrl(new URL(window.location.href)),
+  current: () => {
+    const url = new URL(window.location.href);
+    const route = historyRoute(url);
+    const canonical = browserUrl(route);
+    // Rewrite bookmarks from the former /browse/, ?path= and ?preview= forms.
+    if (
+      route.shareId &&
+      canonical !== url.pathname + url.search &&
+      (url.pathname.startsWith("/browse/") ||
+        url.searchParams.has("path") ||
+        url.searchParams.has("preview"))
+    ) {
+      window.history.replaceState({ route }, "", canonical + url.hash);
+    }
+    return route;
+  },
   go: (route, options) => {
     const url = browserUrl(route);
     if (options?.replace) {
-      window.history.replaceState(null, "", url);
+      window.history.replaceState({ route }, "", url);
     } else {
-      window.history.pushState(null, "", url);
+      window.history.pushState({ route }, "", url);
     }
     window.dispatchEvent(new PopStateEvent("popstate"));
   },
   subscribe: (listener) => {
     const handlePopState = () =>
-      listener(routeFromUrl(new URL(window.location.href)));
+      listener(historyRoute(new URL(window.location.href)));
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   },
@@ -47,11 +79,21 @@ export function routeFromUrl(url: URL): BrowserRoute {
       return { shareId: null, path: "" };
     }
   }
-  const match = /^\/browse\/([^/]+)\/?$/.exec(url.pathname);
-  if (!match) return { shareId: null, path: "" };
+  // `/browse/` is the former prefix; links using it still resolve.
+  const match = /^\/(?:browse\/)?([^/]+)(?:\/(.*))?$/.exec(url.pathname);
+  if (!match || isReservedShareId(match[1]!)) {
+    return { shareId: null, path: "" };
+  }
 
   try {
-    const path = url.searchParams.get("path") ?? "";
+    const segments = (match[2] ?? "")
+      .split("/")
+      .filter(Boolean)
+      .map(decodeURIComponent);
+    // An encoded slash cannot come from a real folder name.
+    const path = segments.some((segment) => segment.includes("/"))
+      ? ""
+      : segments.join("/") || (url.searchParams.get("path") ?? "");
     const previewPath = url.searchParams.get("preview");
     const route: BrowserRoute = {
       shareId: decodeURIComponent(match[1]!),
@@ -59,12 +101,37 @@ export function routeFromUrl(url: URL): BrowserRoute {
     };
     if (previewPath !== null && isValidVirtualPath(previewPath)) {
       route.previewPath = previewPath;
-      if (url.searchParams.get("view") === "full") route.previewMode = "full";
     }
+    // Without ?preview= the last segment may still name a file; the app
+    // resolves that and keeps the requested full-screen mode.
+    if (url.searchParams.get("view") === "full") route.previewMode = "full";
     return route;
   } catch {
     return { shareId: null, path: "" };
   }
+}
+
+/**
+ * First URL segments that belong to the server or the dev server rather than
+ * a share. Keep in sync with `RESERVED_SHARE_IDS` in `src/config.rs`, which
+ * refuses to start with a share that uses one.
+ */
+const reservedShareIds = new Set([
+  "api",
+  "assets",
+  "browse",
+  "crabinet.png",
+  "favicon.ico",
+  "google-g.png",
+  "health",
+  "index.html",
+  "node_modules",
+  "src",
+  "trash",
+]);
+
+function isReservedShareId(segment: string): boolean {
+  return reservedShareIds.has(segment.toLowerCase()) || segment.startsWith("@");
 }
 
 export function directoryUrl(shareId: string | null, path: string): string {
@@ -90,13 +157,22 @@ function browserUrl(route: BrowserRoute): string {
   if (route.view === "trash") return trashUrl(shareId);
   const query = new URLSearchParams();
   const safePath = isValidVirtualPath(route.path) ? route.path : "";
-  if (safePath) query.set("path", safePath);
-  if (route.previewPath && isValidVirtualPath(route.previewPath)) {
-    query.set("preview", route.previewPath);
-    if (route.previewMode === "full") query.set("view", "full");
-  }
+  const previewPath =
+    route.previewPath && isValidVirtualPath(route.previewPath)
+      ? route.previewPath
+      : null;
+  // A file previewed from its own folder is addressed by its own path.
+  const inline = previewPath !== null && parentPath(previewPath) === safePath;
+  const pathSuffix = (inline ? previewPath : safePath)
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => `/${encodeURIComponent(segment)}`)
+    .join("");
+  if (previewPath !== null && !inline) query.set("preview", previewPath);
+  // Also kept before a file link resolves, so full screen survives it.
+  if (route.previewMode === "full") query.set("view", "full");
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return `/browse/${encodeURIComponent(shareId)}${suffix}`;
+  return `/${encodeURIComponent(shareId)}${pathSuffix}${suffix}`;
 }
 
 export function parentPath(path: string): string {

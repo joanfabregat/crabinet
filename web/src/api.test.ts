@@ -75,6 +75,59 @@ describe("API client", () => {
     );
   });
 
+  it("saves display settings as a partial CSRF-protected update", async () => {
+    const saved = { showHiddenFiles: false, theme: "dark" };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(Response.json(saved));
+
+    await expect(
+      createApiClient({ fetch }).updatePreferences(
+        { theme: "dark" },
+        "csrf-value",
+      ),
+    ).resolves.toEqual(saved);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/preferences/display",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "same-origin",
+        body: JSON.stringify({ theme: "dark" }),
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "X-CSRF-Token": "csrf-value",
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [undefined],
+    [{ showHiddenFiles: "true", theme: "system" }],
+    [{ showHiddenFiles: true, theme: "sepia" }],
+    [{ showHiddenFiles: true }],
+  ])("rejects display settings %j that break the contract", async (value) => {
+    const session = {
+      user: { id: "u", username: "u", displayName: "U" },
+      shares: [],
+      preferences: value,
+      csrfToken: "csrf",
+    };
+    const respond = (body: unknown) =>
+      createApiClient({
+        fetch: vi
+          .fn<typeof globalThis.fetch>()
+          .mockResolvedValue(Response.json(body ?? {})),
+      });
+
+    await expect(respond(session).session()).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+    await expect(
+      respond(value).updatePreferences({ theme: "dark" }, "csrf"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
   it("sends authentication mutations once and includes CSRF only on logout", async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
@@ -312,6 +365,7 @@ describe("API client", () => {
         Response.json({
           user: { id: "u", username: "u", displayName: "U", pictureUrl: url },
           shares: [],
+          preferences: { showHiddenFiles: true, theme: "system" },
           csrfToken: "csrf",
         }),
       );
@@ -416,6 +470,7 @@ describe("API client", () => {
     const refreshed = {
       user: { id: "u", username: "u", displayName: "U" },
       shares: [],
+      preferences: { showHiddenFiles: true, theme: "system" as const },
       csrfToken: "fresh",
     };
     const api = { session: vi.fn(async () => refreshed) };
@@ -691,6 +746,17 @@ describe("API client", () => {
           accessedAtMs: -1,
           etag: 'W/"v"',
         }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "c.txt",
+          name: "c.txt",
+          kind: "file",
+          size: 1,
+          modifiedAtMs: "2026-09-16T18:30:00Z",
+          etag: 'W/"v"',
+        }),
       );
     const api = createApiClient({ fetch });
 
@@ -703,6 +769,46 @@ describe("API client", () => {
     await expect(api.metadata("docs", "b.txt")).rejects.toMatchObject({
       kind: "invalid-response",
     });
+    await expect(api.metadata("docs", "c.txt")).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+  });
+
+  it("parses optional metadata timestamps, including the modification time", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "a.txt",
+          name: "a.txt",
+          kind: "file",
+          size: 1,
+          modifiedAtMs: 1_789_599_000_000,
+          accessedAtMs: 1_789_599_600_000,
+          createdAtMs: 1_789_513_200_000,
+          etag: 'W/"v"',
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "folder",
+          name: "folder",
+          kind: "directory",
+          etag: 'W/"d"',
+        }),
+      );
+    const api = createApiClient({ fetch });
+
+    await expect(api.metadata("docs", "a.txt")).resolves.toMatchObject({
+      modifiedAtMs: 1_789_599_000_000,
+      accessedAtMs: 1_789_599_600_000,
+      createdAtMs: 1_789_513_200_000,
+    });
+    const directory = await api.metadata("docs", "folder");
+    expect(directory.modifiedAtMs).toBeUndefined();
+    expect(directory.kind).toBe("directory");
   });
 
   it("streams a browser File through FormData with progress, CSRF, and replace preconditions", async () => {

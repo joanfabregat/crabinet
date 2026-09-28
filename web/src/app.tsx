@@ -5,11 +5,13 @@ import {
   startAuthentication,
 } from "@simplewebauthn/browser";
 import {
-  Code2,
   Download,
   ExternalLink,
   FilePenLine,
   FolderInput,
+  FolderOpen,
+  FolderTree,
+  Info,
   LogOut,
   Maximize2,
   Minimize2,
@@ -39,6 +41,7 @@ import {
   type PreviewDocument,
   type Session,
   type Share,
+  type UserPreferences,
 } from "./api";
 import {
   EntryActionButtons,
@@ -65,22 +68,50 @@ import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 import { TrashView } from "./trash";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
+import {
+  applyThemePreference,
+  readLegacyThemePreference,
+  saveThemePreference,
+  subscribeThemePreference,
+  type ThemePreference,
+} from "./theme";
 
 const defaultApi = createApiClient();
 declare const __CRABINET_DEV_REVISION__: string | null;
 
-function hiddenFilesPreferenceKey(userId: string): string {
+// Before settings followed the account, this per-browser key held the
+// hidden-files choice. It is read once to carry the choice over, then removed.
+function legacyHiddenFilesKey(userId: string): string {
   return `crabinet.showHiddenFiles.${userId}`;
 }
 
-function readShowHiddenFiles(userId: string): boolean {
+function readLegacyHiddenFiles(userId: string): string | null {
   try {
-    return (
-      window.localStorage.getItem(hiddenFilesPreferenceKey(userId)) !== "false"
-    );
+    return window.localStorage.getItem(legacyHiddenFilesKey(userId));
   } catch {
-    return true;
+    return null;
   }
+}
+
+function removeLegacyHiddenFiles(userId: string): void {
+  try {
+    window.localStorage.removeItem(legacyHiddenFilesKey(userId));
+  } catch {
+    // Nothing to clean up when storage is blocked.
+  }
+}
+
+/** The saved values of the settings named in `update`. */
+function pickPreferences(
+  preferences: UserPreferences,
+  update: Partial<UserPreferences>,
+): Partial<UserPreferences> {
+  const picked: Partial<UserPreferences> = {};
+  if (update.showHiddenFiles !== undefined) {
+    picked.showHiddenFiles = preferences.showHiddenFiles;
+  }
+  if (update.theme !== undefined) picked.theme = preferences.theme;
+  return picked;
 }
 
 type AuthState =
@@ -107,6 +138,21 @@ export function App({
   );
   const handleSignedOut = useCallback(
     () => setAuth({ status: "guest", reason: "signed_out" }),
+    [],
+  );
+  const handlePreferencesChanged = useCallback(
+    (update: Partial<UserPreferences>) =>
+      setAuth((current) =>
+        current.status === "authenticated"
+          ? {
+              ...current,
+              session: {
+                ...current.session,
+                preferences: { ...current.session.preferences, ...update },
+              },
+            }
+          : current,
+      ),
     [],
   );
 
@@ -187,6 +233,7 @@ export function App({
             : current,
         )
       }
+      onPreferencesChanged={handlePreferencesChanged}
       onSessionRefreshed={(session) =>
         setAuth((current) =>
           current.status === "authenticated" &&
@@ -341,7 +388,12 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
             </Notice>
           )}
           {oidcError === "unrecognized" && (
-            <a href="/api/v1/auth/oidc/disconnect">Disconnect</a>
+            <a
+              class="button button-secondary"
+              href="/api/v1/auth/oidc/disconnect"
+            >
+              Disconnect
+            </a>
           )}
           {methodsError && (
             <Notice tone="danger">
@@ -420,6 +472,8 @@ interface AuthenticatedShellProps {
   onSessionExpired: () => void;
   onSignedOut: () => void;
   onDefaultFolderChanged: (folder: DefaultFolder | null) => void;
+  /** Merges display settings into the session without saving them. */
+  onPreferencesChanged: (update: Partial<UserPreferences>) => void;
   onSessionRefreshed: (session: Session) => void;
 }
 
@@ -431,6 +485,7 @@ function AuthenticatedShell({
   onSessionExpired,
   onSignedOut,
   onDefaultFolderChanged,
+  onPreferencesChanged,
   onSessionRefreshed,
 }: AuthenticatedShellProps) {
   const [signingOut, setSigningOut] = useState(false);
@@ -439,9 +494,9 @@ function AuthenticatedShell({
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string>();
-  const [showHiddenFiles, setShowHiddenFiles] = useState(() =>
-    readShowHiddenFiles(session.user.id),
-  );
+  const { showHiddenFiles, theme: themePreference } = session.preferences;
+  const legacyCheckedUser = useRef<string>();
+  const carryingTheme = useRef<ThemePreference>();
   const selectedShare = session.shares.find(
     (share) => share.id === route.shareId,
   );
@@ -461,28 +516,108 @@ function AuthenticatedShell({
       : defaultFolder.shareId
     : "";
 
-  useEffect(() => {
-    const key = hiddenFilesPreferenceKey(session.user.id);
-    setShowHiddenFiles(readShowHiddenFiles(session.user.id));
-    const syncPreference = (event: StorageEvent) => {
-      if (event.key === key || event.key === null) {
-        setShowHiddenFiles(readShowHiddenFiles(session.user.id));
+  /**
+   * Applies `update` at once and saves it to the account. A failed save of a
+   * Settings change is reverted and reported; a failed carry-over of an
+   * earlier browser-only choice (`carryOver`) stays applied and is retried on
+   * the next visit.
+   */
+  const savePreferences = async (
+    update: Partial<UserPreferences>,
+    { carryOver = false } = {},
+  ): Promise<boolean> => {
+    const previous = pickPreferences(session.preferences, update);
+    onPreferencesChanged(update);
+    if (!carryOver) setPreferencesError(undefined);
+    try {
+      const saved = await withCsrfRetry(
+        api,
+        session.csrfToken,
+        session.user.id,
+        onSessionRefreshed,
+        (token) => api.updatePreferences(update, token),
+      );
+      // Only the fields sent here: another change may still be in flight.
+      onPreferencesChanged(pickPreferences(saved, update));
+      return true;
+    } catch (error) {
+      if (carryOver) return false;
+      onPreferencesChanged(previous);
+      if (isUnauthorized(error)) {
+        onSessionExpired();
+      } else if (
+        error instanceof ApiError &&
+        error.code === accountChangedCode
+      ) {
+        setPreferencesError(
+          "A different account is now signed in. Reload the page to continue.",
+        );
+      } else {
+        setPreferencesError(
+          update.theme !== undefined
+            ? "Could not save your appearance choice. Try again."
+            : "Could not save your hidden files choice. Try again.",
+        );
       }
-    };
-    window.addEventListener("storage", syncPreference);
-    return () => window.removeEventListener("storage", syncPreference);
-  }, [session.user.id]);
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    let carryOver: Partial<UserPreferences> | undefined;
+    if (legacyCheckedUser.current !== session.user.id) {
+      legacyCheckedUser.current = session.user.id;
+      carryOver = {};
+      const legacyHidden = readLegacyHiddenFiles(session.user.id);
+      if (legacyHidden === "true" && !session.preferences.showHiddenFiles) {
+        carryOver.showHiddenFiles = true;
+      } else if (legacyHidden !== null) {
+        removeLegacyHiddenFiles(session.user.id);
+      }
+      const legacyTheme = readLegacyThemePreference();
+      if (legacyTheme && session.preferences.theme === "system") {
+        carryOver.theme = legacyTheme;
+        carryingTheme.current = legacyTheme;
+      }
+    }
+    // Until the account has an earlier browser-only theme, leave that copy
+    // unmarked so a failed carry-over is retried on the next visit.
+    if (carryingTheme.current === undefined) {
+      saveThemePreference(themePreference);
+    } else {
+      applyThemePreference(themePreference);
+    }
+    if (carryOver && Object.keys(carryOver).length > 0) {
+      const update = carryOver;
+      void savePreferences(update, { carryOver: true }).then((saved) => {
+        if (!saved) return;
+        if (update.showHiddenFiles !== undefined) {
+          removeLegacyHiddenFiles(session.user.id);
+        }
+        if (update.theme !== undefined && carryingTheme.current) {
+          carryingTheme.current = undefined;
+          saveThemePreference(update.theme);
+        }
+      });
+    }
+    // savePreferences reads the current session; rerunning on its identity
+    // would repeat the carry-over check on every render.
+  }, [session.user.id, themePreference]);
+
+  // Another tab saved a new theme and updated the shared copy.
+  useEffect(
+    () => subscribeThemePreference((theme) => onPreferencesChanged({ theme })),
+    [onPreferencesChanged],
+  );
+
+  const updateThemePreference = (value: ThemePreference) => {
+    // A choice made here replaces any earlier browser-only theme.
+    carryingTheme.current = undefined;
+    void savePreferences({ theme: value });
+  };
 
   const updateShowHiddenFiles = (value: boolean) => {
-    setShowHiddenFiles(value);
-    try {
-      window.localStorage.setItem(
-        hiddenFilesPreferenceKey(session.user.id),
-        String(value),
-      );
-    } catch {
-      // The display preference still works for this tab if storage is blocked.
-    }
+    void savePreferences({ showHiddenFiles: value });
   };
 
   const saveDefaultFolder = async (folder: DefaultFolder | null) => {
@@ -535,7 +670,7 @@ function AuthenticatedShell({
   };
 
   return (
-    <div class="app-frame">
+    <div class="app-frame app-shell">
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
           Development preview · revision{" "}
@@ -617,7 +752,28 @@ function AuthenticatedShell({
               />
               Show hidden files
             </label>
-            <p class="muted">Saved in this browser for your account.</p>
+            <p class="muted">
+              This setting follows your account across devices.
+            </p>
+            <label class="settings-subsection" for="theme-preference">
+              Appearance
+            </label>
+            <select
+              id="theme-preference"
+              value={themePreference}
+              onChange={(event) =>
+                updateThemePreference(
+                  event.currentTarget.value as ThemePreference,
+                )
+              }
+            >
+              <option value="system">Match system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+            <p class="muted">
+              This setting follows your account across devices.
+            </p>
             {preferencesError && (
               <Notice tone="danger">{preferencesError}</Notice>
             )}
@@ -659,8 +815,11 @@ function AuthenticatedShell({
         ) : (
           <p role="status">Opening a shared folder…</p>
         )}
+        <TooltipLayer />
       </main>
-      <TooltipLayer />
+      {session.version && (
+        <footer class="app-footer">Crabinet {session.version}</footer>
+      )}
     </div>
   );
 }
@@ -706,7 +865,10 @@ function DirectoryBrowser({
     name: string;
   }>();
   const [deletingPath, setDeletingPath] = useState<string>();
-  const undoTimer = useRef<number>();
+  // On narrow screens the tree lives in a drawer opened from "Folders".
+  const [treeOpen, setTreeOpen] = useState(false);
+  const treeToggleRef = useRef<HTMLButtonElement>(null);
+  const treeDrawerRef = useRef<HTMLDivElement>(null);
   const loadMoreController = useRef<AbortController>();
   const previewOperationController = useRef<AbortController>();
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -723,8 +885,6 @@ function DirectoryBrowser({
         (showHiddenFiles || !entry.name.startsWith(".")),
     ) ?? [];
 
-  useEffect(() => () => window.clearTimeout(undoTimer.current), []);
-
   const deleteToTrash = async (entry: DirectoryEntry, path: string) => {
     if (deletingPath || !writable) return;
     setDeletingPath(path);
@@ -740,16 +900,11 @@ function DirectoryBrowser({
         onSessionRefreshed,
         (token) => api.deleteEntry(share.id, path, metadata.etag, token),
       );
-      window.clearTimeout(undoTimer.current);
       setRecentlyDeleted({
         shareId: share.id,
         id: result.trashId,
         name: entry.name,
       });
-      undoTimer.current = window.setTimeout(
-        () => setRecentlyDeleted(undefined),
-        8_000,
-      );
       changed({ kind: "delete", entry, path });
     } catch (cause) {
       if (isUnauthorized(cause)) onSessionExpired();
@@ -771,7 +926,6 @@ function DirectoryBrowser({
       await withCsrfRetry(api, csrfToken, userId, onSessionRefreshed, (token) =>
         api.restoreTrash(deleted.shareId, deleted.id, undefined, token),
       );
-      window.clearTimeout(undoTimer.current);
       setRecentlyDeleted(undefined);
       setRefreshKey((value) => value + 1);
     } catch (cause) {
@@ -779,6 +933,19 @@ function DirectoryBrowser({
       else setDeleteError("Could not undo. Open Trash to restore the item.");
     }
   };
+
+  useEffect(() => {
+    setTreeOpen(false);
+  }, [route.path, route.previewPath, route.view, share.id]);
+
+  useEffect(() => {
+    if (!treeOpen) return;
+    const drawer = treeDrawerRef.current;
+    (
+      drawer?.querySelector<HTMLElement>('[aria-current="page"]') ??
+      drawer?.querySelector<HTMLElement>("a[href], button:not(:disabled)")
+    )?.focus();
+  }, [treeOpen]);
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
@@ -931,7 +1098,38 @@ function DirectoryBrowser({
             onSessionExpired();
             return;
           }
-          setError(asApiError(cause));
+          const error = asApiError(cause);
+          // A link may end in a file name: open its folder and preview it.
+          if (error.kind === "not-found" && route.path && !route.previewPath) {
+            void api.metadata(share.id, route.path, controller.signal).then(
+              (entry) => {
+                if (controller.signal.aborted) return;
+                if (entry?.kind !== "file") {
+                  setError(error);
+                  setLoading(false);
+                  return;
+                }
+                navigation.go(
+                  {
+                    shareId: share.id,
+                    path: parentPath(route.path),
+                    previewPath: route.path,
+                    ...(route.previewMode === "full"
+                      ? { previewMode: "full" as const }
+                      : {}),
+                  },
+                  { replace: true },
+                );
+              },
+              () => {
+                if (controller.signal.aborted) return;
+                setError(error);
+                setLoading(false);
+              },
+            );
+            return;
+          }
+          setError(error);
           setLoading(false);
         },
       );
@@ -942,6 +1140,7 @@ function DirectoryBrowser({
     };
   }, [
     api,
+    navigation,
     onSessionExpired,
     refreshKey,
     route.path,
@@ -1147,22 +1346,52 @@ function DirectoryBrowser({
 
   return (
     <div
-      class={`browser-workspace${route.previewPath ? " has-preview" : ""}${route.previewMode === "full" ? " preview-full" : ""}`}
+      class={`browser-workspace${route.previewPath ? " has-preview" : ""}${route.previewPath && route.previewMode === "full" ? " preview-full" : ""}`}
     >
-      <ShareTree
-        api={api}
-        shares={shares}
-        revision={refreshKey}
-        showHidden={showHiddenFiles}
-        activeShareId={share.id}
-        activePath={route.path}
-        activeView={route.view}
-        navigation={navigation}
-        onMove={(entry, path, destinationDirectory) =>
-          setOperation({ kind: "move", entry, path, destinationDirectory })
-        }
-        onSessionExpired={onSessionExpired}
-      />
+      <button
+        ref={treeToggleRef}
+        type="button"
+        class="button button-secondary tree-drawer-toggle"
+        aria-expanded={treeOpen}
+        aria-controls="tree-drawer"
+        onClick={() => setTreeOpen((open) => !open)}
+      >
+        <FolderTree size={18} aria-hidden="true" />
+        Folders
+      </button>
+      {treeOpen && (
+        <div
+          class="tree-drawer-backdrop"
+          aria-hidden="true"
+          onClick={() => setTreeOpen(false)}
+        />
+      )}
+      <div
+        ref={treeDrawerRef}
+        id="tree-drawer"
+        class={`tree-drawer${treeOpen ? " is-open" : ""}`}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || !treeOpen) return;
+          event.stopPropagation();
+          setTreeOpen(false);
+          treeToggleRef.current?.focus();
+        }}
+      >
+        <ShareTree
+          api={api}
+          shares={shares}
+          revision={refreshKey}
+          showHidden={showHiddenFiles}
+          activeShareId={share.id}
+          activePath={route.path}
+          activeView={route.view}
+          navigation={navigation}
+          onMove={(entry, path, destinationDirectory) =>
+            setOperation({ kind: "move", entry, path, destinationDirectory })
+          }
+          onSessionExpired={onSessionExpired}
+        />
+      </div>
       {route.view === "trash" ? (
         <TrashView
           api={api}
@@ -1176,16 +1405,13 @@ function DirectoryBrowser({
       ) : (
         <div class="directory-column">
           {recentlyDeleted && (
-            <div class="delete-confirmation" role="status">
-              <span>Moved {recentlyDeleted.name} to Trash.</span>
-              <button
-                type="button"
-                class="button button-secondary"
-                onClick={() => void undoDelete()}
-              >
-                Undo
-              </button>
-            </div>
+            <UndoToast
+              key={recentlyDeleted.id}
+              onUndo={() => void undoDelete()}
+              onExpire={() => setRecentlyDeleted(undefined)}
+            >
+              Moved {recentlyDeleted.name} to Trash.
+            </UndoToast>
           )}
           <section class="directory-panel" aria-labelledby="directory-title">
             {deleteError && <Notice tone="danger">{deleteError}</Notice>}
@@ -1225,7 +1451,6 @@ function DirectoryBrowser({
 
             <div class="directory-heading">
               <div>
-                <p class="eyebrow">Current folder</p>
                 <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
                   {crumbs.at(-1)?.name ?? share.name}
                 </h1>
@@ -1344,6 +1569,7 @@ function DirectoryBrowser({
           operation={operation}
           directory={route.path}
           shareId={share.id}
+          shareName={share.name}
           onClose={() => setOperation(undefined)}
           onChanged={changed}
           onSessionExpired={onSessionExpired}
@@ -1471,10 +1697,26 @@ function EntryList({
                 </a>
               )}
               <span class="entry-kind">
-                {entry.kind === "directory" ? "Folder" : "File"}
+                {entry.modifiedAtMs !== undefined ? (
+                  <>
+                    <span class="sr-only">
+                      {entry.kind === "directory" ? "Folder" : "File"},
+                      modified{" "}
+                    </span>
+                    <time dateTime={isoTimestamp(entry.modifiedAtMs)}>
+                      {formatTimestamp(entry.modifiedAtMs)}
+                    </time>
+                  </>
+                ) : entry.kind === "directory" ? (
+                  "Folder"
+                ) : (
+                  "File"
+                )}
               </span>
             </div>
-            <span class="entry-meta">{formatSize(entry.size)}</span>
+            <span class="entry-meta">
+              {entry.kind === "file" ? formatSize(entry.size) : ""}
+            </span>
             <EntryActionButtons
               entry={entry}
               path={joinPath(path, entry.name)}
@@ -1619,6 +1861,8 @@ function PreviewPanel({
   const metadata =
     metadataState.status === "ready" ? metadataState.metadata : undefined;
   const previewDocument = state.status === "ready" ? state.document : undefined;
+  // The editor handles text only; images keep the other actions.
+  const editable = previewDocument?.kind !== "image";
   const assetRevision = `${revision}-${refreshKey}`;
 
   return (
@@ -1645,9 +1889,11 @@ function PreviewPanel({
             <h2 id="preview-title" ref={titleRef} tabIndex={-1}>
               {filename}
             </h2>
-            <p class="preview-path" title={path}>
-              {path}
-            </p>
+            {parentPath(path) && (
+              <p class="preview-path" title={path}>
+                in {parentPath(path)}
+              </p>
+            )}
           </div>
           <div class="preview-window-actions">
             <TooltipButton
@@ -1672,19 +1918,22 @@ function PreviewPanel({
         </header>
 
         <div class="preview-actions" role="group" aria-label="File actions">
+          {writable && editable && (
+            <button
+              type="button"
+              class="button button-primary preview-edit-button"
+              aria-label={`Edit ${filename}`}
+              onClick={() => onOperation("edit")}
+            >
+              <FilePenLine size={18} aria-hidden="true" />
+              Edit
+            </button>
+          )}
           <CopyPathButton
             value={`${shareId}/${path}`}
             label={`Copy full path for ${filename}`}
             className="icon-button"
           />
-          {writable && (
-            <TooltipButton
-              onClick={() => onOperation("edit")}
-              label={`Edit ${filename}`}
-            >
-              <FilePenLine size={19} aria-hidden="true" />
-            </TooltipButton>
-          )}
           {writable && (
             <>
               <TooltipButton
@@ -1714,27 +1963,6 @@ function PreviewPanel({
           >
             <Download size={19} aria-hidden="true" />
           </TooltipLink>
-          {state.status === "ready" &&
-            state.document.kind === "html_source" && (
-              <>
-                <TooltipLink
-                  href={renderedHtmlPreviewUrl(shareId, path)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  label="Open rendered HTML in new tab"
-                >
-                  <ExternalLink size={19} aria-hidden="true" />
-                </TooltipLink>
-                <TooltipLink
-                  href={htmlPreviewUrl(shareId, path)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  label="Open HTML source in new tab"
-                >
-                  <Code2 size={19} aria-hidden="true" />
-                </TooltipLink>
-              </>
-            )}
         </div>
         {operationError && <Notice tone="danger">{operationError}</Notice>}
 
@@ -1748,11 +1976,11 @@ function PreviewPanel({
             <dd>{previewTypeLabel(previewDocument, filename)}</dd>
           </div>
           <div>
-            <dt>Last opened</dt>
+            <dt>Modified</dt>
             <dd>
               {metadataState.status === "loading"
                 ? "Loading…"
-                : formatTimestamp(metadata?.accessedAtMs)}
+                : formatTimestamp(metadata?.modifiedAtMs)}
             </dd>
           </div>
           <div>
@@ -1834,7 +2062,6 @@ function PreviewContent({
           {document.width && document.height
             ? ` · ${document.width} × ${document.height}`
             : ""}
-          {` · ${formatSize(document.size)}`}
         </figcaption>
       </figure>
     );
@@ -1877,33 +2104,47 @@ function HtmlPreview({
 
   return (
     <div class="html-preview">
-      <p class="preview-security-note">
-        Rendered HTML runs in an isolated sandbox. Scripts, forms, navigation,
-        storage, popups, and network requests are disabled.
-      </p>
-      <div class="preview-tabs" role="tablist" aria-label="HTML view">
-        <button
-          ref={renderedTab}
-          type="button"
-          role="tab"
-          aria-selected={mode === "rendered"}
-          tabIndex={mode === "rendered" ? 0 : -1}
-          onClick={() => chooseMode("rendered")}
-          onKeyDown={handleKeys}
+      <div class="preview-tabs-row">
+        <div class="preview-tabs" role="tablist" aria-label="HTML view">
+          <button
+            ref={renderedTab}
+            type="button"
+            role="tab"
+            aria-selected={mode === "rendered"}
+            tabIndex={mode === "rendered" ? 0 : -1}
+            onClick={() => chooseMode("rendered")}
+            onKeyDown={handleKeys}
+          >
+            Rendered
+          </button>
+          <button
+            ref={sourceTab}
+            type="button"
+            role="tab"
+            aria-selected={mode === "source"}
+            tabIndex={mode === "source" ? 0 : -1}
+            onClick={() => chooseMode("source")}
+            onKeyDown={handleKeys}
+          >
+            Source
+          </button>
+        </div>
+        <TooltipLink
+          href={mode === "rendered" ? renderedUrl : sourceUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          label={
+            mode === "rendered"
+              ? "Open rendered HTML in new tab"
+              : "Open HTML source in new tab"
+          }
         >
-          Rendered
-        </button>
-        <button
-          ref={sourceTab}
-          type="button"
-          role="tab"
-          aria-selected={mode === "source"}
-          tabIndex={mode === "source" ? 0 : -1}
-          onClick={() => chooseMode("source")}
-          onKeyDown={handleKeys}
-        >
-          Source
-        </button>
+          <ExternalLink size={18} aria-hidden="true" />
+        </TooltipLink>
+        <SecurityNote>
+          Rendered HTML runs in an isolated sandbox. Scripts, forms, navigation,
+          storage, popups, and network requests are disabled.
+        </SecurityNote>
       </div>
       <iframe
         class="html-source-frame"
@@ -1920,18 +2161,6 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
   const [wrap, setWrap] = useState(true);
   return (
     <div class="source-preview">
-      <div class="preview-options">
-        <span class="file-type-label">
-          {document.language ? `${document.language} source` : "Plain text"}
-        </span>
-        <Button
-          variant="secondary"
-          aria-pressed={wrap}
-          onClick={() => setWrap((value) => !value)}
-        >
-          {wrap ? "Disable line wrapping" : "Enable line wrapping"}
-        </Button>
-      </div>
       {document.truncated && (
         <Notice tone="warning">
           This preview is truncated. Download the file to see all content.
@@ -1954,7 +2183,16 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
           <code>{document.source}</code>
         </pre>
       )}
-      <p class="preview-size">{formatSize(document.size)}</p>
+      {document.source !== "" && (
+        <label class="preview-options">
+          <input
+            type="checkbox"
+            checked={wrap}
+            onChange={(event) => setWrap(event.currentTarget.checked)}
+          />
+          Wrap lines
+        </label>
+      )}
     </div>
   );
 }
@@ -1983,37 +2221,39 @@ function MarkdownPreview({ document }: { document: PreviewDocument }) {
 
   return (
     <div class="markdown-preview">
-      <p class="preview-security-note">
-        Raw HTML, links, images, and embeds are displayed as text and are never
-        activated.
-      </p>
-      <div class="preview-tabs" role="tablist" aria-label="Markdown view">
-        <button
-          ref={readableTab}
-          type="button"
-          role="tab"
-          id="markdown-readable-tab"
-          aria-controls="markdown-readable-panel"
-          aria-selected={mode === "readable"}
-          tabIndex={mode === "readable" ? 0 : -1}
-          onClick={() => chooseMode("readable")}
-          onKeyDown={handleKeys}
-        >
-          Readable
-        </button>
-        <button
-          ref={sourceTab}
-          type="button"
-          role="tab"
-          id="markdown-source-tab"
-          aria-controls="markdown-source-panel"
-          aria-selected={mode === "source"}
-          tabIndex={mode === "source" ? 0 : -1}
-          onClick={() => chooseMode("source")}
-          onKeyDown={handleKeys}
-        >
-          Source
-        </button>
+      <div class="preview-tabs-row">
+        <div class="preview-tabs" role="tablist" aria-label="Markdown view">
+          <button
+            ref={readableTab}
+            type="button"
+            role="tab"
+            id="markdown-readable-tab"
+            aria-controls="markdown-readable-panel"
+            aria-selected={mode === "readable"}
+            tabIndex={mode === "readable" ? 0 : -1}
+            onClick={() => chooseMode("readable")}
+            onKeyDown={handleKeys}
+          >
+            Readable
+          </button>
+          <button
+            ref={sourceTab}
+            type="button"
+            role="tab"
+            id="markdown-source-tab"
+            aria-controls="markdown-source-panel"
+            aria-selected={mode === "source"}
+            tabIndex={mode === "source" ? 0 : -1}
+            onClick={() => chooseMode("source")}
+            onKeyDown={handleKeys}
+          >
+            Source
+          </button>
+        </div>
+        <SecurityNote>
+          Raw HTML, links, images, and embeds are displayed as text and are
+          never activated.
+        </SecurityNote>
       </div>
       {mode === "readable" ? (
         <div
@@ -2049,6 +2289,15 @@ function MarkdownPreview({ document }: { document: PreviewDocument }) {
         </Notice>
       )}
     </div>
+  );
+}
+
+/** How a preview stays inert, behind an info button instead of a banner. */
+function SecurityNote({ children }: { children: string }) {
+  return (
+    <TooltipButton className="security-note-button" label={children}>
+      <Info size={18} aria-hidden="true" />
+    </TooltipButton>
   );
 }
 
@@ -2179,10 +2428,67 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   return (
     <div class="empty-state">
       <span class="empty-icon" aria-hidden="true">
-        ◇
+        <FolderOpen size={28} strokeWidth={1.8} />
       </span>
       <h2>{title}</h2>
       <p>{detail}</p>
+    </div>
+  );
+}
+
+const undoToastDurationMs = 12_000;
+
+/**
+ * A toast pinned to the bottom of the viewport, so the list does not jump.
+ * Its countdown pauses while the pointer or keyboard focus is on it.
+ */
+function UndoToast({
+  children,
+  onUndo,
+  onExpire,
+}: {
+  children: preact.ComponentChildren;
+  onUndo: () => void;
+  onExpire: () => void;
+}) {
+  const [paused, setPaused] = useState({ hover: false, focus: false });
+  const remaining = useRef(undoToastDurationMs);
+  const onExpireRef = useRef(onExpire);
+  onExpireRef.current = onExpire;
+  const running = !paused.hover && !paused.focus;
+
+  useEffect(() => {
+    if (!running) return;
+    const startedAt = Date.now();
+    const timer = window.setTimeout(
+      () => onExpireRef.current(),
+      remaining.current,
+    );
+    return () => {
+      window.clearTimeout(timer);
+      remaining.current = Math.max(
+        0,
+        remaining.current - (Date.now() - startedAt),
+      );
+    };
+  }, [running]);
+
+  return (
+    <div
+      class="undo-toast"
+      role="status"
+      onMouseEnter={() => setPaused((value) => ({ ...value, hover: true }))}
+      onMouseLeave={() => setPaused((value) => ({ ...value, hover: false }))}
+      onFocusIn={() => setPaused((value) => ({ ...value, focus: true }))}
+      onFocusOut={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setPaused((value) => ({ ...value, focus: false }));
+      }}
+    >
+      <span>{children}</span>
+      <button type="button" class="button button-secondary" onClick={onUndo}>
+        Undo
+      </button>
     </div>
   );
 }
@@ -2299,19 +2605,25 @@ function previewTypeLabel(
     const language = document.language;
     if (!language) return "Code";
     const displayNames: Record<string, string> = {
+      c: "C",
+      cpp: "C++",
       css: "CSS",
       html: "HTML",
       javascript: "JavaScript",
       json: "JSON",
       jsx: "JSX",
       markdown: "Markdown",
-      shellscript: "Shell",
+      php: "PHP",
+      shell: "Shell script",
+      shellscript: "Shell script",
       sql: "SQL",
+      toml: "TOML",
       tsx: "TSX",
       typescript: "TypeScript",
+      xml: "XML",
       yaml: "YAML",
     };
-    return `${displayNames[language] ?? capitalize(language)} code`;
+    return displayNames[language] ?? capitalize(language);
   }
   if (document?.kind === "text") return "Plain text";
 
@@ -2367,4 +2679,10 @@ function asApiError(error: unknown): ApiError {
     : new ApiError("network", "The request could not be completed", {
         retryable: true,
       });
+}
+
+/** A machine-readable date for `<time>`, or nothing when out of range. */
+function isoTimestamp(milliseconds: number): string | undefined {
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.valueOf()) ? undefined : date.toISOString();
 }

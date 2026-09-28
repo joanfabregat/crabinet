@@ -1,12 +1,14 @@
 import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
+  Ellipsis,
   FilePlus2,
   FolderInput,
   FolderPlus,
   Pencil,
   Trash2,
   Upload,
+  X,
 } from "lucide-preact";
 
 import {
@@ -54,31 +56,28 @@ export function WriteToolbar({
   return (
     <section class="write-toolbar" aria-label="File operations">
       <button
-        class="icon-button icon-button-primary tooltip-action"
+        class="button button-primary toolbar-button"
         type="button"
-        aria-label="New file"
-        data-tooltip="New file"
         onClick={onCreateFile}
       >
-        <FilePlus2 size={19} aria-hidden="true" />
+        <FilePlus2 size={18} aria-hidden="true" />
+        New file
       </button>
       <button
-        class="icon-button tooltip-action"
+        class="button button-secondary toolbar-button"
         type="button"
-        aria-label="New folder"
-        data-tooltip="New folder"
         onClick={onCreateFolder}
       >
-        <FolderPlus size={19} aria-hidden="true" />
+        <FolderPlus size={18} aria-hidden="true" />
+        New folder
       </button>
       <button
-        class="icon-button tooltip-action"
+        class="button button-secondary toolbar-button"
         type="button"
-        aria-label="Upload files"
-        data-tooltip="Upload files"
         onClick={() => input.current?.click()}
       >
-        <Upload size={19} aria-hidden="true" />
+        <Upload size={18} aria-hidden="true" />
+        Upload files
       </button>
       <input
         ref={input}
@@ -111,44 +110,205 @@ export function EntryActionButtons({
       role="group"
       aria-label={`Actions for ${entry.name}`}
     >
-      {writable && (
-        <>
-          <button
-            class="entry-action tooltip-action"
-            type="button"
-            aria-label={`Rename ${entry.name}`}
-            data-tooltip="Rename"
-            onClick={() => onOperation({ kind: "rename", entry, path })}
-          >
-            <Pencil size={18} aria-hidden="true" />
-          </button>
-          <button
-            class="entry-action tooltip-action"
-            type="button"
-            aria-label={`Move ${entry.name}`}
-            data-tooltip="Move to…"
-            onClick={() => onOperation({ kind: "move", entry, path })}
-          >
-            <FolderInput size={18} aria-hidden="true" />
-          </button>
-        </>
-      )}
-      <CopyPathButton
-        value={copyPath}
-        label={`Copy full path for ${entry.name}`}
-        className="entry-action"
-        size={18}
+      <div class="entry-actions-inline">
+        <CopyPathButton
+          value={copyPath}
+          label={`Copy full path for ${entry.name}`}
+          className="entry-action"
+          size={18}
+        />
+        {writable && (
+          <>
+            <button
+              class="entry-action tooltip-action"
+              type="button"
+              aria-label={`Rename ${entry.name}`}
+              data-tooltip="Rename"
+              onClick={() => onOperation({ kind: "rename", entry, path })}
+            >
+              <Pencil size={18} aria-hidden="true" />
+            </button>
+            <button
+              class="entry-action tooltip-action"
+              type="button"
+              aria-label={`Move ${entry.name}`}
+              data-tooltip="Move to…"
+              onClick={() => onOperation({ kind: "move", entry, path })}
+            >
+              <FolderInput size={18} aria-hidden="true" />
+            </button>
+            <button
+              class="entry-action entry-action-danger tooltip-action"
+              type="button"
+              aria-label={`Delete ${entry.name}`}
+              data-tooltip="Delete"
+              onClick={() => onOperation({ kind: "delete", entry, path })}
+            >
+              <Trash2 size={18} aria-hidden="true" />
+            </button>
+          </>
+        )}
+      </div>
+      <EntryActionMenu
+        entry={entry}
+        path={path}
+        copyPath={copyPath}
+        writable={writable}
+        onOperation={onOperation}
       />
-      {writable && (
-        <button
-          class="entry-action entry-action-danger tooltip-action"
-          type="button"
-          aria-label={`Delete ${entry.name}`}
-          data-tooltip="Delete"
-          onClick={() => onOperation({ kind: "delete", entry, path })}
+    </div>
+  );
+}
+
+/**
+ * On phones the row's actions fold into one "⋯" button so each row stays a
+ * single line. Wider screens show the icon buttons instead (see styles.css).
+ */
+function EntryActionMenu({
+  entry,
+  path,
+  copyPath,
+  writable,
+  onOperation,
+}: {
+  entry: DirectoryEntry;
+  path: string;
+  copyPath: string;
+  writable: boolean;
+  onOperation: (operation: EntryOperation) => void;
+}) {
+  // The list is fixed-positioned from the trigger, because the folder panel
+  // clips overflow; it opens upward when the row is near the bottom.
+  const [open, setOpen] = useState<JSX.CSSProperties>();
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const isOpen = open !== undefined;
+
+  useEffect(() => {
+    if (!isOpen) return;
+    root.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    const closeOutside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(undefined);
+    };
+    // A fixed list would drift from its row while the page scrolls.
+    const closeOnScroll = () => setOpen(undefined);
+    document.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("scroll", closeOnScroll, { passive: true });
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("scroll", closeOnScroll);
+    };
+  }, [isOpen]);
+
+  const close = () => {
+    setOpen(undefined);
+    trigger.current?.focus();
+  };
+
+  const choose = (operation: EntryOperation) => {
+    setOpen(undefined);
+    onOperation(operation);
+  };
+
+  const handleKeys = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    );
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      items[(index + 1) % items.length]?.focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      items[(index - 1 + items.length) % items.length]?.focus();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      items[0]?.focus();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      items.at(-1)?.focus();
+    } else if (event.key === "Tab") {
+      setOpen(undefined);
+    }
+  };
+
+  return (
+    <div class="entry-menu" ref={root}>
+      <button
+        ref={trigger}
+        class="entry-action"
+        type="button"
+        aria-label={`More actions for ${entry.name}`}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          if (isOpen) {
+            setOpen(undefined);
+            return;
+          }
+          const rect = event.currentTarget.getBoundingClientRect();
+          const right = `${window.innerWidth - rect.right}px`;
+          setOpen(
+            rect.bottom + 240 > window.innerHeight
+              ? { bottom: `${window.innerHeight - rect.top + 4}px`, right }
+              : { top: `${rect.bottom + 4}px`, right },
+          );
+        }}
+      >
+        <Ellipsis size={18} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          class="entry-menu-list"
+          style={open}
+          role="menu"
+          aria-label={`Actions for ${entry.name}`}
+          onKeyDown={handleKeys}
         >
-          <Trash2 size={18} aria-hidden="true" />
-        </button>
+          <CopyPathButton
+            value={copyPath}
+            label={`Copy full path for ${entry.name}`}
+            className="entry-menu-item"
+            size={17}
+            text="Copy full path"
+            role="menuitem"
+          />
+          {writable && (
+            <>
+              <button
+                class="entry-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "rename", entry, path })}
+              >
+                <Pencil size={17} aria-hidden="true" />
+                Rename
+              </button>
+              <button
+                class="entry-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "move", entry, path })}
+              >
+                <FolderInput size={17} aria-hidden="true" />
+                Move to…
+              </button>
+              <button
+                class="entry-menu-item entry-action-danger"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "delete", entry, path })}
+              >
+                <Trash2 size={17} aria-hidden="true" />
+                Move to Trash
+              </button>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
@@ -160,6 +320,8 @@ interface OperationDialogProps {
   operation: EntryOperation;
   directory: string;
   shareId: string;
+  /** Labels the move picker's root; falls back to a generic label. */
+  shareName?: string;
   userId: string;
   onClose: () => void;
   onChanged: (operation: EntryOperation, destinationPath?: string) => void;
@@ -170,6 +332,8 @@ interface OperationDialogProps {
 export function OperationDialog(props: OperationDialogProps) {
   if (props.operation.kind === "edit") return <EditorDialog {...props} />;
   if (props.operation.kind === "move") return <MoveDialog {...props} />;
+  // Deletes move the item to Trash without a dialog.
+  if (props.operation.kind === "delete") return null;
   return <SimpleOperationDialog {...props} />;
 }
 
@@ -276,12 +440,8 @@ function SimpleOperationDialog({
   onChanged,
   onSessionExpired,
 }: OperationDialogProps) {
-  const destructive = operation.kind === "delete";
-  const deletesFile = destructive && operation.entry.kind === "file";
-  const deletesFolder = destructive && operation.entry.kind === "directory";
   const initial = operation.kind === "rename" ? operation.entry.name : "";
   const [value, setValue] = useState(initial);
-  const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController>();
@@ -299,11 +459,7 @@ function SimpleOperationDialog({
       ? "Create file"
       : operation.kind === "create-folder"
         ? "Create folder"
-        : operation.kind === "rename"
-          ? `Rename ${operation.entry.name}`
-          : operation.entry.kind === "directory"
-            ? `Delete folder ${operation.entry.name}`
-            : `Delete file ${operation.entry.name}`;
+        : `Rename ${operation.entry.name}`;
 
   useEffect(() => {
     input.current?.focus();
@@ -318,7 +474,7 @@ function SimpleOperationDialog({
     event.preventDefault();
     if (busy) return;
 
-    let destination = value;
+    let destination: string;
     if (
       operation.kind === "create-file" ||
       operation.kind === "create-folder"
@@ -336,11 +492,7 @@ function SimpleOperationDialog({
         return;
       }
       destination = joinPath(parentPath(operation.path), value);
-    } else if (deletesFolder && value !== operation.entry.name) {
-      setError(`Type ${operation.entry.name} exactly to confirm deletion.`);
-      return;
-    } else if (deletesFile && !confirmed) {
-      setError(`Confirm permanent deletion of ${operation.entry.name}.`);
+    } else {
       return;
     }
     if (!validatorReady) return;
@@ -369,24 +521,14 @@ function SimpleOperationDialog({
       } else {
         // The validator was captured when this dialog opened, so a change
         // made since then is refused by the server instead of overwritten.
-        if (operation.kind === "rename") {
-          await api.moveEntry(
-            shareId,
-            operation.path,
-            destination,
-            validator.etag,
-            csrfToken,
-            nextController.signal,
-          );
-        } else {
-          await api.deleteEntry(
-            shareId,
-            operation.path,
-            validator.etag,
-            csrfToken,
-            nextController.signal,
-          );
-        }
+        await api.moveEntry(
+          shareId,
+          operation.path,
+          destination,
+          validator.etag,
+          csrfToken,
+          nextController.signal,
+        );
       }
       onChanged(
         operation,
@@ -398,16 +540,15 @@ function SimpleOperationDialog({
       if (isUnauthorized(cause)) {
         onSessionExpired();
       } else if (!isAborted(cause)) {
-        setError(operationError(cause, operation.kind));
+        setError(operationError(cause));
       }
     } finally {
       setBusy(false);
     }
   };
 
-  const fieldLabel = deletesFolder
-    ? `Type ${operation.entry.name} to confirm`
-    : operation.kind === "rename"
+  const fieldLabel =
+    operation.kind === "rename"
       ? "New name"
       : operation.kind === "create-file"
         ? "File name"
@@ -416,47 +557,22 @@ function SimpleOperationDialog({
   return (
     <Modal title={title} onClose={close} busy={busy}>
       <form class="operation-form" onSubmit={submit}>
-        {destructive && (
-          <p class="danger-copy">
-            This permanently deletes only this item. Non-empty folders are never
-            deleted.
-          </p>
-        )}
         {operation.kind === "rename" && (
           <p class="muted">
             Rename this item in its current folder. Existing items are never
             overwritten.
           </p>
         )}
-        {deletesFile ? (
-          <label class="confirmation-check" for="operation-confirm-delete">
-            <input
-              ref={input}
-              id="operation-confirm-delete"
-              type="checkbox"
-              checked={confirmed}
-              onChange={(event) => setConfirmed(event.currentTarget.checked)}
-              aria-describedby={error ? "operation-error" : undefined}
-            />
-            <span>
-              I understand that {operation.entry.name} will be permanently
-              deleted
-            </span>
-          </label>
-        ) : (
-          <>
-            <label for="operation-value">{fieldLabel}</label>
-            <input
-              ref={input}
-              id="operation-value"
-              value={value}
-              required
-              autocomplete="off"
-              onInput={(event) => setValue(event.currentTarget.value)}
-              aria-describedby={error ? "operation-error" : undefined}
-            />
-          </>
-        )}
+        <label for="operation-value">{fieldLabel}</label>
+        <input
+          ref={input}
+          id="operation-value"
+          value={value}
+          required
+          autocomplete="off"
+          onInput={(event) => setValue(event.currentTarget.value)}
+          aria-describedby={error ? "operation-error" : undefined}
+        />
         <ValidatorStatus state={validator} onRetry={retryValidator} />
         {error && (
           <p id="operation-error" class="field-error" role="alert">
@@ -473,16 +589,15 @@ function SimpleOperationDialog({
             Cancel
           </button>
           <button
-            class={`button ${destructive ? "button-danger" : "button-primary"}`}
+            class="button button-primary"
             type="submit"
-            disabled={
-              busy ||
-              !validatorReady ||
-              (deletesFile && !confirmed) ||
-              (deletesFolder && value !== operation.entry.name)
-            }
+            disabled={busy || !validatorReady}
           >
-            {busy ? "Working…" : destructive ? "Delete" : "Confirm"}
+            {busy
+              ? "Working…"
+              : operation.kind === "rename"
+                ? "Rename"
+                : "Create"}
           </button>
         </div>
       </form>
@@ -496,6 +611,7 @@ function MoveDialog({
   operation,
   directory,
   shareId,
+  shareName = "Shared folder",
   onClose,
   onChanged,
   onSessionExpired,
@@ -504,6 +620,11 @@ function MoveDialog({
     throw new Error("move dialog requires an entry");
   const [destinationDirectory, setDestinationDirectory] = useState(
     operation.destinationDirectory ?? directory,
+  );
+  // The dialog opens on the item's own folder, which is never a valid
+  // destination. Only a folder the person picked is reported as an error.
+  const [picked, setPicked] = useState(
+    operation.destinationDirectory !== undefined,
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -545,7 +666,7 @@ function MoveDialog({
       onChanged(operation, destination);
     } catch (cause) {
       if (isUnauthorized(cause)) onSessionExpired();
-      else if (!isAborted(cause)) setError(operationError(cause, "rename"));
+      else if (!isAborted(cause)) setError(operationError(cause));
     } finally {
       setBusy(false);
     }
@@ -560,18 +681,24 @@ function MoveDialog({
         </p>
         <FolderPicker
           api={api}
-          share={{ id: shareId, name: "Shared folder", access: "read-write" }}
+          share={{ id: shareId, name: shareName, access: "read-write" }}
           selected={destinationDirectory}
-          onSelect={setDestinationDirectory}
+          onSelect={(path) => {
+            setDestinationDirectory(path);
+            setPicked(true);
+          }}
           onSessionExpired={onSessionExpired}
         />
-        <p class="move-destination">
-          Destination: <strong>{destination || operation.entry.name}</strong>
-        </p>
-        {invalid && (
+        {!invalid ? (
+          <p class="move-destination">
+            Destination: <strong>{destination || operation.entry.name}</strong>
+          </p>
+        ) : picked ? (
           <p class="field-error">
             Choose a different folder outside this item.
           </p>
+        ) : (
+          <p class="muted">Select a destination folder to continue.</p>
         )}
         <ValidatorStatus state={validator} onRetry={retryValidator} />
         {error && (
@@ -651,7 +778,7 @@ function EditorDialog({
         requestAnimationFrame(() => editor.current?.focus());
       } catch (cause) {
         if (isUnauthorized(cause)) onSessionExpired();
-        else if (!isAborted(cause)) setError(operationError(cause, "edit"));
+        else if (!isAborted(cause)) setError(operationError(cause));
       } finally {
         setLoading(false);
       }
@@ -728,7 +855,7 @@ function EditorDialog({
         setError(
           "Save was denied with the current access. Your edits are still here. Retry save or contact an administrator.",
         );
-      else if (!isAborted(cause)) setError(operationError(cause, "edit"));
+      else if (!isAborted(cause)) setError(operationError(cause));
     } finally {
       setSaving(false);
     }
@@ -1140,7 +1267,8 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId}
       >
-        <header class="modal-header">
+        {/* A <header> here would add a second banner landmark. */}
+        <div class="modal-header">
           <h2 id={titleId}>{title}</h2>
           <button
             class="modal-close"
@@ -1149,9 +1277,9 @@ export function Modal({
             disabled={busy}
             onClick={onClose}
           >
-            ×
+            <X size={20} aria-hidden="true" />
           </button>
-        </header>
+        </div>
         <div class="modal-content">{children}</div>
       </div>
     </div>
@@ -1167,10 +1295,7 @@ function parentPath(path: string): string {
   return separator < 0 ? "" : path.slice(0, separator);
 }
 
-function operationError(
-  cause: unknown,
-  operation: EntryOperation["kind"],
-): string {
+function operationError(cause: unknown): string {
   if (cause instanceof ApiError) {
     if (cause.kind === "forbidden")
       return "Your write access changed. Reload the page or contact an administrator.";
@@ -1182,9 +1307,7 @@ function operationError(
       return "The content is larger than the server allows.";
     if (cause.status === 415) return "Only valid UTF-8 text can be edited.";
   }
-  return operation === "delete"
-    ? "The item could not be deleted. A folder must be empty."
-    : "The operation failed. Check your connection and try again.";
+  return "The operation failed. Check your connection and try again.";
 }
 
 function uploadError(cause: unknown): string {

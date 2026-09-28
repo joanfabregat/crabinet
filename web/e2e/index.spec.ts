@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-import { csrfToken, openSignedIn, signIn } from "./helpers";
+import { csrfToken, openFolders, openSignedIn, signIn } from "./helpers";
 
 test("login, secure session cookie, read-only enforcement, and logout", async ({
   context,
@@ -18,7 +18,9 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   await expect(page.getByRole("alert")).toContainText("Sign-in failed");
 
   await signIn(page, "reader");
-  await expect(page.getByLabel("Read only")).toHaveText("R");
+  await expect(
+    page.getByRole("img", { name: "Read only", includeHidden: true }),
+  ).toHaveCount(1);
   await expect(
     page.getByRole("region", { name: "File operations" }),
   ).toHaveCount(0);
@@ -26,7 +28,9 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
     page.getByRole("button", { name: /^(Edit|Rename|Move|Delete) / }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: /^Copy full path for / }).first(),
+    page
+      .locator(".directory-heading-actions")
+      .getByRole("button", { name: /^Copy full path for / }),
   ).toBeVisible();
 
   const cookies = await context.cookies();
@@ -85,10 +89,11 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
 test("direct routes, tree share navigation, breadcrumbs, and browser history", async ({
   page,
 }) => {
+  // The former ?path= format still resolves and is rewritten in place.
   await page.goto("/browse/writable?path=Projects");
   await signIn(page, "writer");
 
-  await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
+  await expect(page).toHaveURL(/\/writable\/Projects$/);
   await expect(
     page.getByRole("heading", { name: "Projects", level: 1 }),
   ).toBeFocused();
@@ -98,30 +103,44 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
     .getByLabel("Breadcrumb")
     .getByRole("link", { name: "Working files" })
     .click();
-  await expect(page).toHaveURL(/\/browse\/writable$/);
+  await expect(page).toHaveURL(/\/writable$/);
   await page.goBack();
-  await expect(page).toHaveURL(/\/browse\/writable\?path=Projects$/);
+  await expect(page).toHaveURL(/\/writable\/Projects$/);
   await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
 
-  const sidebar = page.getByLabel("Shared folders", { exact: true });
+  let sidebar = await openFolders(page);
   await sidebar.getByRole("link", { name: "Reference library" }).click();
-  await expect(page).toHaveURL(/\/browse\/read-only$/);
-  await expect(page.getByLabel("Read only")).toHaveText("R");
+  await expect(page).toHaveURL(/\/read-only$/);
+  sidebar = await openFolders(page);
+  await expect(sidebar.getByRole("img", { name: "Read only" })).toBeVisible();
   const nested = sidebar.getByRole("link", { name: "nested" });
   await expect(nested).toBeVisible();
 
   await nested.click();
-  await expect(page).toHaveURL(/path=nested/);
+  await expect(page).toHaveURL(/\/read-only\/nested$/);
+  sidebar = await openFolders(page);
   await expect(sidebar.getByText("No subfolders")).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
   await page.goBack();
   await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
+
+  // A link ending in a file name opens its folder with the file previewed.
+  await page.goto("/writable/Projects/example.toml");
+  await expect(
+    page.getByRole("heading", { name: "example.toml", level: 2 }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/\/writable\/Projects\/example\.toml$/);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "example.toml", level: 2 }),
+  ).toBeVisible();
 });
 
 test("a start folder follows the user while direct links keep their destination", async ({
   page,
 }) => {
-  await openSignedIn(page, "/browse/writable?path=Projects", "writer");
+  await openSignedIn(page, "/writable/Projects", "writer");
   const headingActions = page.locator(".directory-heading-actions");
   const newFile = headingActions.getByRole("button", { name: "New file" });
   const newFolder = headingActions.getByRole("button", { name: "New folder" });
@@ -133,11 +152,13 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(newFolder).toBeVisible();
   await expect(upload).toBeVisible();
   await expect(copyPath).toBeVisible();
-  await expect(newFile).toHaveText("");
-  await expect(newFolder).toHaveText("");
-  await expect(upload).toHaveText("");
-  await newFile.focus();
-  await expect(page.getByRole("tooltip")).toHaveText("New file");
+  await expect(newFile).toHaveText("New file");
+  await expect(newFolder).toHaveText("New folder");
+  await expect(upload).toHaveText("Upload files");
+  await copyPath.focus();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Copy full path for Projects",
+  );
   const sidebar = page.getByRole("complementary", { name: "Shared folders" });
   await expect(sidebar.getByRole("button", { name: "New file" })).toHaveCount(
     0,
@@ -175,9 +196,9 @@ test("a start folder follows the user while direct links keep their destination"
   await expect(settings).toHaveCount(0);
 
   await page.goto("/");
-  await expect(page).toHaveURL(/\/browse\/writable$/);
-  await page.goto("/browse/read-only");
-  await expect(page).toHaveURL(/\/browse\/read-only$/);
+  await expect(page).toHaveURL(/\/writable$/);
+  await page.goto("/read-only");
+  await expect(page).toHaveURL(/\/read-only$/);
   await expect(page.getByRole("button", { name: "New file" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
 
@@ -185,21 +206,21 @@ test("a start folder follows the user while direct links keep their destination"
   await startFolder.selectOption("");
   await expect(startFolder).toHaveValue("");
   await page.goto("/");
-  await expect(page).toHaveURL(/\/browse\/read-only$/);
+  await expect(page).toHaveURL(/\/read-only$/);
 });
 
 test("action tooltips escape clipped panels and remain inside the viewport", async ({
   page,
 }) => {
-  await openSignedIn(page, "/browse/writable", "writer");
-  const copyPath = page.getByRole("button", {
-    name: "Copy full path for README.md",
-  });
+  await openSignedIn(page, "/writable", "writer");
+  const copyPath = page
+    .locator(".directory-heading-actions")
+    .getByRole("button", { name: "Copy full path for Working files" });
   await copyPath.scrollIntoViewIfNeeded();
   await copyPath.focus();
 
   const tooltip = page.getByRole("tooltip");
-  await expect(tooltip).toHaveText("Copy full path for README.md");
+  await expect(tooltip).toHaveText("Copy full path for Working files");
   await expect(tooltip).toBeVisible();
   expect(
     await tooltip.evaluate((element) =>
@@ -411,7 +432,10 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
     }));
   expect(backdropStyles.background).not.toBe("rgba(0, 0, 0, 0)");
   expect(backdropStyles.blur).toContain("blur");
-  results = await new AxeBuilder({ page }).exclude("iframe").analyze();
+  results = await new AxeBuilder({ page })
+    .exclude("iframe")
+    .exclude(".app-footer")
+    .analyze();
   expect(
     results.violations.filter(({ impact }) =>
       ["critical", "serious"].includes(impact ?? ""),
@@ -431,12 +455,120 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   }));
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
 
-  results = await new AxeBuilder({ page }).exclude("iframe").analyze();
+  results = await new AxeBuilder({ page })
+    .exclude("iframe")
+    .exclude(".app-footer")
+    .analyze();
   expect(
     results.violations.filter(({ impact }) =>
       ["critical", "serious"].includes(impact ?? ""),
     ),
   ).toEqual([]);
+});
+
+test("an iPad in portrait shows two columns", async ({ page }) => {
+  await page.setViewportSize({ width: 820, height: 1180 });
+  await openSignedIn(page);
+
+  const tree = page.getByRole("complementary", { name: "Shared folders" });
+  const list = page.locator(".directory-column");
+  await expect(tree).toBeVisible();
+  const treeBox = (await tree.boundingBox())!;
+  const listBox = (await list.boundingBox())!;
+  expect(listBox.x).toBeGreaterThanOrEqual(treeBox.x + treeBox.width);
+  expect(Math.abs(listBox.y - treeBox.y)).toBeLessThan(2);
+
+  await page.getByRole("link", { name: "hello.rs" }).click();
+  const preview = page.locator(".preview-panel");
+  await expect(page.getByLabel("File source")).toBeVisible();
+  await expect(tree).toBeHidden();
+  const openListBox = (await list.boundingBox())!;
+  const previewBox = (await preview.boundingBox())!;
+  expect(previewBox.x).toBeGreaterThanOrEqual(
+    openListBox.x + openListBox.width,
+  );
+  expect(Math.abs(previewBox.y - openListBox.y)).toBeLessThan(2);
+
+  const dimensions = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    content: document.documentElement.scrollWidth,
+  }));
+  expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
+});
+
+test("night mode follows the system, can be pinned, and passes axe", async ({
+  page,
+}) => {
+  const seriousViolations = async (exclude?: string) => {
+    // The version footer is deliberately faint; see .app-footer.
+    const builder = new AxeBuilder({ page }).exclude(".app-footer");
+    if (exclude) builder.exclude(exclude);
+    return (await builder.analyze()).violations.filter(({ impact }) =>
+      ["critical", "serious"].includes(impact ?? ""),
+    );
+  };
+  const pageBackground = () =>
+    page.evaluate(() => getComputedStyle(document.documentElement).background);
+
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Sign in to Crabinet" }),
+  ).toBeVisible();
+  expect(await pageBackground()).toContain("rgb(15, 21, 18)");
+  expect(await seriousViolations()).toEqual([]);
+
+  await signIn(page, "reader");
+  await page.getByRole("link", { name: "hello.rs" }).click();
+  const source = page.getByLabel("File source");
+  await expect(source).toHaveAttribute("aria-busy", "false");
+  const token = source.locator("span[style*='--shiki-dark']").first();
+  const tokenColors = await token.evaluate((element) => ({
+    color: getComputedStyle(element).color,
+    dark: element.style.getPropertyValue("--shiki-dark"),
+  }));
+  const probe = await page.evaluate((hex) => {
+    const element = document.createElement("span");
+    element.style.color = hex;
+    document.body.append(element);
+    const color = getComputedStyle(element).color;
+    element.remove();
+    return color;
+  }, tokenColors.dark);
+  expect(tokenColors.color).toBe(probe);
+  expect(await seriousViolations("iframe")).toEqual([]);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  expect(await seriousViolations("iframe")).toEqual([]);
+  const savedAppearance = (theme: string) =>
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/preferences/display") &&
+        response.request().postDataJSON()?.theme === theme &&
+        response.ok(),
+    );
+  const savedLight = savedAppearance("light");
+  await dialog.getByLabel("Appearance").selectOption("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await pageBackground()).toContain("rgb(242, 244, 239)");
+  await savedLight;
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await pageBackground()).toContain("rgb(242, 244, 239)");
+  await expect(page.getByRole("button", { name: "Sign out" })).toHaveCSS(
+    "border-top-color",
+    "rgb(174, 184, 176)",
+  );
+
+  // The choice is saved to the account, so later tests signing in as the
+  // same user would inherit it; restore the default.
+  await page.getByRole("button", { name: "Settings" }).click();
+  const savedSystem = savedAppearance("system");
+  await dialog.getByLabel("Appearance").selectOption("system");
+  await savedSystem;
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
 });
 
 test("connection failure can recover and an expired session returns to login", async ({
