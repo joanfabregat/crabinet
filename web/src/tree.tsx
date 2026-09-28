@@ -1,10 +1,4 @@
-import {
-  ChevronDown,
-  ChevronRight,
-  Folder,
-  FolderPlus,
-  Trash2,
-} from "lucide-preact";
+import { ChevronDown, ChevronRight, Folder, Lock, Trash2 } from "lucide-preact";
 import { Fragment } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
@@ -150,7 +144,9 @@ export function ShareTree({
   onSessionExpired,
 }: ShareTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [trashExpanded, setTrashExpanded] = useState(false);
+  const [trashExpanded, setTrashExpanded] = useState(
+    () => activeView === "trash",
+  );
   const [state, setState] = useState<Record<string, TreeState>>({});
   const showHiddenRef = useRef(showHidden);
   showHiddenRef.current = showHidden;
@@ -228,6 +224,11 @@ export function ShareTree({
       void load(shareId, path);
     }
   }, [expanded, load, revision]);
+
+  // Viewing a trash keeps its group open so the current share stays visible.
+  useEffect(() => {
+    if (activeView === "trash") setTrashExpanded(true);
+  }, [activeView]);
 
   const toggle = (shareId: string, path: string) => {
     const nodeKey = key(shareId, path);
@@ -425,15 +426,14 @@ function TreeNode(props: TreeNodeProps) {
           />
           <span>{name}</span>
         </a>
-        {level === 0 && (
+        {level === 0 && share.access === "read" && (
           <span
-            class={`tree-access access-${share.access}`}
-            aria-label={
-              share.access === "read" ? "Read only" : "Read and write"
-            }
-            title={share.access === "read" ? "Read only" : "Read and write"}
+            class="tree-access tooltip-action"
+            role="img"
+            aria-label="Read only"
+            data-tooltip="Read only"
           >
-            {share.access === "read" ? "R" : "RW"}
+            <Lock size={14} aria-hidden="true" />
           </span>
         )}
         <CopyPathButton
@@ -612,10 +612,11 @@ export function FolderPicker({
           >
             {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           </button>
-          <FolderPlus size={17} aria-hidden="true" />
+          <Folder size={17} aria-hidden="true" />
           <button
             class="picker-choice"
             type="button"
+            aria-pressed={selected === path}
             onClick={() => onSelect(path)}
           >
             {name}

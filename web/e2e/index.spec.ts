@@ -18,7 +18,7 @@ test("login, secure session cookie, read-only enforcement, and logout", async ({
   await expect(page.getByRole("alert")).toContainText("Sign-in failed");
 
   await signIn(page, "reader");
-  await expect(page.getByLabel("Read only")).toHaveText("R");
+  await expect(page.getByRole("img", { name: "Read only" })).toBeVisible();
   await expect(
     page.getByRole("region", { name: "File operations" }),
   ).toHaveCount(0);
@@ -107,7 +107,7 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   const sidebar = page.getByLabel("Shared folders", { exact: true });
   await sidebar.getByRole("link", { name: "Reference library" }).click();
   await expect(page).toHaveURL(/\/read-only$/);
-  await expect(page.getByLabel("Read only")).toHaveText("R");
+  await expect(page.getByRole("img", { name: "Read only" })).toBeVisible();
   const nested = sidebar.getByRole("link", { name: "nested" });
   await expect(nested).toBeVisible();
 

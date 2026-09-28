@@ -65,7 +65,9 @@ test.describe("writable share operations", () => {
       name: "Rename e2e-note.txt",
     });
     await renameDialog.getByLabel("New name").fill("note-renamed.md");
-    await renameDialog.getByRole("button", { name: "Confirm" }).click();
+    await renameDialog
+      .getByRole("button", { name: "Rename", exact: true })
+      .click();
     await expect(
       page.getByRole("heading", { name: "note-renamed.md" }),
     ).toBeVisible();
@@ -82,7 +84,9 @@ test.describe("writable share operations", () => {
       name: "Rename note-renamed.md",
     });
     await targetNameDialog.getByLabel("New name").fill("example.toml");
-    await targetNameDialog.getByRole("button", { name: "Confirm" }).click();
+    await targetNameDialog
+      .getByRole("button", { name: "Rename", exact: true })
+      .click();
     await previewAction(page, "example.toml", "Move").click();
     const overwriteDialog = page.getByRole("dialog", {
       name: "Move example.toml",
@@ -442,7 +446,7 @@ async function createEntry(
   await page.getByRole("button", { name: button }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel(label).fill(name);
-  await dialog.getByRole("button", { name: "Confirm" }).click();
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(dialog).toHaveCount(0);
 }
 

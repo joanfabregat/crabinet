@@ -1067,8 +1067,8 @@ describe("directory browser", () => {
     ).toBeVisible();
     expect(screen.getByText("<img src=x onerror=alert(1)>.txt")).toBeVisible();
     expect(document.querySelector("main img")).toBeNull();
-    expect(screen.getByLabelText("Read only")).toHaveTextContent("R");
-    expect(screen.getByLabelText("Read and write")).toHaveTextContent("RW");
+    expect(screen.getByRole("img", { name: "Read only" })).toBeVisible();
+    expect(screen.getAllByRole("img", { name: "Read only" })).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("link", { name: "Grüße 東京 🚀" }));
     expect(navigation.visits.at(-1)?.route).toEqual({
@@ -1421,9 +1421,9 @@ describe("writable file operations", () => {
       target: { value: "renamed.md" },
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Confirm" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "Rename" })).toBeEnabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     await waitFor(() =>
       expect(moveEntry).toHaveBeenCalledWith(
         "work",
@@ -2105,7 +2105,7 @@ describe("writable file operations", () => {
     fireEvent.input(screen.getByLabelText("Folder name"), {
       target: { value: "expired" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(
       await screen.findByText(
         "Your session expired. Sign in again to continue.",

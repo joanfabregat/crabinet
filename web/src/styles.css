@@ -717,6 +717,8 @@ select {
 .tree-special-toggle {
   cursor: pointer;
   font-weight: 700;
+  /* Centres the chevron like .tree-toggle in the share rows' first column. */
+  padding-left: calc((2.75rem - 16px) / 2);
 }
 
 .tree-special-toggle:hover,
@@ -872,22 +874,23 @@ select {
 
 .tree-access {
   align-items: center;
-  border: 1px solid var(--badge-border);
-  border-radius: 0.3rem;
   color: var(--badge-ink);
   display: inline-flex;
-  font-size: 0.65rem;
-  font-weight: 800;
   height: 1.4rem;
   justify-content: center;
   min-width: 1.4rem;
-  padding: 0 0.35rem;
 }
 
-.tree-access.access-read-write {
-  background: var(--selected-strong-bg);
-  border-color: var(--success-border);
-  color: var(--success-ink);
+/* Pointer devices reveal the copy button on hover or keyboard focus, which
+   leaves the share name the full row width. Touch devices keep it shown. */
+@media (hover: hover) {
+  .tree-row:not(:hover, :focus-within) .tree-copy {
+    min-width: 0;
+    opacity: 0;
+    overflow: hidden;
+    padding: 0;
+    width: 0;
+  }
 }
 
 .tree-status {
