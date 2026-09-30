@@ -1,6 +1,6 @@
 {
   "name": "@joanfabregat/crabinet-web",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -16,10 +16,12 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@simplewebauthn/browser": "14.0.0",
     "@shikijs/langs": "4.4.3",
     "@shikijs/themes": "4.4.3",
+    "@simplewebauthn/browser": "14.0.0",
     "lucide-preact": "1.47.0",
+    "markdown-it": "15.0.2",
+    "markdown-it-footnote": "4.0.0",
     "preact": "10.29.8",
     "shiki": "4.4.3"
   },

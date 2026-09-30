@@ -47,7 +47,7 @@ Configuration and mounted share roots are operator-trusted at startup. Filenames
 9. Uploads, downloads, directory listings, previews, and password verification have explicit concurrency and resource bounds.
 10. Temporary uploads are never served and completed writes become visible atomically where the filesystem permits it.
 11. User files are never exposed by a generic static-file service.
-12. Code and text render as inert text. Markdown disallows raw HTML and is sanitized. HTML preview has both iframe and HTTP CSP sandboxes and cannot execute scripts, submit forms, navigate, open popups, use application storage, or contact external origins.
+12. Code and text render as inert text. Markdown, including its raw HTML, is rebuilt from a detached parsed document through a tag and attribute allowlist, never through `innerHTML`; it loads no images and opens only http(s) and mailto links, and the application CSP plus script- and stylesheet-free download MIME types back that allowlist up. HTML preview has both iframe and HTTP CSP sandboxes and cannot execute scripts, submit forms, navigate, open popups, use application storage, or contact external origins.
 13. Logs, errors, test artifacts, and CI output exclude passwords, hashes, cookies, session IDs, secret contents, and file contents.
 14. Release images package the same tested binaries attached to the release; dependency and provenance evidence accompanies releases.
 15. Passkey registration requires CSRF proof and a session that signed in within the last 10 minutes. Authentication binds a single-use challenge to the configured HTTPS origin and relying party, requires user verification, and maps the credential to an enabled local user before creating a session.

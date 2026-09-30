@@ -766,7 +766,7 @@ async fn download(
         opened.file_id(),
         EntryKind::File,
     );
-    let mime = mime_for_path(&path);
+    let mime = download_mime(mime_for_path(&path));
     let filename = path
         .components()
         .last()
@@ -1126,6 +1126,30 @@ fn mime_for_path(path: &VirtualPath) -> String {
     mime_guess::from_path(path.to_string())
         .first_or_octet_stream()
         .to_string()
+}
+
+/// Downloads never carry a type a browser would run or apply as a
+/// subresource. `Content-Disposition: attachment` does not stop
+/// `<script src>` or `<link rel=stylesheet>` from loading a same-origin
+/// download, so with `nosniff` this keeps `script-src 'self'` and
+/// `style-src 'self'` from covering user files.
+fn download_mime(mime: String) -> String {
+    let essence = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let executable = ["javascript", "ecmascript", "jscript", "livescript"]
+        .iter()
+        .any(|name| essence.contains(name))
+        || essence == "text/css"
+        || essence == "application/wasm";
+    if executable {
+        "application/octet-stream".to_owned()
+    } else {
+        mime
+    }
 }
 
 pub(crate) fn content_disposition(filename: &str) -> Result<HeaderValue, AppError> {
@@ -1948,6 +1972,54 @@ mod tests {
             response.headers()[header::CONTENT_SECURITY_POLICY],
             "default-src 'none'; sandbox"
         );
+    }
+
+    #[tokio::test]
+    async fn downloads_never_carry_a_script_or_stylesheet_type() {
+        let fixture = fixture(BrowseLimits::default());
+        for (name, expected) in [
+            ("evil.js", "application/octet-stream"),
+            ("evil.mjs", "application/octet-stream"),
+            ("evil.css", "application/octet-stream"),
+            ("evil.wasm", "application/octet-stream"),
+            ("a.txt", "text/plain"),
+        ] {
+            fs::write(fixture._root.path().join(name), b"window.evil=true")
+                .unwrap_or_else(|_| panic!("{name} fixture"));
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get(format!("/api/v1/shares/documents/download?path={name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], expected, "{name}");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        }
+    }
+
+    #[test]
+    fn download_mime_neutralizes_every_executable_subresource_type() {
+        for executable in [
+            "text/javascript",
+            "application/javascript; charset=utf-8",
+            "application/x-ecmascript",
+            "text/JScript",
+            "text/livescript",
+            "text/css",
+            "application/wasm",
+        ] {
+            assert_eq!(
+                download_mime(executable.to_owned()),
+                "application/octet-stream",
+                "{executable}"
+            );
+        }
+        for inert in ["text/plain", "text/html", "image/png", "application/json"] {
+            assert_eq!(download_mime(inert.to_owned()), inert);
+        }
     }
 
     #[tokio::test]

@@ -2405,8 +2405,8 @@ function MarkdownPreview({
           </button>
         </div>
         <SecurityNote>
-          Raw HTML, links, images, and embeds are displayed as text and are
-          never activated.
+          Scripts, styles, forms, images, and embeds are never loaded. Only web
+          and email links open, in a new tab.
         </SecurityNote>
         <CopySourceButton source={document.source} filename={filename} />
       </div>
