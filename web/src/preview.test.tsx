@@ -210,7 +210,11 @@ describe("secure file previews", () => {
 
     const readable = await screen.findByRole("tab", { name: "Readable" });
     expect(readable).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("markdown-document")).toHaveTextContent(
+    expect(
+      await screen.findByRole("heading", { name: "Safe heading" }),
+    ).toBeVisible();
+    expect(screen.getByTestId("markdown-document")).toHaveTextContent("beacon");
+    expect(screen.getByTestId("markdown-document")).not.toHaveTextContent(
       "top.location",
     );
     expect(

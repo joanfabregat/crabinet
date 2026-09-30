@@ -12,9 +12,16 @@ Text previews require valid UTF-8 without binary control characters. Invalid UTF
 
 The JSON endpoint returns `{ kind, source, language, size, truncated }`. Source text remains a JSON string and is never interpolated into application HTML. Markdown is returned as `markdown_source`: the server does not render it, resolve embeds, fetch URLs, or interpret raw HTML.
 
-The frontend may render Markdown only after using a reviewed parser configuration that disables raw HTML and a sanitizer that rejects dangerous URL schemes. Rendering must stay in a component that does not use unsanitized `innerHTML`. The backend source-only contract is the security boundary until that frontend work lands.
+The frontend renders GitHub Flavored Markdown in the application DOM, the way GitHub does, and never through `innerHTML`. markdown-it, with raw HTML and URL autolinking enabled and the footnote plugin, produces an HTML string that also carries the file's own raw HTML. Crabinet adds heading ids, task-list checkboxes, and GitHub alerts (`> [!NOTE]`) as markdown-it core rules. The HTML string is parsed with `DOMParser` into a detached document, which runs no scripts and loads no resources, and `safe-markdown.tsx` walks that document into Preact elements:
 
-The v1 frontend uses a smaller safe-readable projection instead of a general Markdown-to-HTML parser: it recognizes a fixed set of block structures and supplies all file content to Preact as text children. It does not create links, images, embeds, or attributes from source, so URL schemes and raw HTML are never activated. A source tab always exposes the exact returned text.
+- Only a fixed allowlist of HTML-namespace elements is recreated. Scripts, styles, frames, objects, embeds, media, templates, form controls other than task checkboxes, SVG, and MathML are dropped with their content. Any other element, including `form` and `button`, is unwrapped to its children.
+- Only `id`, `title`, `lang`, `dir`, a validated `align`, clamped numeric table and list attributes, `open` on `details`, and `datetime` on `time` are carried over. Event handlers, `class`, and `style` never are; table column alignment is recognized only in markdown-it's exact `text-align` form and applied as a CSSOM property.
+- Every `id` is prefixed with `user-content-` so a document cannot shadow application elements. In-document `#fragment` links scroll to the prefixed target without routing.
+- Links open only for `http:`, `https:`, and `mailto:` URLs, in a new tab with `rel="noopener noreferrer nofollow"`. Any other scheme and every relative link render as inert text.
+- Images are never loaded. They render as a placeholder showing their alt text, which also keeps remote images from revealing who opened a file.
+- Fenced code with a supported language goes through the same Shiki highlighter as code previews; other fences are text. Raw HTML nesting beyond 64 levels is flattened to text, and documents larger than 1 MiB are not rendered.
+
+The application CSP (`default-src 'self'` without `'unsafe-inline'`) is the backstop if this allowlist is ever wrong: inline scripts, event handlers, and style attributes cannot run, and downloads never carry a script or stylesheet MIME type (see [Browse API](browse-api.md)). The parser is loaded on demand when a Markdown file is opened. A source tab always exposes the exact returned text.
 
 Code highlighting uses Shiki with a fixed language allowlist and dynamically loaded grammars. Highlighted tokens are rendered as Preact text children; generated or uploaded HTML is never assigned through `innerHTML`.
 

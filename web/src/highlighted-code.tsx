@@ -29,6 +29,32 @@ const languageLoaders: Record<string, () => Promise<{ default: unknown }>> = {
   yaml: () => import("@shikijs/langs/yaml"),
 };
 
+// Markdown fence info strings name languages the way GitHub accepts them.
+const languageAliases: Record<string, string> = {
+  bash: "shell",
+  "c++": "cpp",
+  htm: "html",
+  js: "javascript",
+  kt: "kotlin",
+  md: "markdown",
+  mjs: "javascript",
+  py: "python",
+  rb: "ruby",
+  rs: "rust",
+  sh: "shell",
+  shellscript: "shell",
+  ts: "typescript",
+  yml: "yaml",
+  zsh: "shell",
+};
+
+/** Maps a fence info string to a highlighter language, if one is supported. */
+export function highlightLanguage(info: string): string | undefined {
+  const name = info.trim().toLowerCase();
+  const language = languageAliases[name] ?? name;
+  return Object.hasOwn(languageLoaders, language) ? language : undefined;
+}
+
 const highlighterPromise = createHighlighterCore({
   themes: [
     import("@shikijs/themes/github-light-high-contrast"),
@@ -77,10 +103,12 @@ export function HighlightedCode({
   source,
   language,
   wrap,
+  label = "File source",
 }: {
   source: string;
   language: string;
   wrap: boolean;
+  label?: string;
 }) {
   const [lines, setLines] = useState<ThemedToken[][]>();
 
@@ -110,7 +138,7 @@ export function HighlightedCode({
     <pre
       class={`source-code shiki-source${wrap ? " source-code-wrap" : ""}`}
       tabIndex={0}
-      aria-label="File source"
+      aria-label={label}
       aria-busy={lines === undefined}
     >
       <code>

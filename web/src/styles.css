@@ -1533,6 +1533,175 @@ html.preview-fullscreen-open body {
   padding-left: 1rem;
 }
 
+.markdown-document h1,
+.markdown-document h2 {
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 0.3em;
+}
+
+.markdown-document h1,
+.markdown-document h2,
+.markdown-document h3,
+.markdown-document h4,
+.markdown-document h5,
+.markdown-document h6 {
+  line-height: 1.25;
+  margin: 1.5em 0 0.75em;
+}
+
+.markdown-document :is(p, ul, ol, dl, table, pre, blockquote, details) {
+  margin-bottom: 1em;
+  margin-top: 0;
+}
+
+.markdown-document :is(ul, ol) {
+  padding-left: 2em;
+}
+
+.markdown-document li + li,
+.markdown-document li > :is(ul, ol) {
+  margin-top: 0.25em;
+}
+
+.markdown-document li > :is(ul, ol) {
+  margin-bottom: 0;
+}
+
+.markdown-document li:has(> .markdown-task, > p > .markdown-task) {
+  list-style: none;
+}
+
+.markdown-document .markdown-task {
+  accent-color: var(--accent-fill);
+  height: 0.9em;
+  margin: 0 0.4em 0.15em -1.4em;
+  min-height: 0;
+  padding: 0;
+  vertical-align: middle;
+  width: 0.9em;
+}
+
+.markdown-document :not(pre) > code,
+.markdown-document kbd {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 0.35rem;
+  color: var(--code-ink);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85em;
+  padding: 0.1em 0.35em;
+}
+
+.markdown-document kbd {
+  border-bottom-width: 2px;
+}
+
+.markdown-document pre {
+  margin-bottom: 1em;
+}
+
+.markdown-document hr {
+  border: 0;
+  border-top: 2px solid var(--line);
+  margin: 1.5em 0;
+}
+
+.markdown-document table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-wrap: normal;
+  width: max-content;
+}
+
+.markdown-document th,
+.markdown-document td {
+  border: 1px solid var(--line);
+  padding: 0.4em 0.8em;
+}
+
+.markdown-document th {
+  background: var(--surface-subtle);
+  font-weight: 600;
+}
+
+.markdown-document tbody tr:nth-child(even) {
+  background: var(--surface-subtle);
+}
+
+.markdown-document a {
+  color: var(--accent);
+}
+
+.markdown-document .markdown-inert-link {
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+}
+
+.markdown-document .markdown-image-placeholder {
+  align-items: center;
+  border: 1px dashed var(--control-border);
+  border-radius: 0.35rem;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 0.9em;
+  gap: 0.3em;
+  padding: 0.05em 0.4em;
+}
+
+.markdown-document details {
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 0.5em 0.8em;
+}
+
+.markdown-document summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.markdown-document section {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.markdown-document .markdown-alert {
+  --alert-tone: var(--accent);
+  border-left: 0.25rem solid var(--alert-tone);
+  margin-bottom: 1em;
+  padding: 0.25em 1rem;
+}
+
+.markdown-document .markdown-alert > :last-child {
+  margin-bottom: 0.25em;
+}
+
+.markdown-document .markdown-alert-title {
+  align-items: center;
+  color: var(--alert-tone);
+  display: flex;
+  font-weight: 600;
+  gap: 0.4em;
+  margin-bottom: 0.5em;
+}
+
+.markdown-document .markdown-alert-tip {
+  --alert-tone: var(--success-ink);
+}
+
+.markdown-document .markdown-alert-important {
+  --alert-tone: var(--accent-strong);
+}
+
+.markdown-document .markdown-alert-warning {
+  --alert-tone: var(--warning-ink);
+}
+
+.markdown-document .markdown-alert-caution {
+  --alert-tone: var(--danger);
+}
+
 .html-source-frame {
   background: white;
   border: 1px solid var(--line);

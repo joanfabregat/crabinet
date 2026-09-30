@@ -282,9 +282,25 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   await expect(
     page.getByRole("heading", { name: "Guide.md", level: 2 }),
   ).toBeFocused();
-  await expect(page.getByTestId("markdown-document")).toContainText(
+  await expect(
+    page
+      .getByTestId("markdown-document")
+      .getByRole("heading", { name: "Welcome to Crabinet" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("markdown-document")).not.toContainText(
     "window.__indexHostileScript",
   );
+  const markdown = page.getByTestId("markdown-document");
+  await expect(markdown.getByRole("note")).toContainText(
+    "Grants are checked again on every request.",
+  );
+  await expect(
+    markdown.getByRole("cell", { name: "Writer", exact: true }),
+  ).toBeVisible();
+  await expect(markdown.getByRole("checkbox")).toHaveCount(2);
+  await expect(markdown.getByLabel("Code block")).toHaveClass(/shiki-source/);
+  await expect(markdown.locator("a[href]")).toHaveCount(0);
+  await expect(markdown).toContainText("[unsafe link](javascript:");
   expect(await page.locator("script").count()).toBe(1);
   expect(
     await page.getByTestId("markdown-document").locator("img, form").count(),
