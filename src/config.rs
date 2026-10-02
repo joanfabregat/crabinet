@@ -10,7 +10,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::client_address::IpNetwork;
+use crate::{client_address::IpNetwork, filesystem::ShareId};
 
 const CONFIG_VERSION: u32 = 1;
 const MIN_SESSION_SECRET_BYTES: usize = 32;
@@ -174,6 +174,10 @@ struct RawUser {
     password_hash: Option<String>,
     /// Email returned as a verified claim by the configured OIDC provider.
     email: Option<String>,
+    /// Optional OIDC `sub` claim this user's ID token must carry in addition
+    /// to the verified email. Requires `email`.
+    #[schemars(length(min = 1, max = 255))]
+    oidc_subject: Option<String>,
     /// Disabled users cannot log in and their existing sessions are rejected.
     #[serde(default)]
     disabled: bool,
@@ -313,6 +317,7 @@ pub struct User {
     username: String,
     password_hash: Option<String>,
     email: Option<String>,
+    oidc_subject: Option<String>,
     disabled: bool,
 }
 
@@ -323,6 +328,7 @@ impl fmt::Debug for User {
             .field("username", &self.username)
             .field("password_hash", &"[REDACTED]")
             .field("email", &self.email)
+            .field("oidc_subject", &self.oidc_subject)
             .finish()
     }
 }
@@ -353,6 +359,7 @@ impl Config {
             path: source.clone(),
             source: source_error,
         })?;
+        warn_if_shared(&source);
         let value =
             toml::from_str::<toml::Value>(&text).map_err(|error| ConfigError::TomlSyntax {
                 location: safe_location(&text, error.span()),
@@ -538,6 +545,9 @@ impl Config {
                     Ok(normalized)
                 })
                 .transpose()?;
+            if let Some(subject) = &user.oidc_subject {
+                validate_oidc_subject(&user.username, subject, email.is_some())?;
+            }
             if !(user.disabled
                 || raw.auth.password_enabled && user.password_hash.is_some()
                 || oidc.is_some() && email.is_some())
@@ -551,6 +561,7 @@ impl Config {
                 username: user.username,
                 password_hash: user.password_hash,
                 email,
+                oidc_subject: user.oidc_subject,
                 disabled: user.disabled,
             });
         }
@@ -578,7 +589,7 @@ impl Config {
         let mut share_ids = HashSet::new();
         let mut shares = Vec::with_capacity(raw.shares.len());
         for share in raw.shares {
-            validate_identifier("share id", &share.id)?;
+            validate_share_id(&share.id)?;
             if RESERVED_SHARE_IDS
                 .iter()
                 .any(|reserved| share.id.eq_ignore_ascii_case(reserved))
@@ -777,6 +788,11 @@ impl User {
 
     pub fn email(&self) -> Option<&str> {
         self.email.as_deref()
+    }
+
+    /// The OIDC `sub` claim this user's ID token must carry, if bound.
+    pub fn oidc_subject(&self) -> Option<&str> {
+        self.oidc_subject.as_deref()
     }
 
     pub fn disabled(&self) -> bool {
@@ -991,6 +1007,39 @@ fn validate_identifier(kind: &str, value: &str) -> Result<(), ConfigError> {
     }
 }
 
+/// Share IDs must satisfy the same grammar the runtime enforces, so a
+/// configuration `check-config` accepts can never fail at startup.
+fn validate_share_id(value: &str) -> Result<(), ConfigError> {
+    ShareId::new(value.to_owned()).map(drop).map_err(|_| {
+        ConfigError::Validation(
+            "share id must contain 1 to 64 ASCII letters, digits, dots, underscores, or hyphens and start with a letter or digit".into(),
+        )
+    })
+}
+
+/// An OIDC subject is an opaque, case-sensitive provider identifier of at
+/// most 255 ASCII characters (OpenID Connect Core 1.0, section 2).
+fn validate_oidc_subject(
+    username: &str,
+    subject: &str,
+    has_email: bool,
+) -> Result<(), ConfigError> {
+    if subject.is_empty()
+        || subject.len() > 255
+        || !subject.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(ConfigError::Validation(format!(
+            "oidc_subject for user {username:?} must contain 1 to 255 printable ASCII characters without spaces"
+        )));
+    }
+    if !has_email {
+        return Err(ConfigError::Validation(format!(
+            "oidc_subject for user {username:?} requires an email binding"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_display_name(id: &str, name: &str) -> Result<(), ConfigError> {
     let length = name.chars().count();
     if !(1..=128).contains(&length) || name.trim() != name || name.chars().any(char::is_control) {
@@ -1129,6 +1178,31 @@ fn validate_database_path(path: &Path) -> Result<PathBuf, ConfigError> {
     }
 }
 
+/// The configuration holds password hashes, so access by group or other
+/// users is reported. It is a warning rather than an error because a
+/// group-readable configuration was previously accepted silently.
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: inspects the operator-trusted configuration file before serving requests"
+)]
+fn warn_if_shared(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    // nosemgrep: crabinet-ambient-filesystem-path
+    if fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o077 != 0) {
+        let name = path
+            .file_name()
+            .map_or_else(|| "the file".into(), |name| name.to_string_lossy());
+        tracing::warn!(
+            "the configuration file is accessible by group or other users and contains password hashes; run `chmod 600 {name}` as its owner"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_shared(_path: &Path) {}
+
 fn read_session_secret(path: &Path) -> Result<(PathBuf, Vec<u8>), ConfigError> {
     read_secret_file(
         path,
@@ -1160,9 +1234,12 @@ fn read_secret_file(
     {
         use std::os::unix::fs::PermissionsExt;
 
-        if metadata.permissions().mode() & 0o022 != 0 {
+        if metadata.permissions().mode() & 0o077 != 0 {
+            let name = path
+                .file_name()
+                .map_or_else(|| "the file".into(), |name| name.to_string_lossy());
             return Err(ConfigError::Validation(format!(
-                "{field} must not be writable by group or other users"
+                "{field} must not be readable or writable by group or other users; run `chmod 600 {name}` as its owner"
             )));
         }
     }
@@ -1279,6 +1356,21 @@ fn reject_sensitive_paths_inside_shares(
     Ok(())
 }
 
+/// Writes a test secret with the owner-only mode startup requires.
+#[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-only: writes a synthetic secret in a temporary directory"
+)]
+pub(crate) fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    // nosemgrep: crabinet-ambient-filesystem-path
+    fs::write(path, contents).expect("write private test file");
+    // nosemgrep: crabinet-ambient-filesystem-path
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("restrict test file");
+}
+
 #[cfg(test)]
 #[expect(
     clippy::disallowed_methods,
@@ -1306,7 +1398,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().join("share");
             fs::create_dir(&root).unwrap();
-            fs::write(temp.path().join("session.key"), [7; 32]).unwrap();
+            write_private_file(&temp.path().join("session.key"), [7; 32]);
             let config = temp.path().join("config.toml");
             Self {
                 _temp: temp,
@@ -1511,7 +1603,7 @@ permission = "write"
     fn oidc_only_accepts_email_user_without_password() {
         let tree = TestTree::new();
         let secret = tree.root.parent().unwrap().join("oidc.secret");
-        fs::write(&secret, "example-client-secret").unwrap();
+        write_private_file(&secret, "example-client-secret");
         let settings = format!(
             "[auth]\npassword_enabled = false\noidc_enabled = true\n[auth.oidc]\nissuer = \"https://id.example.com\"\nclient_id = \"crabinet\"\nclient_secret_file = {:?}\nredirect_uri = \"https://files.example.com/api/v1/auth/oidc/callback\"\n",
             secret
@@ -1636,24 +1728,149 @@ permission = "write"
     }
 
     #[test]
-    fn secret_may_be_read_only_but_not_group_or_world_writable() {
+    fn secrets_must_be_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let read_only = TestTree::new();
-        let secret = read_only._temp.path().join("session.key");
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o444)).unwrap();
-        assert!(read_only.load(&read_only.valid_text()).is_ok());
+        for mode in [0o600, 0o400] {
+            let tree = TestTree::new();
+            let secret = tree._temp.path().join("session.key");
+            fs::set_permissions(&secret, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(tree.load(&tree.valid_text()).is_ok(), "{mode:o}");
+        }
+        for mode in [0o444, 0o640, 0o604, 0o620, 0o602, 0o664, 0o610] {
+            let tree = TestTree::new();
+            let secret = tree._temp.path().join("session.key");
+            fs::set_permissions(&secret, fs::Permissions::from_mode(mode)).unwrap();
+            let error = tree.load(&tree.valid_text()).unwrap_err().to_string();
+            assert!(
+                error.contains("server.session_secret_file must not be readable or writable by group or other users")
+                    && error.contains("`chmod 600 session.key`"),
+                "{mode:o}: {error}"
+            );
+            assert!(
+                !error.contains(&*tree._temp.path().to_string_lossy()),
+                "{error}"
+            );
+        }
+    }
 
-        let writable = TestTree::new();
-        let secret = writable._temp.path().join("session.key");
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o664)).unwrap();
+    #[test]
+    fn oidc_client_secret_must_be_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tree = TestTree::new();
+        let secret = tree.root.parent().unwrap().join("oidc.secret");
+        write_private_file(&secret, "example-client-secret");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
+        let settings = format!(
+            "[auth]\noidc_enabled = true\n[auth.oidc]\nissuer = \"https://id.example.com\"\nclient_id = \"crabinet\"\nclient_secret_file = {secret:?}\nredirect_uri = \"https://files.example.com/api/v1/auth/oidc/callback\"\n"
+        );
+        let text = tree
+            .valid_text()
+            .replace("[[users]]", &format!("{settings}\n[[users]]"))
+            .replace(
+                &format!("password_hash = \"{HASH}\""),
+                &format!("password_hash = \"{HASH}\"\nemail = \"alice@example.com\""),
+            );
+        let error = tree.load(&text).unwrap_err().to_string();
         assert!(
-            writable
-                .load(&writable.valid_text())
+            error.contains("auth.oidc.client_secret_file must not be readable")
+                && error.contains("`chmod 600 oidc.secret`"),
+            "{error}"
+        );
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(tree.load(&text).is_ok());
+    }
+
+    #[test]
+    fn group_readable_configuration_is_loaded_with_a_warning() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tree = TestTree::new();
+        fs::write(&tree.config, tree.valid_text()).unwrap();
+        fs::set_permissions(&tree.config, fs::Permissions::from_mode(0o640)).unwrap();
+        let logs = crate::audit::capture::start();
+        assert!(Config::load(&tree.config).is_ok());
+        let warning = logs.take();
+        assert!(
+            warning.contains("contains password hashes")
+                && warning.contains("chmod 600 config.toml"),
+            "{warning}"
+        );
+
+        fs::set_permissions(&tree.config, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(Config::load(&tree.config).is_ok());
+        assert_eq!(logs.take(), "");
+    }
+
+    #[test]
+    fn oidc_subject_is_bounded_and_requires_an_email() {
+        let tree = TestTree::new();
+        let with = |line: &str| {
+            tree.valid_text().replace(
+                &format!("password_hash = \"{HASH}\""),
+                &format!("password_hash = \"{HASH}\"\n{line}"),
+            )
+        };
+        let bound = tree
+            .load(&with(
+                "email = \"alice@example.com\"\noidc_subject = \"110169484474386276334\"",
+            ))
+            .unwrap();
+        assert_eq!(
+            bound.users()[0].oidc_subject(),
+            Some("110169484474386276334")
+        );
+        assert_eq!(
+            tree.load(&tree.valid_text()).unwrap().users()[0].oidc_subject(),
+            None
+        );
+
+        let long = "s".repeat(256);
+        for subject in [
+            "",
+            " padded",
+            "has space",
+            "line\\nbreak",
+            "é",
+            long.as_str(),
+        ] {
+            let error = tree
+                .load(&with(&format!(
+                    "email = \"alice@example.com\"\noidc_subject = \"{subject}\""
+                )))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("must contain 1 to 255 printable ASCII"),
+                "{error}"
+            );
+        }
+        assert!(
+            tree.load(&with("oidc_subject = \"110169484474386276334\""))
                 .unwrap_err()
                 .to_string()
-                .contains("writable by group or other users")
+                .contains("requires an email binding")
         );
+    }
+
+    #[test]
+    fn share_ids_follow_the_runtime_grammar() {
+        let tree = TestTree::new();
+        for id in [".hidden", "-dash", "_under"] {
+            let text = tree
+                .valid_text()
+                .replace("id = \"files\"", &format!("id = \"{id}\""));
+            let error = tree.load(&text).unwrap_err().to_string();
+            assert!(
+                error.contains("start with a letter or digit"),
+                "{id}: {error}"
+            );
+        }
+        let text = tree
+            .valid_text()
+            .replace("id = \"files\"", "id = \"9.files-a_b\"");
+        assert!(tree.load(&text).is_ok());
     }
 
     #[test]

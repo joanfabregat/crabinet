@@ -2,11 +2,13 @@
 
 pub mod app;
 pub mod assets;
+mod audit;
 pub mod auth;
 pub mod browse;
 pub mod client_address;
 pub mod config;
 pub mod error;
+mod extract;
 pub mod filesystem;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]

@@ -4,11 +4,15 @@ use thiserror::Error;
 pub const PASSWORD_MEMORY_KIB: u32 = 65_536;
 pub const PASSWORD_ITERATIONS: u32 = 3;
 pub const PASSWORD_PARALLELISM: u32 = 1;
+/// Sign-in refuses longer passwords, so a longer one could never be used.
+pub const MAX_PASSWORD_BYTES: usize = 4_096;
 
 #[derive(Debug, Error)]
 pub enum PasswordError {
     #[error("password must not be empty")]
     Empty,
+    #[error("password must not be longer than {MAX_PASSWORD_BYTES} bytes, the sign-in limit")]
+    TooLong,
     #[error("passwords do not match")]
     Mismatch,
     #[error("password hashing failed")]
@@ -19,6 +23,9 @@ pub enum PasswordError {
 pub fn hash_confirmed(password: &str, confirmation: &str) -> Result<String, PasswordError> {
     if password.is_empty() {
         return Err(PasswordError::Empty);
+    }
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(PasswordError::TooLong);
     }
     if password != confirmation {
         return Err(PasswordError::Mismatch);
@@ -74,5 +81,21 @@ mod tests {
             hash_confirmed("one", "two"),
             Err(PasswordError::Mismatch)
         ));
+    }
+
+    #[test]
+    fn rejects_passwords_that_sign_in_would_refuse() {
+        let longest = "p".repeat(MAX_PASSWORD_BYTES);
+        let too_long = "p".repeat(MAX_PASSWORD_BYTES + 1);
+        assert!(matches!(
+            hash_confirmed(&too_long, &too_long),
+            Err(PasswordError::TooLong)
+        ));
+        assert!(
+            PasswordError::TooLong
+                .to_string()
+                .contains("longer than 4096 bytes")
+        );
+        assert!(hash_confirmed(&longest, &longest).is_ok());
     }
 }

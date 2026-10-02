@@ -213,7 +213,6 @@ impl VirtualPath {
         self.0.is_empty()
     }
 
-    #[must_use]
     pub fn components(&self) -> impl ExactSizeIterator<Item = &EntryName> {
         self.0.iter()
     }

@@ -20,7 +20,7 @@ This model covers the application, its OCI image, its configuration and secret m
 1. The public network to the reverse proxy and application HTTP listener.
 2. The browser client to authenticated JSON, upload, download, and preview endpoints.
 3. User-controlled virtual paths and content to pre-opened share capabilities.
-4. The application process to read-only configuration, secret files, SQLite state, and share mounts.
+4. The application process to read-only configuration, owner-only secret files, SQLite state, and share mounts.
 5. Build dependencies and GitHub Actions to release binaries and OCI images.
 
 Configuration and mounted share roots are operator-trusted at startup. Reverse proxies listed in `server.trusted_proxies` are trusted only to report the connecting client's address, and only for login rate limiting; forwarding headers from any other peer are ignored. Filenames, paths below a share, file contents, HTTP input, cookies, multipart metadata, and authenticated non-administrator users are untrusted.
@@ -71,7 +71,8 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 | Read and blocking-pool exhaustion | Process-wide and per-user caps on listings including Trash (16/8), whole-file buffered reads and previews (4/2), streaming downloads and image previews, held for the body's lifetime (64/8), event streams (64/4), and other request-path blocking filesystem work such as metadata lookups (64/16); session lookups stay outside these caps | Gate saturation and release tests per gate and per subject |
 | Stale event streams | Streams end after 60 seconds and re-check their session every 15 seconds | Sign-out router test |
 | Connection exhaustion (slow or idle clients) | Configurable HTTP/1.1 header-read timeout covering new and idle keep-alive connections, configurable process-wide connection cap | TCP-level server tests |
-| Header injection/content sniffing | Validated header values, safe disposition encoding, `nosniff` | Response-header tests |
+| Header injection/content sniffing | Validated header values, safe disposition encoding, `nosniff`, JSON error envelopes for malformed requests | Response-header tests |
+| Undetected or repudiated attacks | Audit events for sign-in outcomes, logout, expired or revoked sessions, refused share access, and mutations, keyed digests for unknown account names, server-generated request IDs | Log-capture tests asserting events and the absence of secrets |
 | Dependency or workflow compromise | Lockfiles, dependency review, Semgrep, Trivy, CodeQL, pinned Actions, minimal permissions, actionlint and zizmor, per-architecture image attestations | Pull-request, weekly, and release CI; the release fails unless the index and each architecture image verify |
 | Overbroad host access | Explicit mounts, non-root image, read-only rootfs, dropped capabilities | Pull-request and pre-publication release smoke tests run the image with a read-only root, all capabilities dropped, no-new-privileges, and UID 65532, then check readiness, an authenticated listing, the non-root process, and that the image binary matches the release archive; Trivy image and Containerfile scans; operator documentation |
 

@@ -86,8 +86,13 @@ rules:
         - /src/preview.rs
         - /src/mutations.rs
     patterns:
-      - pattern: |
-          async fn $HANDLER(..., Path($PARAMETERS): Path<$TYPE>, ...) -> $RETURN { ... }
+      # Handlers take `ApiPath`, crate::extract's JSON-error wrapper around
+      # Axum's `Path`; both spellings are share-path extractors.
+      - pattern-either:
+          - pattern: |
+              async fn $HANDLER(..., Path($PARAMETERS): Path<$TYPE>, ...) -> $RETURN { ... }
+          - pattern: |
+              async fn $HANDLER(..., ApiPath($PARAMETERS): ApiPath<$TYPE>, ...) -> $RETURN { ... }
       - pattern-not: |
           async fn $HANDLER(..., $IDENTITY: AuthenticatedIdentity, ...) -> $RETURN { ... }
       - pattern-not-inside: |

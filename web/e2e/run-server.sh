@@ -40,6 +40,7 @@ sed \
   -e "s|__STATE_DIR__|$state_dir|g" \
   -e "s|__PORT__|$port|g" \
   "$script_dir/fixtures/config.toml.in" >"$state_dir/config.toml"
+chmod 600 "$state_dir/config.toml"
 
 "$binary" --config "$state_dir/config.toml" &
 server_pid=$!

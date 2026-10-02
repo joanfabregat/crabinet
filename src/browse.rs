@@ -17,7 +17,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{FromRequestParts, Path, Query, State},
+    extract::{FromRequestParts, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -39,6 +39,7 @@ use crate::{
     app::AppState,
     auth::AuthService,
     error::AppError,
+    extract::{ApiPath, ApiQuery},
     filesystem::{
         AccessLevel, AuthorizedShare, DirectoryEntry, EntryKind, EntryMetadata, FsError,
         FsErrorCode, GlobalPolicy, OwnedAuthorizedShare, ShareFs, ShareGrant, ShareId, VirtualPath,
@@ -573,8 +574,8 @@ struct EntryResponse {
 async fn list_directory(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<DirectoryQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<DirectoryQuery>,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
     let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
@@ -666,8 +667,8 @@ struct SessionCheck {
 async fn directory_events(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<DirectoryQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<DirectoryQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
@@ -776,8 +777,8 @@ struct MetadataResponse {
 async fn read_metadata(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<FileQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<FileQuery>,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
     let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
@@ -833,8 +834,8 @@ struct TextResponse {
 async fn read_text(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<FileQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<FileQuery>,
 ) -> Result<Response, AppError> {
     let browse = state.browse();
     let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
@@ -871,8 +872,8 @@ async fn read_text(
 async fn download(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<FileQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<FileQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let browse = state.browse();

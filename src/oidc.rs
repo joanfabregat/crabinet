@@ -2,13 +2,14 @@
 
 use std::{
     collections::HashMap,
+    net::IpAddr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::State,
     http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Redirect, Response},
     routing::get,
@@ -22,9 +23,14 @@ use url::Url;
 
 use crate::{
     app::AppState,
-    auth::{cookie_value, decode_token, encode_hex, session_cookie, session_cookie_header},
+    audit,
+    auth::{
+        LoginRejection, PeerAddress, cookie_value, decode_token, encode_hex, session_cookie,
+        session_cookie_header,
+    },
     config::OidcConfig,
     error::AppError,
+    extract::ApiQuery,
 };
 
 const TRANSACTION_SECONDS: u64 = 300;
@@ -76,6 +82,33 @@ struct CallbackQuery {
     error: Option<String>,
 }
 
+/// A refused callback: the public error, its audit reason, and whether the
+/// browser is shown the unrecognized-account page rather than an error.
+struct CallbackFailure {
+    rejection: LoginRejection,
+    identifier: Option<String>,
+    unrecognized: bool,
+}
+
+impl CallbackFailure {
+    const fn new(error: AppError, reason: &'static str) -> Self {
+        Self {
+            rejection: LoginRejection::new(error, reason),
+            identifier: None,
+            unrecognized: false,
+        }
+    }
+
+    const fn refused(reason: &'static str) -> Self {
+        Self::new(AppError::AuthenticationFailed, reason)
+    }
+
+    const fn unrecognized(reason: &'static str) -> Self {
+        let mut failure = Self::refused(reason);
+        failure.unrecognized = true;
+        failure
+    }
+}
 #[derive(Deserialize)]
 struct TokenResponse {
     id_token: String,
@@ -236,20 +269,67 @@ impl OidcService {
         Ok(response)
     }
 
+    /// Completes a callback and writes the audit event for its outcome. An
+    /// identity that cannot be mapped to an enabled user is redirected to the
+    /// unrecognized-account page; a broken or forged transaction is refused.
     async fn finish(
         &self,
         headers: &HeaderMap,
         callback: CallbackQuery,
         auth: &crate::auth::AuthService,
+        client: Option<IpAddr>,
     ) -> Result<Response, AppError> {
-        let state = callback.state.ok_or(AppError::AuthenticationFailed)?;
-        let transaction = self.consume(headers, &state)?;
-        if callback.error.is_some() {
-            return Err(AppError::AuthenticationFailed);
+        match self.complete(headers, callback, auth).await {
+            Ok((username, cookie_token)) => {
+                audit::sign_in_succeeded("oidc_login", &username, client);
+                let mut response = Redirect::to("/").into_response();
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    session_cookie_header(&cookie_token, auth.absolute_timeout_seconds()),
+                );
+                response
+                    .headers_mut()
+                    .append(header::SET_COOKIE, clear_transaction_cookie());
+                no_store(&mut response);
+                Ok(response)
+            }
+            Err(failure) => {
+                audit::sign_in_rejected(
+                    "oidc_login",
+                    failure.rejection.reason,
+                    failure.rejection.subject.as_deref(),
+                    failure.identifier.as_deref(),
+                    client,
+                );
+                match failure.rejection.error {
+                    AppError::AuthenticationFailed if failure.unrecognized => {
+                        Ok(redirect_unknown())
+                    }
+                    error => Err(error),
+                }
+            }
         }
-        let code = callback.code.ok_or(AppError::AuthenticationFailed)?;
+    }
+
+    async fn complete(
+        &self,
+        headers: &HeaderMap,
+        callback: CallbackQuery,
+        auth: &crate::auth::AuthService,
+    ) -> Result<(String, String), CallbackFailure> {
+        let refused = |reason| CallbackFailure::refused(reason);
+        let state = callback
+            .state
+            .ok_or_else(|| refused("invalid_transaction"))?;
+        let transaction = self
+            .consume(headers, &state)
+            .map_err(|error| CallbackFailure::new(error, "invalid_transaction"))?;
+        if callback.error.is_some() {
+            return Err(refused("provider_error"));
+        }
+        let code = callback.code.ok_or_else(|| refused("missing_code"))?;
         if code.is_empty() || code.len() > 4096 {
-            return Err(AppError::AuthenticationFailed);
+            return Err(refused("missing_code"));
         }
         let response = self
             .inner
@@ -267,15 +347,18 @@ impl OidcService {
             ])
             .send()
             .await
-            .map_err(|_| AppError::AuthenticationFailed)?;
+            .map_err(|_| refused("token_exchange_failed"))?;
         let token: TokenResponse = response_json(response, 64 * 1024)
             .await
-            .map_err(|_| AppError::AuthenticationFailed)?;
-        let claims = self.verify(&token.id_token, &transaction.nonce).await?;
+            .map_err(|_| refused("token_exchange_failed"))?;
+        let claims = self
+            .verify(&token.id_token, &transaction.nonce)
+            .await
+            .map_err(|error| CallbackFailure::new(error, "invalid_id_token"))?;
         let email = if claims.email_verified == Some(false) {
-            None
+            return Err(CallbackFailure::unrecognized("unverified_email"));
         } else if let Some(email) = claims.verified_email() {
-            Some(email.to_owned())
+            email.to_owned()
         } else if let (Some(endpoint), Some(access_token)) = (
             &self.inner.metadata.userinfo_endpoint,
             token.access_token.as_deref(),
@@ -287,44 +370,37 @@ impl OidcService {
                 .bearer_auth(access_token)
                 .send()
                 .await
-                .map_err(|_| AppError::AuthenticationFailed)?;
+                .map_err(|_| refused("userinfo_failed"))?;
             let info: UserInfo = response_json(response, 64 * 1024)
                 .await
-                .map_err(|_| AppError::AuthenticationFailed)?;
-            if info.sub != claims.sub || info.email_verified != Some(true) {
-                None
-            } else {
-                info.email
+                .map_err(|_| refused("userinfo_failed"))?;
+            if info.sub != claims.sub {
+                return Err(CallbackFailure::unrecognized("userinfo_subject_mismatch"));
+            }
+            match (info.email_verified, info.email) {
+                (Some(true), Some(email)) => email,
+                _ => return Err(CallbackFailure::unrecognized("unverified_email")),
             }
         } else {
-            None
+            return Err(CallbackFailure::unrecognized("unverified_email"));
         };
-        let Some(email) = email else {
-            return Ok(redirect_unknown());
-        };
-        match auth
+        let (username, cookie_token, _) = auth
             .login_oidc(
                 &email,
+                &claims.sub,
                 google_picture_url(claims.picture.as_deref()),
                 transaction.previous_session_key,
             )
             .await
-        {
-            Ok((_, cookie_token, _)) => {
-                let mut response = Redirect::to("/").into_response();
-                response.headers_mut().append(
-                    header::SET_COOKIE,
-                    session_cookie_header(&cookie_token, auth.absolute_timeout_seconds()),
-                );
-                response
-                    .headers_mut()
-                    .append(header::SET_COOKIE, clear_transaction_cookie());
-                no_store(&mut response);
-                Ok(response)
-            }
-            Err(AppError::AuthenticationFailed) => Ok(redirect_unknown()),
-            Err(error) => Err(error),
-        }
+            .map_err(|rejection| CallbackFailure {
+                identifier: rejection
+                    .subject
+                    .is_none()
+                    .then(|| auth.identifier_digest(&email)),
+                unrecognized: true,
+                rejection,
+            })?;
+        Ok((username, cookie_token))
     }
 
     fn consume(&self, headers: &HeaderMap, state: &str) -> Result<Transaction, AppError> {
@@ -583,14 +659,14 @@ async fn start(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
 
 async fn callback(
     State(state): State<AppState>,
+    PeerAddress(peer): PeerAddress,
     headers: HeaderMap,
-    Query(query): Query<CallbackQuery>,
+    ApiQuery(query): ApiQuery<CallbackQuery>,
 ) -> Result<Response, AppError> {
-    state
-        .oidc()
-        .ok_or(AppError::NotFound)?
-        .finish(&headers, query, state.auth().ok_or(AppError::Internal)?)
-        .await
+    let oidc = state.oidc().ok_or(AppError::NotFound)?;
+    let auth = state.auth().ok_or(AppError::Internal)?;
+    let client = auth.client_address(peer, &headers);
+    oidc.finish(&headers, query, auth, client).await
 }
 
 async fn disconnect(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -862,8 +938,8 @@ mod tests {
 
     fn local_auth() -> (TempDir, AuthService) {
         let directory = tempfile::tempdir().unwrap();
-        fs::write(directory.path().join("session.key"), [7_u8; 32]).unwrap();
-        fs::write(directory.path().join("oidc.secret"), "example-secret").unwrap();
+        crate::config::write_private_file(&directory.path().join("session.key"), [7_u8; 32]);
+        crate::config::write_private_file(&directory.path().join("oidc.secret"), "example-secret");
         fs::write(
             directory.path().join("config.toml"),
             r#"version = 1
@@ -895,6 +971,7 @@ email = "alice@example.com"
     #[tokio::test]
     async fn callback_exchanges_code_maps_email_and_rejects_replay() {
         let (_directory, auth) = local_auth();
+        let logs = crate::audit::capture::start();
         let (mut service, private) = service_and_key();
         let begin = service.begin(None).unwrap();
         let location = Url::parse(
@@ -943,6 +1020,8 @@ email = "alice@example.com"
             unix_time().unwrap() + 300,
             true,
         );
+        let signed_token = signed.clone();
+        let state_value = state.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let provider = axum::Router::new().route(
@@ -967,7 +1046,15 @@ email = "alice@example.com"
             state: Some(state.clone()),
             error: None,
         };
-        let response = service.finish(&headers, callback, &auth).await.unwrap();
+        let client = Some(std::net::IpAddr::from([198, 51, 100, 7]));
+        let response = service
+            .finish(&headers, callback, &auth, client)
+            .await
+            .unwrap();
+        let success = logs.take();
+        for needle in ["oidc_login", "success", "alice", "198.51.100.7"] {
+            assert!(success.contains(needle), "missing {needle}: {success}");
+        }
         assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
         assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
         assert!(
@@ -986,9 +1073,39 @@ email = "alice@example.com"
             error: None,
         };
         assert!(matches!(
-            service.finish(&headers, replay, &auth).await,
+            service.finish(&headers, replay, &auth, None).await,
             Err(AppError::AuthenticationFailed)
         ));
+        let replayed = logs.take();
+        assert!(
+            replayed.contains("oidc_login") && replayed.contains("invalid_transaction"),
+            "{replayed}"
+        );
+        let session_cookie = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|cookie| {
+                cookie
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("__Host-crabinet_session=")
+                    .map(|value| value.split(';').next().unwrap().to_owned())
+            })
+            .unwrap();
+        let captured = format!("{success}{replayed}");
+        for secret in [
+            "sample-code",
+            signed_token.as_str(),
+            state_value.as_str(),
+            session_cookie.as_str(),
+            "example-secret",
+        ] {
+            assert!(
+                !captured.contains(secret),
+                "log contains a secret: {captured}"
+            );
+        }
         server.abort();
     }
 }

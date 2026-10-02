@@ -18,7 +18,10 @@ use argon2::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{ConnectInfo, FromRequestParts, State, rejection::JsonRejection},
+    extract::{
+        ConnectInfo, FromRequestParts, MatchedPath, RawPathParams, State,
+        rejection::{JsonRejection, RawPathParamsRejection},
+    },
     http::{HeaderMap, HeaderValue, Request, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -33,12 +36,14 @@ use tokio::sync::Semaphore;
 
 use crate::{
     app::AppState,
+    audit,
     browse::{AuthenticatedIdentity, BrowseState, run_blocking},
     client_address::TrustedProxies,
     config::{Config, Permission},
     error::AppError,
     filesystem::{AccessLevel, EntryKind, ShareGrant, ShareId, VirtualPath},
     mutations::CsrfVerified,
+    password::MAX_PASSWORD_BYTES,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -49,7 +54,6 @@ const SESSION_SCHEMA_VERSION: i64 = 5;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
-const MAX_PASSWORD_BYTES: usize = 4_096;
 const VERIFIER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 const DUMMY_PASSWORD_HASH: &str =
     "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";
@@ -146,6 +150,7 @@ struct UserRecord {
     password_hash: Option<String>,
     email: Option<String>,
     disabled: bool,
+    oidc_subject: Option<String>,
 }
 
 #[derive(Clone)]
@@ -228,8 +233,47 @@ struct LoginRequest {
     password: String,
 }
 
+/// A refused sign-in: the public error, its stable audit reason, and the
+/// configured user it concerns when one was identified.
+#[derive(Debug)]
+pub(crate) struct LoginRejection {
+    pub(crate) error: AppError,
+    pub(crate) reason: &'static str,
+    pub(crate) subject: Option<String>,
+}
+
+impl LoginRejection {
+    pub(crate) const fn new(error: AppError, reason: &'static str) -> Self {
+        Self {
+            error,
+            reason,
+            subject: None,
+        }
+    }
+
+    /// Maps a refusal from the per-source sign-in limiter.
+    pub(crate) fn from_source_limit(error: AppError) -> Self {
+        match error {
+            AppError::TooManyRequests => Self::new(error, "rate_limited_source"),
+            error => error.into(),
+        }
+    }
+}
+
+impl From<AppError> for LoginRejection {
+    fn from(error: AppError) -> Self {
+        Self::new(error, "internal_error")
+    }
+}
+
+impl From<AuthError> for LoginRejection {
+    fn from(error: AuthError) -> Self {
+        AppError::from(error).into()
+    }
+}
+
 /// The TCP peer of the connection, before any trusted-proxy resolution.
-struct PeerAddress(Option<IpAddr>);
+pub(crate) struct PeerAddress(pub(crate) Option<IpAddr>);
 
 impl<S> FromRequestParts<S> for PeerAddress
 where
@@ -395,6 +439,7 @@ impl AuthService {
                         password_hash: user.password_hash().map(str::to_owned),
                         email: user.email().map(str::to_owned),
                         disabled: user.disabled(),
+                        oidc_subject: user.oidc_subject().map(str::to_owned),
                     },
                 )
             })
@@ -522,11 +567,14 @@ impl AuthService {
         }
     }
 
+    /// Verifies a password sign-in. `client` is the resolved client address;
+    /// both limiters key on its [`rate_limit_source`] grouping. Every outcome
+    /// is written to the audit log.
     async fn login(
         &self,
         username: &str,
         password: &str,
-        source: Option<IpAddr>,
+        client: Option<IpAddr>,
         old_cookie: Option<&str>,
     ) -> Result<NewSession, AppError> {
         let candidate = if is_plausible_username(username) {
@@ -540,16 +588,45 @@ impl AuthService {
         } else {
             None
         };
+        let result = self
+            .verify_login(candidate, username, password, client, old_cookie)
+            .await;
+        match &result {
+            Ok(session) => audit::sign_in_succeeded("password_login", &session.username, client),
+            Err(rejection) => self.audit_rejected_login(
+                "password_login",
+                rejection.reason,
+                candidate.map(|(name, _)| name.as_str()),
+                username,
+                client,
+            ),
+        }
+        result.map_err(|rejection| rejection.error)
+    }
+
+    async fn verify_login(
+        &self,
+        candidate: Option<(&String, &UserRecord)>,
+        username: &str,
+        password: &str,
+        client: Option<IpAddr>,
+        old_cookie: Option<&str>,
+    ) -> Result<NewSession, LoginRejection> {
+        let source = client.map(rate_limit_source);
         let account = candidate.map_or(username, |(name, _)| name.as_str());
         // Oversized passwords are rejected before they can create limiter
         // entries, so they cannot be used to churn the bounded limiter map.
         if password.len() > MAX_PASSWORD_BYTES {
-            return Err(AppError::AuthenticationFailed);
+            return Err(LoginRejection::new(
+                AppError::AuthenticationFailed,
+                "bad_credentials",
+            ));
         }
         // The per-source cap is counted across all usernames and costs no
         // Argon2 work, so one source cycling usernames is refused here instead
         // of queueing for the shared verifier ahead of everyone else.
-        self.allow_sign_in_source(source)?;
+        self.allow_sign_in_source(source)
+            .map_err(LoginRejection::from_source_limit)?;
         // The permit is taken before the per-account limiter is consulted, so
         // new (account, source) keys can only be created at the bounded
         // verification rate. It is moved into the blocking task below:
@@ -560,7 +637,7 @@ impl AuthService {
             Arc::clone(&self.inner.verifier_slots).acquire_owned(),
         )
         .await
-        .map_err(|_| AppError::Busy)?
+        .map_err(|_| LoginRejection::new(AppError::Busy, "busy"))?
         .map_err(|_| AppError::Internal)?;
         let now = self.inner.clock.now();
         let rate_key = RateLimitKey {
@@ -574,7 +651,10 @@ impl AuthService {
             .map_err(|_| AppError::Internal)?
             .allow(rate_key.clone(), now)
         {
-            return Err(AppError::TooManyRequests);
+            return Err(LoginRejection::new(
+                AppError::TooManyRequests,
+                "rate_limited_account",
+            ));
         }
 
         let usable = self.inner.password_enabled
@@ -596,8 +676,19 @@ impl AuthService {
         })
         .await
         .map_err(|_| AppError::Internal)?;
-        if !usable || !valid {
-            return Err(AppError::AuthenticationFailed);
+        if !usable {
+            let reason = match candidate {
+                Some((_, user)) if user.disabled => "disabled",
+                Some(_) => "method_unavailable",
+                None => "bad_credentials",
+            };
+            return Err(LoginRejection::new(AppError::AuthenticationFailed, reason));
+        }
+        if !valid {
+            return Err(LoginRejection::new(
+                AppError::AuthenticationFailed,
+                "bad_credentials",
+            ));
         }
 
         let session = self
@@ -615,21 +706,77 @@ impl AuthService {
         Ok(session)
     }
 
+    /// Audits a refused sign-in. A configured account is named; any other
+    /// attempted identifier is logged only as a keyed digest of its
+    /// normalized form, so repeated attempts correlate without the log
+    /// holding what was typed or allowing an offline dictionary check.
+    fn audit_rejected_login(
+        &self,
+        operation: &'static str,
+        reason: &'static str,
+        subject: Option<&str>,
+        attempted: &str,
+        client: Option<IpAddr>,
+    ) {
+        let identifier = subject.is_none().then(|| self.identifier_digest(attempted));
+        audit::sign_in_rejected(operation, reason, subject, identifier.as_deref(), client);
+    }
+
+    pub(crate) fn identifier_digest(&self, attempted: &str) -> String {
+        let digest = self.digest(
+            b"audit-identifier\0",
+            &normalized_identifier_digest(attempted),
+        );
+        encode_hex(&digest[..16])
+    }
+
+    /// The resolved client address for a connection: the TCP peer, or with
+    /// trusted proxies the address they report.
+    pub(crate) fn client_address(
+        &self,
+        peer: Option<IpAddr>,
+        headers: &HeaderMap,
+    ) -> Option<IpAddr> {
+        peer.map(|peer| self.inner.trusted_proxies.client_address(peer, headers))
+    }
+
+    /// Maps a verified OIDC identity to an enabled local user. The verified
+    /// email selects the user; when that user has `oidc_subject`, the ID
+    /// token's `sub` must also equal it.
     pub(crate) async fn login_oidc(
         &self,
         email: &str,
+        subject: &str,
         picture_url: Option<&str>,
         old_session_key: Option<Vec<u8>>,
-    ) -> Result<(String, String, String), AppError> {
+    ) -> Result<(String, String, String), LoginRejection> {
         let email = email.to_ascii_lowercase();
-        let Some((username, _)) = self
+        let Some((username, user)) = self
             .inner
             .users
             .iter()
-            .find(|(_, user)| !user.disabled && user.email.as_deref() == Some(email.as_str()))
+            .find(|(_, user)| user.email.as_deref() == Some(email.as_str()))
         else {
-            return Err(AppError::AuthenticationFailed);
+            return Err(LoginRejection::new(
+                AppError::AuthenticationFailed,
+                "unknown_identity",
+            ));
         };
+        let refuse = |reason| {
+            let mut rejection = LoginRejection::new(AppError::AuthenticationFailed, reason);
+            rejection.subject = Some(username.clone());
+            rejection
+        };
+        if user.disabled {
+            return Err(refuse("disabled"));
+        }
+        if user
+            .oidc_subject
+            .as_deref()
+            .is_some_and(|expected| expected != subject)
+        {
+            return Err(refuse("subject_mismatch"));
+        }
         let session = self
             .issue_session(username, picture_url, old_session_key)
             .await?;
@@ -714,6 +861,8 @@ impl AuthService {
             .is_some_and(|user| !user.disabled);
         if expired || !user_is_active {
             self.inner.store.delete(key).await?;
+            let reason = if user_is_active { "expired" } else { "revoked" };
+            audit::session_ended(&session.username, reason);
             return Err(AppError::Unauthorized);
         }
         Ok((key, raw_token, session, now))
@@ -1316,15 +1465,44 @@ pub fn router() -> Router<AppState> {
 /// Authenticates a request and inserts [`AuthenticatedPrincipal`] for protected APIs.
 pub async fn require_authentication(
     State(state): State<AppState>,
+    params: Result<RawPathParams, RawPathParamsRejection>,
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
     let auth = state.auth().ok_or(AppError::Internal)?;
     let session = auth.authenticate(request.headers()).await?;
     let identity = auth.browse_identity(session.principal.username());
+    if let Ok(params) = &params {
+        audit_missing_grant(&identity, request.extensions().get::<MatchedPath>(), params);
+    }
     request.extensions_mut().insert(session.principal);
     request.extensions_mut().insert(identity);
     Ok(next.run(request).await)
+}
+
+/// Audits a read naming a share the subject holds no grant for. The handler
+/// still answers with its ordinary non-disclosing `404`; only the log learns
+/// that the share was requested. A syntactically invalid share ID is not
+/// logged, so attacker-chosen bytes never reach the audit trail.
+fn audit_missing_grant(
+    identity: &AuthenticatedIdentity,
+    matched: Option<&MatchedPath>,
+    params: &RawPathParams,
+) {
+    let Some(share_id) = params
+        .iter()
+        .find(|(name, _)| *name == "share_id")
+        .and_then(|(_, value)| ShareId::new(value.to_owned()).ok())
+    else {
+        return;
+    };
+    if identity.grant_for(&share_id).is_some() {
+        return;
+    }
+    let operation = matched
+        .and_then(|path| path.as_str().split_once("{share_id}/"))
+        .map_or("share", |(_, operation)| operation);
+    audit::access_denied(identity.subject(), share_id.as_str(), operation);
 }
 
 /// Authenticates and enforces CSRF plus same-origin headers before a state change.
@@ -1424,15 +1602,20 @@ async fn login(
     headers: HeaderMap,
     payload: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    validate_same_origin(&headers)?;
-    let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
-    let source = auth.sign_in_source(peer, &headers);
+    let client = auth.client_address(peer, &headers);
+    let refused = |reason, error| {
+        audit::sign_in_rejected("password_login", reason, None, None, client);
+        error
+    };
+    validate_same_origin(&headers).map_err(|error| refused("cross_origin", error))?;
+    let Json(payload) =
+        payload.map_err(|_| refused("malformed_request", AppError::AuthenticationFailed))?;
     let session = auth
         .login(
             &payload.username,
             &payload.password,
-            source,
+            client,
             session_cookie(&headers),
         )
         .await?;
@@ -1452,7 +1635,11 @@ async fn login(
     ))
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
+async fn logout(
+    State(state): State<AppState>,
+    PeerAddress(peer): PeerAddress,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
     validate_same_origin(&headers)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
     let session = auth.authenticate(&headers).await?;
@@ -1460,6 +1647,10 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
         return Err(AppError::Forbidden);
     }
     auth.logout(&headers).await?;
+    audit::signed_out(
+        session.principal.username(),
+        auth.client_address(peer, &headers),
+    );
     let mut response = StatusCode::NO_CONTENT.into_response();
     response
         .headers_mut()
@@ -1721,6 +1912,7 @@ mod tests {
                     password_hash: Some(password_hash),
                     email: None,
                     disabled: false,
+                    oidc_subject: None,
                 },
             ),
             (
@@ -1729,6 +1921,7 @@ mod tests {
                     password_hash: Some(disabled_hash),
                     email: None,
                     disabled: true,
+                    oidc_subject: None,
                 },
             ),
             (
@@ -1737,6 +1930,7 @@ mod tests {
                     password_hash: Some(bob_hash),
                     email: None,
                     disabled: false,
+                    oidc_subject: None,
                 },
             ),
         ]);
@@ -2716,22 +2910,32 @@ mod tests {
                 .await,
             Err(AppError::AuthenticationFailed)
         ));
-        assert!(matches!(
-            test.service
-                .login_oidc("unknown@example.com", None, None)
-                .await,
-            Err(AppError::AuthenticationFailed)
-        ));
-        assert!(matches!(
-            test.service
-                .login_oidc("disabled@example.com", None, None)
-                .await,
-            Err(AppError::AuthenticationFailed)
-        ));
+        let rejected = |result: Result<(String, String, String), LoginRejection>| {
+            let rejection = result.expect_err("OIDC sign-in must be refused");
+            assert!(matches!(rejection.error, AppError::AuthenticationFailed));
+            (rejection.reason, rejection.subject)
+        };
+        assert_eq!(
+            rejected(
+                test.service
+                    .login_oidc("unknown@example.com", "subject", None, None)
+                    .await
+            ),
+            ("unknown_identity", None)
+        );
+        assert_eq!(
+            rejected(
+                test.service
+                    .login_oidc("disabled@example.com", "subject", None, None)
+                    .await
+            ),
+            ("disabled", Some("disabled".to_owned()))
+        );
         let (username, cookie, _) = test
             .service
             .login_oidc(
                 "ALICE@example.com",
+                "any-subject",
                 Some("https://lh3.googleusercontent.com/a/test-avatar"),
                 None,
             )
@@ -2751,6 +2955,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bound_oidc_subject_must_match_the_id_token() {
+        let mut test = test_auth(1, 5);
+        let alice = Arc::get_mut(&mut test.service.inner)
+            .unwrap()
+            .users
+            .get_mut("Alice")
+            .unwrap();
+        alice.email = Some("alice@example.com".into());
+        alice.oidc_subject = Some("110169484474386276334".into());
+        let mismatch = test
+            .service
+            .login_oidc("alice@example.com", "110169484474386276335", None, None)
+            .await
+            .expect_err("a different subject is refused");
+        assert!(matches!(mismatch.error, AppError::AuthenticationFailed));
+        assert_eq!(mismatch.reason, "subject_mismatch");
+        assert_eq!(mismatch.subject.as_deref(), Some("Alice"));
+        let (username, _, _) = test
+            .service
+            .login_oidc("alice@example.com", "110169484474386276334", None, None)
+            .await
+            .unwrap();
+        assert_eq!(username, "Alice");
+    }
+
+    #[tokio::test]
     async fn password_login_does_not_inherit_google_picture() {
         let mut test = test_auth(1, 5);
         Arc::get_mut(&mut test.service.inner)
@@ -2763,6 +2993,7 @@ mod tests {
             .service
             .login_oidc(
                 "alice@example.com",
+                "subject",
                 Some("https://lh3.googleusercontent.com/a/avatar"),
                 None,
             )
@@ -3068,6 +3299,7 @@ mod tests {
                     password_hash: Some(test_hash("a very long unicode password 🙂")),
                     email: None,
                     disabled: true,
+                    oidc_subject: None,
                 },
             )]),
             true,
@@ -3503,6 +3735,7 @@ mod tests {
                 .unwrap(),
         );
         let app = app_router(AppState::with_auth(true, auth.service.clone()));
+        let logs = crate::audit::capture::start();
 
         // A genuine user behind the proxy starts a ceremony.
         let genuine = app
@@ -3523,6 +3756,8 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
+        // Starting a ceremony is not itself a sign-in, so it is not audited.
+        assert!(!logs.take().contains("passkey_login"));
         for _ in 0..50 {
             let response = app
                 .clone()
@@ -3532,6 +3767,17 @@ mod tests {
             assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
             assert_eq!(error_code(response).await, "rate_limited");
         }
+        let emitted = logs.take();
+        assert_eq!(
+            emitted
+                .lines()
+                .filter(|line| line.contains("passkey_login")
+                    && line.contains("rate_limited_source")
+                    && line.contains("198.51.100.7"))
+                .count(),
+            50,
+            "{emitted}"
+        );
         let passkeys = auth.service.inner.passkeys.as_ref().expect("passkeys");
         let pending = passkeys.pending_logins();
         assert_eq!(pending.len(), 4);
@@ -3756,6 +4002,232 @@ mod tests {
             None => connection
                 .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
                 .unwrap(),
+        }
+    }
+
+    fn with_session(mut request: Request<Body>, cookie: &str, csrf: Option<&str>) -> Request<Body> {
+        let headers = request.headers_mut();
+        headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+        if let Some(csrf) = csrf {
+            headers.insert("x-csrf-token", HeaderValue::from_str(csrf).unwrap());
+        }
+        request
+    }
+
+    #[tokio::test]
+    async fn sign_in_access_and_logout_are_audited_without_secrets() {
+        const PASSWORD: &str = "a very long unicode password 🙂";
+        const CLIENT: &str = "198.51.100.7";
+        let mut auth = test_auth_with_source_limit(1, 2, 6);
+        trust_test_proxy(&mut auth);
+        let documents = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        let app = protected_app(auth.service.clone(), documents.path(), private.path());
+        let logs = crate::audit::capture::start();
+        let send = |request: Request<Body>| app.clone().oneshot(request);
+
+        let response = send(proxied_login("Alice", PASSWORD, CLIENT))
+            .await
+            .unwrap();
+        let cookie = cookie_pair(&response);
+        let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+        let csrf = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["csrfToken"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut captured = logs.take();
+        for needle in ["password_login", "success", "Alice", CLIENT] {
+            assert!(captured.contains(needle), "missing {needle}: {captured}");
+        }
+        let mut expect = |response: Response, status: StatusCode, needles: &[&str]| {
+            assert_eq!(response.status(), status, "{needles:?}");
+            let emitted = logs.take();
+            assert!(emitted.contains("audit=true"), "no audit event: {emitted}");
+            for needle in needles {
+                assert!(emitted.contains(needle), "missing {needle}: {emitted}");
+            }
+            captured.push_str(&emitted);
+            emitted
+        };
+
+        // A share without a grant answers with the ordinary 404, but the
+        // request is audited with the operation that named it.
+        let denied = send(with_session(
+            Request::get("/api/v1/shares/private/directory")
+                .body(Body::empty())
+                .unwrap(),
+            &cookie,
+            None,
+        ))
+        .await
+        .unwrap();
+        expect(
+            denied,
+            StatusCode::NOT_FOUND,
+            &["no_grant", "private", "directory", "Alice"],
+        );
+        let allowed = send(with_session(
+            Request::get("/api/v1/shares/documents/directory")
+                .body(Body::empty())
+                .unwrap(),
+            &cookie,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        assert!(!logs.take().contains("no_grant"));
+
+        let wrong = send(proxied_login("Alice", "wrong password", CLIENT))
+            .await
+            .unwrap();
+        expect(
+            wrong,
+            StatusCode::UNAUTHORIZED,
+            &["bad_credentials", "Alice", CLIENT],
+        );
+
+        let unknown = send(proxied_login("Mallory.Unknown", "guess", CLIENT))
+            .await
+            .unwrap();
+        let emitted = expect(
+            unknown,
+            StatusCode::UNAUTHORIZED,
+            &["bad_credentials", "identifier="],
+        );
+        assert!(
+            !emitted.to_ascii_lowercase().contains("mallory"),
+            "{emitted}"
+        );
+        assert!(!emitted.contains("subject"), "{emitted}");
+
+        let disabled = send(proxied_login("disabled", "disabled password", CLIENT))
+            .await
+            .unwrap();
+        expect(
+            disabled,
+            StatusCode::UNAUTHORIZED,
+            &["\"disabled\"", "reason=\"disabled\""],
+        );
+
+        let wrong = send(proxied_login("Alice", "wrong password", CLIENT))
+            .await
+            .unwrap();
+        expect(wrong, StatusCode::UNAUTHORIZED, &["bad_credentials"]);
+        let limited = send(proxied_login("Alice", "wrong password", CLIENT))
+            .await
+            .unwrap();
+        expect(
+            limited,
+            StatusCode::TOO_MANY_REQUESTS,
+            &["rate_limited_account", "Alice"],
+        );
+        let flooded = send(proxied_login("Bob", "bob password", CLIENT))
+            .await
+            .unwrap();
+        expect(
+            flooded,
+            StatusCode::TOO_MANY_REQUESTS,
+            &["rate_limited_source"],
+        );
+
+        let malformed = send(post("/api/v1/auth/login", "{")).await.unwrap();
+        expect(malformed, StatusCode::UNAUTHORIZED, &["malformed_request"]);
+
+        let mut logout = with_session(post("/api/v1/auth/logout", ""), &cookie, Some(&csrf));
+        logout
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([198, 51, 100, 9], 4711))));
+        let logout = send(logout).await.unwrap();
+        expect(
+            logout,
+            StatusCode::NO_CONTENT,
+            &["operation=\"logout\"", "Alice", "198.51.100.9"],
+        );
+
+        let token = cookie.split_once('=').unwrap().1;
+        for secret in [
+            PASSWORD,
+            "wrong password",
+            "disabled password",
+            "bob password",
+            token,
+            csrf.as_str(),
+        ] {
+            assert!(
+                !captured.contains(secret),
+                "log contains a secret: {captured}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_and_revoked_sessions_are_audited() {
+        let mut auth = test_auth(1, 5);
+        let logs = crate::audit::capture::start();
+        let cookie = cookie_pair(&login_response(&auth.service).await);
+        logs.take();
+        auth.clock.set(1_000_120);
+        assert!(
+            auth.service
+                .authenticate(&headers_with_cookie(&cookie))
+                .await
+                .is_err()
+        );
+        let emitted = logs.take();
+        assert!(
+            emitted.contains("operation=\"session\"")
+                && emitted.contains("reason=\"expired\"")
+                && emitted.contains("Alice"),
+            "{emitted}"
+        );
+        assert!(
+            !emitted.contains(cookie.split_once('=').unwrap().1),
+            "{emitted}"
+        );
+
+        let cookie = cookie_pair(&login_response(&auth.service).await);
+        logs.take();
+        Arc::get_mut(&mut auth.service.inner)
+            .unwrap()
+            .users
+            .get_mut("Alice")
+            .unwrap()
+            .disabled = true;
+        assert!(
+            auth.service
+                .authenticate(&headers_with_cookie(&cookie))
+                .await
+                .is_err()
+        );
+        let emitted = logs.take();
+        assert!(emitted.contains("reason=\"revoked\""), "{emitted}");
+    }
+
+    #[tokio::test]
+    async fn rejected_passkey_sign_in_is_audited() {
+        let mut test = test_auth(1, 5);
+        Arc::get_mut(&mut test.service.inner).unwrap().passkeys = Some(
+            passkeys::PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap())
+                .unwrap(),
+        );
+        let app = app_router(AppState::with_auth(true, test.service));
+        let logs = crate::audit::capture::start();
+        for (body, reason) in [
+            (r#"{"flowId":"abc"}"#, "malformed_request"),
+            ("not json", "malformed_request"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post("/api/v1/auth/passkeys/login/finish", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let emitted = logs.take();
+            assert!(
+                emitted.contains("passkey_login") && emitted.contains(reason),
+                "{emitted}"
+            );
         }
     }
 }

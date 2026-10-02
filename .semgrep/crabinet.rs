@@ -118,3 +118,19 @@ async fn authenticated_trash(
 ) -> Response {
     todo!()
 }
+
+// ruleid: crabinet-share-handler-without-identity
+async fn unauthenticated_api_path_listing(
+    State(state): State<AppState>,
+    ApiPath(raw_share_id): ApiPath<String>,
+) -> Result<Response, AppError> {
+    todo!()
+}
+
+// ok: crabinet-share-handler-without-identity
+async fn authenticated_api_path_restore(
+    identity: AuthenticatedIdentity,
+    ApiPath((raw_share_id, item_id)): ApiPath<(String, String)>,
+) -> Response {
+    todo!()
+}

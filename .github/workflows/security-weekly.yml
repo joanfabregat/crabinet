@@ -63,6 +63,12 @@ jobs:
           -w /src
           docker.io/semgrep/semgrep@sha256:d1825c2c72110b5bfbf0602ff68f7f117322597a7c33037a79dba9f897f5f1f0
           semgrep scan --config p/r2c-security-audit --config p/secrets --error --sarif --output semgrep-weekly.sarif .
+      # Upload only unsuppressed results; see the matching step in ci.yml.
+      - name: Drop suppressed Semgrep results
+        if: always() && hashFiles('semgrep-weekly.sarif') != ''
+        run: |
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))' semgrep-weekly.sarif > semgrep-weekly.filtered.sarif
+          mv semgrep-weekly.filtered.sarif semgrep-weekly.sarif
       - name: Upload Semgrep SARIF
         if: always() && hashFiles('semgrep-weekly.sarif') != ''
         uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0

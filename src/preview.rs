@@ -11,7 +11,7 @@ use std::io::{Read, Seek as _, SeekFrom};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::State,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -25,6 +25,7 @@ use crate::{
     app::AppState,
     browse::{AuthenticatedIdentity, SubjectLease, run_blocking},
     error::AppError,
+    extract::{ApiPath, ApiQuery},
     filesystem::{AuthorizedShare, FsErrorCode, ShareId, VirtualPath},
 };
 
@@ -251,8 +252,8 @@ pub fn router() -> Router<AppState> {
 async fn preview_json(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<PreviewQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<PreviewQuery>,
 ) -> Result<Response, PreviewRequestError> {
     let (document, _permit) =
         request_document(&state, &identity, &raw_share_id, query.path.as_deref()).await?;
@@ -262,8 +263,8 @@ async fn preview_json(
 async fn preview_html_source(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<PreviewQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<PreviewQuery>,
 ) -> Result<Response, PreviewRequestError> {
     let (document, _permit) =
         request_document(&state, &identity, &raw_share_id, query.path.as_deref()).await?;
@@ -273,8 +274,8 @@ async fn preview_html_source(
 async fn preview_html_rendered(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<PreviewQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<PreviewQuery>,
     headers: HeaderMap,
 ) -> Result<Response, PreviewRequestError> {
     if !rendered_destination_allowed(&headers) {
@@ -319,8 +320,8 @@ fn frame_only_response() -> Response {
 async fn preview_image(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<PreviewQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<PreviewQuery>,
 ) -> Result<Response, PreviewRequestError> {
     let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
     let raw_path = query.path.as_deref().ok_or(PreviewError::InvalidPath)?;
