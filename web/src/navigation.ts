@@ -3,7 +3,12 @@ import { isValidVirtualPath } from "./virtual-path";
 export interface BrowserRoute {
   shareId: string | null;
   path: string;
-  view?: "trash";
+  /**
+   * `rendered` shows the HTML file named by `path` alone, full-window, in the
+   * same sandboxed iframe as its preview. The UI never opens the rendered-HTML
+   * endpoint as a top-level document, where the page could navigate itself.
+   */
+  view?: "trash" | "rendered";
   /** A virtual file path selected for preview, or null when browsing only. */
   previewPath?: string | null;
   previewMode?: "side" | "full";
@@ -98,6 +103,12 @@ export function routeFromUrl(url: URL): BrowserRoute {
     const path = segments.some((segment) => segment.includes("/"))
       ? ""
       : segments.join("/") || (url.searchParams.get("path") ?? "");
+    if (url.searchParams.get("view") === "rendered") {
+      const shareId = decodeURIComponent(match[1]!);
+      return path && isValidVirtualPath(path)
+        ? { shareId, path, view: "rendered" }
+        : { shareId, path: "" };
+    }
     const previewPath = url.searchParams.get("preview");
     const route: BrowserRoute = {
       shareId: decodeURIComponent(match[1]!),
@@ -146,6 +157,11 @@ export function trashUrl(): string {
   return "/trash";
 }
 
+/** The full-window sandboxed viewer for one HTML file. */
+export function renderedHtmlViewUrl(shareId: string, path: string): string {
+  return browserUrl({ shareId, path, view: "rendered" });
+}
+
 export function previewRouteUrl(
   shareId: string,
   directoryPath: string,
@@ -161,22 +177,29 @@ function browserUrl(route: BrowserRoute): string {
   if (!shareId) return "/";
   const query = new URLSearchParams();
   const safePath = isValidVirtualPath(route.path) ? route.path : "";
+  if (route.view === "rendered" && safePath) {
+    query.set("view", "rendered");
+    return `/${encodeURIComponent(shareId)}${pathSuffix(safePath)}?${query.toString()}`;
+  }
   const previewPath =
     route.previewPath && isValidVirtualPath(route.previewPath)
       ? route.previewPath
       : null;
   // A file previewed from its own folder is addressed by its own path.
   const inline = previewPath !== null && parentPath(previewPath) === safePath;
-  const pathSuffix = (inline ? previewPath : safePath)
-    .split("/")
-    .filter(Boolean)
-    .map((segment) => `/${encodeURIComponent(segment)}`)
-    .join("");
   if (previewPath !== null && !inline) query.set("preview", previewPath);
   // Also kept before a file link resolves, so full screen survives it.
   if (route.previewMode === "full") query.set("view", "full");
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return `/${encodeURIComponent(shareId)}${pathSuffix}${suffix}`;
+  return `/${encodeURIComponent(shareId)}${pathSuffix(inline ? previewPath : safePath)}${suffix}`;
+}
+
+function pathSuffix(path: string): string {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => `/${encodeURIComponent(segment)}`)
+    .join("");
 }
 
 export function parentPath(path: string): string {

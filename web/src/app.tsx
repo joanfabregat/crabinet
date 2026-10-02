@@ -11,6 +11,7 @@ import {
   startAuthentication,
 } from "@simplewebauthn/browser";
 import {
+  ArrowLeft,
   ChevronDown,
   Download,
   ExternalLink,
@@ -70,6 +71,7 @@ import {
   directoryUrl,
   parentPath,
   previewRouteUrl,
+  renderedHtmlViewUrl,
   type BrowserNavigation,
   type BrowserRoute,
 } from "./navigation";
@@ -697,6 +699,19 @@ function AuthenticatedShell({
       setSigningOut(false);
     }
   };
+
+  if (route.view === "rendered" && selectedShare) {
+    return (
+      <RenderedHtmlView
+        key={`${selectedShare.id}:${route.path}`}
+        api={api}
+        navigation={navigation}
+        shareId={selectedShare.id}
+        path={route.path}
+        onSessionExpired={onSessionExpired}
+      />
+    );
+  }
 
   return (
     <div class="app-frame app-shell">
@@ -1489,7 +1504,7 @@ function DirectoryBrowser({
           showHidden={showHiddenFiles}
           activeShareId={share.id}
           activePath={route.path}
-          activeView={route.view}
+          activeView={route.view === "trash" ? "trash" : undefined}
           navigation={navigation}
           onMove={(entry, path, destinationDirectory) =>
             setOperation({ kind: "move", entry, path, destinationDirectory })
@@ -2152,6 +2167,7 @@ function PreviewPanel({
               document={state.document}
               htmlSourceUrl={`${htmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
               htmlRenderedUrl={`${renderedHtmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
+              htmlRenderedViewUrl={renderedHtmlViewUrl(shareId, path)}
               imageUrl={`${imagePreviewUrl(shareId, path)}&v=${assetRevision}`}
               filename={filename}
             />
@@ -2166,12 +2182,14 @@ function PreviewContent({
   document,
   htmlSourceUrl,
   htmlRenderedUrl,
+  htmlRenderedViewUrl,
   imageUrl,
   filename,
 }: {
   document: PreviewDocument;
   htmlSourceUrl: string;
   htmlRenderedUrl: string;
+  htmlRenderedViewUrl: string;
   imageUrl: string;
   filename: string;
 }) {
@@ -2181,6 +2199,7 @@ function PreviewContent({
         filename={filename}
         source={document.source}
         renderedUrl={htmlRenderedUrl}
+        renderedViewUrl={htmlRenderedViewUrl}
         sourceUrl={htmlSourceUrl}
       />
     );
@@ -2223,11 +2242,14 @@ function HtmlPreview({
   filename,
   source,
   renderedUrl,
+  renderedViewUrl,
   sourceUrl,
 }: {
   filename: string;
   source: string;
   renderedUrl: string;
+  /** Crabinet's full-window viewer, never the rendered endpoint itself. */
+  renderedViewUrl: string;
   sourceUrl: string;
 }) {
   const [mode, setMode] = useState<"rendered" | "source">("rendered");
@@ -2276,8 +2298,11 @@ function HtmlPreview({
             Source
           </button>
         </div>
+        {/* A top-level document can navigate itself even under a CSP
+            sandbox, so rendered HTML opens in Crabinet's own viewer, inside
+            the same empty-sandbox iframe. Plain-text source is inert. */}
         <TooltipLink
-          href={mode === "rendered" ? renderedUrl : sourceUrl}
+          href={mode === "rendered" ? renderedViewUrl : sourceUrl}
           target="_blank"
           rel="noopener noreferrer"
           label={
@@ -2301,6 +2326,130 @@ function HtmlPreview({
         referrerPolicy="no-referrer"
         title={`${mode === "rendered" ? "Sandboxed HTML preview" : "Inert HTML source"} for ${filename}`}
       />
+    </div>
+  );
+}
+
+type RenderedHtmlViewState =
+  | { status: "loading" }
+  | { status: "ready" }
+  | { status: "not-html" }
+  | { status: "error"; error: ApiError };
+
+/**
+ * The new-tab view of rendered HTML: the file alone, full-window, inside the
+ * same empty-sandbox iframe as its preview. Loading the rendered endpoint as
+ * the tab's own document instead would let the page send the tab elsewhere
+ * with a link or a meta refresh, which a CSP sandbox does not prevent.
+ */
+function RenderedHtmlView({
+  api,
+  navigation,
+  shareId,
+  path,
+  onSessionExpired,
+}: {
+  api: ApiClient;
+  navigation: BrowserNavigation;
+  shareId: string;
+  path: string;
+  onSessionExpired: () => void;
+}) {
+  const [state, setState] = useState<RenderedHtmlViewState>({
+    status: "loading",
+  });
+  const [refreshKey, setRefreshKey] = useState(0);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const filename = path.split("/").at(-1) ?? path;
+  const folder = parentPath(path);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ status: "loading" });
+    // Checks the file is HTML, and the session still valid, before framing
+    // the rendered endpoint.
+    api.preview(shareId, path, controller.signal).then(
+      (document) => {
+        if (controller.signal.aborted) return;
+        setState(
+          document.kind === "html_source"
+            ? { status: "ready" }
+            : { status: "not-html" },
+        );
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted || isAborted(cause)) return;
+        if (isUnauthorized(cause)) {
+          onSessionExpired();
+          return;
+        }
+        setState({ status: "error", error: asApiError(cause) });
+      },
+    );
+    return () => controller.abort();
+  }, [api, onSessionExpired, path, refreshKey, shareId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => titleRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [path]);
+
+  return (
+    <div class="rendered-view">
+      <header class="rendered-view-header">
+        <a
+          class="button button-secondary rendered-view-back"
+          href={previewRouteUrl(shareId, folder, path)}
+          onClick={(event) => {
+            event.preventDefault();
+            navigation.go({ shareId, path: folder, previewPath: path });
+          }}
+        >
+          <ArrowLeft size={18} aria-hidden="true" />
+          Back to folder
+        </a>
+        <div class="rendered-view-heading">
+          <p class="eyebrow">Rendered HTML</p>
+          <h1 ref={titleRef} tabIndex={-1}>
+            {filename}
+          </h1>
+          {folder && (
+            <p class="preview-path" title={path}>
+              in {folder}
+            </p>
+          )}
+        </div>
+        <SecurityNote>
+          Rendered HTML runs in an isolated sandbox. Scripts, forms, navigation,
+          storage, popups, and network requests are disabled.
+        </SecurityNote>
+      </header>
+      <main class="rendered-view-body">
+        {state.status === "loading" ? (
+          <p class="status-message" role="status" aria-live="polite">
+            Loading preview…
+          </p>
+        ) : state.status === "error" ? (
+          <PreviewErrorState
+            error={state.error}
+            retry={() => setRefreshKey((value) => value + 1)}
+          />
+        ) : state.status === "not-html" ? (
+          <div class="preview-error" role="alert">
+            <h2>This file is not HTML</h2>
+            <p>Only HTML files open in this view.</p>
+          </div>
+        ) : (
+          <iframe
+            class="rendered-view-frame"
+            src={renderedHtmlPreviewUrl(shareId, path)}
+            sandbox=""
+            referrerPolicy="no-referrer"
+            title={`Sandboxed HTML preview for ${filename}`}
+          />
+        )}
+      </main>
+      <TooltipLayer />
     </div>
   );
 }

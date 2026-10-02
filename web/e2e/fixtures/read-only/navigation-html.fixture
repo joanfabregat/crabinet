@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head>
+    <meta http-equiv="refresh" content="2;url=https://example.com/refresh" />
+    <title>Navigation fixture</title>
+  </head>
+  <body>
+    <h1>Leaving Crabinet</h1>
+    <p><a href="https://example.com/link">Continue to the external site</a></p>
+    <p>
+      <a href="https://example.com/top" target="_top">Continue in this tab</a>
+    </p>
+  </body>
+</html>
