@@ -687,7 +687,7 @@ describe("API client", () => {
 
   it("lists Trash and sends CSRF for restore and permanent deletion", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
-      if (String(input) === "/api/v1/shares/work/trash")
+      if (String(input) === "/api/v1/shares/work/trash?limit=100")
         return Response.json({
           shareId: "work",
           items: [
@@ -720,6 +720,100 @@ describe("API client", () => {
     expect(
       new Headers(fetch.mock.calls[2]?.[1]?.headers).get("X-CSRF-Token"),
     ).toBe("csrf");
+  });
+
+  it("empties a share's Trash with CSRF and validates the result", async () => {
+    const result = {
+      shareId: "work",
+      outcome: "success",
+      purged: 250,
+      failed: 1,
+      moreRemaining: true,
+    };
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json(result),
+    );
+    const api = createApiClient({ fetch });
+    expect(await api.emptyTrash("work", "csrf")).toEqual(result);
+    expect(fetch.mock.calls[0]?.[0]).toBe("/api/v1/shares/work/trash/empty");
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(
+      new Headers(fetch.mock.calls[0]?.[1]?.headers).get("X-CSRF-Token"),
+    ).toBe("csrf");
+    for (const invalid of [
+      { ...result, shareId: "other" },
+      { ...result, purged: -1 },
+      { ...result, failed: 1.5 },
+      { ...result, moreRemaining: "no" },
+    ]) {
+      fetch.mockResolvedValueOnce(Response.json(invalid));
+      await expect(api.emptyTrash("work", "csrf")).rejects.toMatchObject({
+        kind: "invalid-response",
+      });
+    }
+  });
+
+  it("pages Trash with an opaque cursor and validates it", async () => {
+    const item = {
+      id: "id-2",
+      originalPath: "old.txt",
+      kind: "file",
+      deletedAt: "2026-09-01T10:00:00Z",
+      deletedBy: "Joan",
+      expiresAt: "2026-10-01T10:00:00Z",
+    };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ shareId: "work", items: [item], nextCursor: "c/2+" }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ shareId: "work", items: [], nextCursor: 7 }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ shareId: "work", items: [], nextCursor: "" }),
+      );
+    const api = createApiClient({ fetch });
+    const page = await api.trash("work", "first cursor");
+    expect(page.nextCursor).toBe("c/2+");
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/v1/shares/work/trash?limit=100&cursor=first+cursor",
+    );
+    await expect(api.trash("work", page.nextCursor)).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+    expect(fetch.mock.calls[1]?.[0]).toBe(
+      "/api/v1/shares/work/trash?limit=100&cursor=c%2F2%2B",
+    );
+    await expect(api.trash("work")).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+  });
+
+  it("accepts upload outcomes for a share that cannot be measured", async () => {
+    for (const outcome of [
+      "share_too_large_to_measure",
+      "share_too_deep_to_measure",
+    ]) {
+      const xhr = new FakeXhr();
+      const api = createApiClient({
+        fetch: vi.fn(),
+        xhrFactory: () => xhr as unknown as XMLHttpRequest,
+      });
+      const request = api.uploadFile(
+        "docs",
+        "",
+        new File(["x"], "x.txt"),
+        "csrf",
+      );
+      xhr.respond(207, {
+        shareId: "docs",
+        outcomes: [{ path: "x.txt", outcome }],
+      });
+      await expect(request).resolves.toMatchObject({
+        outcomes: [{ outcome }],
+      });
+    }
   });
 
   it("rejects malformed mutation success and metadata responses", async () => {

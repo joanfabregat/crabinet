@@ -16,7 +16,7 @@ All endpoints are under `/api/v1` and require authentication middleware to inser
 
 ## Directory listing
 
-`GET /api/v1/shares/{shareId}/directory?path=&limit=100&cursor=` lists the share root when `path` is absent or empty. A nonempty path uses the validated slash-separated virtual path grammar documented in `filesystem-security.md`.
+`GET /api/v1/shares/{shareId}/directory?path=&limit=100&cursor=` lists the share root when `path` is absent or empty. A nonempty path uses the validated slash-separated virtual path grammar documented in `filesystem-security.md`, including its 64-component depth limit; a deeper path returns `400 invalid_request`. A directory at the limit still lists its entries, but they cannot be opened.
 
 Entries are sorted deterministically with directories first and then by normalized name. `limit` is nonzero and cannot exceed the configured page maximum. The service also caps the total number of entries it will inspect, preventing an attacker-controlled directory from causing unbounded allocation merely because deterministic sorting is required. A directory above that cap currently returns `413` (`too_large`). At most 16 listings are scanned concurrently across the process and 8 per authenticated user, counting Trash listings; further requests receive `429` with code `busy` and `Retry-After`. An entry removed between reading the directory and inspecting it is omitted rather than failing the listing.
 

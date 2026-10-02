@@ -12,7 +12,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use axum::{
@@ -25,7 +25,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use tokio::{
     io::AsyncWriteExt,
     sync::OwnedMutexGuard,
@@ -38,8 +41,9 @@ use crate::{
     error::AppError,
     extract::{ApiJson, ApiPath, ApiQuery},
     filesystem::{
-        AccessLevel, AuthorizedShare, EntryKind, EntryMetadata, EntryName, FsError, FsErrorCode,
-        OwnedAuthorizedShare, PendingWrite, ShareId, TrashEntry, VirtualPath,
+        AccessLevel, AuthorizedShare, DIRECTORY_QUOTA_BYTES, EntryKind, EntryMetadata, EntryName,
+        FsError, FsErrorCode, MAX_PATH_DEPTH, OwnedAuthorizedShare, PendingWrite, ShareId,
+        TrashEntry, TrashPosition, TrashSweep, UsageError, VirtualPath,
     },
 };
 
@@ -48,7 +52,36 @@ const MAX_MULTIPART_OVERHEAD: usize = 1_048_576;
 const MULTIPART_OVERHEAD_PER_FILE: usize = 8_192;
 const MULTIPART_FIXED_OVERHEAD: usize = 4_096;
 const MAX_METADATA_BODY_BYTES: usize = 16_384;
+/// Entries one quota measurement may visit. A larger share cannot be
+/// measured, and writes that need a quota check fail with
+/// `share_too_large_to_measure` instead of `quota_exceeded`.
 const QUOTA_SCAN_ENTRY_LIMIT: usize = 1_000_000;
+/// Trash directory entries one listing page reads. A page keeps only about
+/// twice its size in memory, so this bounds time rather than memory; each
+/// item is a payload plus a sidecar, so about 50,000 items can be listed.
+const TRASH_LIST_SCAN_ENTRY_LIMIT: usize = 100_000;
+const TRASH_PAGE_DEFAULT_LIMIT: usize = 100;
+const TRASH_PAGE_MAX_LIMIT: usize = 200;
+const TRASH_CURSOR_VERSION: u8 = 1;
+/// A cursor carries an RFC 3339 deletion time, which is far shorter.
+const TRASH_CURSOR_MAX_TIME_BYTES: usize = 64;
+const TRASH_CURSOR_MAX_ENCODED_BYTES: usize = 256;
+const TRASH_ID_BYTES: usize = 32;
+/// Trash directory names one collection batch reads, counting payloads and
+/// sidecars, so a batch covers about 500 items.
+pub const TRASH_GC_BATCH_ENTRIES: usize = 1_000;
+/// Longest one collection run works on a single share. Batches repeat
+/// until the sweep reaches the end of Trash or this budget is spent; the
+/// share's commit lock is released between batches.
+pub const TRASH_GC_SHARE_BUDGET: Duration = Duration::from_secs(30);
+/// How often expired Trash items are collected.
+pub const TRASH_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Longest one Empty Trash request works before answering. Batches of
+/// [`TRASH_GC_BATCH_ENTRIES`] repeat, releasing the share's commit lock
+/// between them, until the pass ends or this budget is spent; the response
+/// then says more remains and the client asks again. It stays well under
+/// common reverse-proxy read timeouts.
+const TRASH_EMPTY_REQUEST_BUDGET: Duration = Duration::from_secs(20);
 /// A multipart upload that delivers no new part or chunk for this long is
 /// aborted, releasing its upload slot and unpublished staging files.
 const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -116,6 +149,16 @@ pub struct MutationState {
     upload_deadline: Duration,
     text_save_gate: SubjectGate,
     text_body_timeout: Duration,
+    quota_scan_entries: usize,
+    trash_empty_batch_entries: usize,
+    trash_empty_budget: Duration,
+}
+
+/// The share quota and how far one measurement of it may scan.
+#[derive(Clone, Copy, Debug)]
+struct Quota {
+    max_share_bytes: Option<u64>,
+    scan_entries: usize,
 }
 
 impl MutationState {
@@ -145,7 +188,17 @@ impl MutationState {
                 MAX_CONCURRENT_TEXT_SAVES_PER_SUBJECT,
             ),
             text_body_timeout: TEXT_BODY_TIMEOUT,
+            quota_scan_entries: QUOTA_SCAN_ENTRY_LIMIT,
+            trash_empty_batch_entries: TRASH_GC_BATCH_ENTRIES,
+            trash_empty_budget: TRASH_EMPTY_REQUEST_BUDGET,
         })
+    }
+
+    const fn quota(&self) -> Quota {
+        Quota {
+            max_share_bytes: self.limits.max_share_bytes,
+            scan_entries: self.quota_scan_entries,
+        }
     }
 
     /// Builds conservative v1 limits from the immutable configured upload cap.
@@ -191,6 +244,19 @@ impl MutationState {
     #[cfg(test)]
     fn with_text_body_timeout(mut self, limit: Duration) -> Self {
         self.text_body_timeout = limit;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_quota_scan_entries(mut self, entries: usize) -> Self {
+        self.quota_scan_entries = entries;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_trash_empty_batches(mut self, entries: usize, budget: Duration) -> Self {
+        self.trash_empty_batch_entries = entries;
+        self.trash_empty_budget = budget;
         self
     }
 
@@ -242,6 +308,7 @@ pub fn router(http_body_limit: usize) -> Router<AppState> {
             "/shares/{share_id}/trash/{item_id}/restore",
             post(restore_trash_item),
         )
+        .route("/shares/{share_id}/trash/empty", post(empty_trash))
         .route(
             "/shares/{share_id}/trash/{item_id}",
             delete(purge_trash_item),
@@ -302,6 +369,12 @@ struct TrashedResponse {
     trash_id: String,
 }
 
+#[derive(Deserialize)]
+struct TrashQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrashListResponse {
@@ -309,6 +382,22 @@ struct TrashListResponse {
     items: Vec<TrashItemResponse>,
     /// How many days a deleted item stays in Trash before it expires.
     retention_days: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmptyTrashResponse {
+    share_id: String,
+    outcome: &'static str,
+    /// Items this request removed permanently.
+    purged: usize,
+    /// Items that could not be read or removed and stay in Trash.
+    failed: usize,
+    /// Whether the request's time budget ran out before it reached the end
+    /// of Trash; the client asks again to continue.
+    more_remaining: bool,
 }
 
 #[derive(Serialize)]
@@ -361,6 +450,7 @@ struct StagedUpload {
 /// A rejected mutation and its stable audit reason. Every handler returns
 /// its failures through [`audited`], so no rejection path skips the audit
 /// event that `docs/mutations.md` promises.
+#[derive(Clone, Copy)]
 struct Rejection {
     error: AppError,
     reason: &'static str,
@@ -414,14 +504,14 @@ async fn create_directory_inner(
     reject_oversized_metadata(&body.path)?;
     let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, &body.path)?;
     ensure_creatable(&path)?;
+    let quota = state.mutations().quota();
     let commit = state.mutations().commit_lock(&share_id).await;
     let target = path.clone();
     let result = run_blocking(move || {
         let _commit = commit;
-        authorized
-            .view()
-            .create_directory(&target)
-            .map_err(Rejection::from)
+        let share = authorized.view();
+        ensure_quota(&share, quota, DIRECTORY_QUOTA_BYTES, 0)?;
+        share.create_directory(&target).map_err(Rejection::from)
     })
     .await?;
     finish_mutation(
@@ -458,13 +548,13 @@ async fn create_file_inner(
     reject_oversized_metadata(&body.path)?;
     let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, &body.path)?;
     ensure_creatable(&path)?;
-    let limits = state.mutations().limits;
+    let quota = state.mutations().quota();
     let commit = state.mutations().commit_lock(&share_id).await;
     let target = path.clone();
     let result = run_blocking(move || {
         let _commit = commit;
         let share = authorized.view();
-        ensure_quota(&share, limits, 0, 0)?;
+        ensure_quota(&share, quota, 0, 0)?;
         let pending = share.begin_write(&target)?;
         pending.publish_new().map_err(Rejection::from)
     })
@@ -538,10 +628,11 @@ async fn save_text_inner(
     writer.sync_all().await.map_err(|_| AppError::Internal)?;
     drop(writer);
     let size = bytes.len() as u64;
+    let quota = state.mutations().quota();
     let commit = state.mutations().commit_lock(&share_id).await;
     let result = run_blocking(move || {
         let _commit = commit;
-        ensure_quota(&authorized.view(), limits, size, current.size)?;
+        ensure_quota(&authorized.view(), quota, size, current.size)?;
         pending
             .publish_replacement(current)
             .map_err(Rejection::from)
@@ -677,27 +768,136 @@ async fn list_trash_items(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<TrashQuery>,
 ) -> Result<Response, AppError> {
     let share_id = parse_share_id(&raw_share_id)?;
     let authorized = state.browse().authorize_owned(&identity, &share_id)?;
-    // A trash listing reads up to 10,000 bounded sidecars, so it shares the
-    // directory-listing gate. The permit moves into the blocking task so a
-    // disconnected client cannot free the slot while the scan still runs.
+    let access = authorized.access();
+    let limit = query.limit.unwrap_or(TRASH_PAGE_DEFAULT_LIMIT);
+    if limit == 0 || limit > TRASH_PAGE_MAX_LIMIT {
+        return Err(AppError::InvalidRequest);
+    }
+    let key = *state.browse().cursor_key();
+    let after = query
+        .cursor
+        .as_deref()
+        .map(|cursor| decode_trash_cursor(cursor, &key, &identity, &share_id, access))
+        .transpose()?;
+    // A trash listing reads up to TRASH_LIST_SCAN_ENTRY_LIMIT bounded
+    // sidecars, so it shares the directory-listing gate. The permit moves
+    // into the blocking task so a disconnected client cannot free the slot
+    // while the scan still runs.
     let permit = state.browse().acquire_listing(&identity)?;
-    let entries = run_blocking(move || {
+    let page = run_blocking(move || {
         let _permit = permit;
-        authorized.view().list_trash(10_000)
+        authorized
+            .view()
+            .list_trash_page(TRASH_LIST_SCAN_ENTRY_LIMIT, after.as_ref(), limit)
     })
     .await?;
-    let entries = entries.map_err(map_mutation_fs_error)?;
+    let page = page.map_err(map_mutation_fs_error)?;
+    let next_cursor = page
+        .has_more
+        .then(|| page.items.last())
+        .flatten()
+        .map(|last| encode_trash_cursor(&key, &identity, &share_id, access, last));
     Ok(inert_json(
         StatusCode::OK,
         TrashListResponse {
             share_id: share_id.to_string(),
-            items: entries.into_iter().map(TrashItemResponse::from).collect(),
+            items: page
+                .items
+                .into_iter()
+                .map(TrashItemResponse::from)
+                .collect(),
             retention_days: state.trash_retention_days(),
+            next_cursor,
         },
     ))
+}
+
+/// A Trash cursor names the last listed item by deletion time and ID, so
+/// concurrent deletes, restores, and purges never invalidate it: the next
+/// page simply starts after that position. Its HMAC binds the subject,
+/// share, and effective access, so it cannot be forged, altered, or replayed
+/// by another user or grant.
+fn encode_trash_cursor(
+    key: &[u8; 32],
+    identity: &AuthenticatedIdentity,
+    share_id: &ShareId,
+    access: AccessLevel,
+    last: &TrashEntry,
+) -> String {
+    let time = last.deleted_at.as_bytes();
+    let mut bytes = Vec::with_capacity(2 + time.len() + TRASH_ID_BYTES + 32);
+    bytes.push(TRASH_CURSOR_VERSION);
+    bytes.push(u8::try_from(time.len()).expect("listed deletion times are RFC 3339"));
+    bytes.extend_from_slice(time);
+    bytes.extend_from_slice(last.id.as_bytes());
+    let tag = trash_cursor_mac(key, identity, share_id, access, &bytes)
+        .finalize()
+        .into_bytes();
+    bytes.extend_from_slice(&tag);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn decode_trash_cursor(
+    encoded: &str,
+    key: &[u8; 32],
+    identity: &AuthenticatedIdentity,
+    share_id: &ShareId,
+    access: AccessLevel,
+) -> Result<TrashPosition, AppError> {
+    if encoded.len() > TRASH_CURSOR_MAX_ENCODED_BYTES {
+        return Err(AppError::Conflict);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| AppError::Conflict)?;
+    let (&version, rest) = bytes.split_first().ok_or(AppError::Conflict)?;
+    let (&time_len, rest) = rest.split_first().ok_or(AppError::Conflict)?;
+    let time_len = usize::from(time_len);
+    if version != TRASH_CURSOR_VERSION
+        || time_len > TRASH_CURSOR_MAX_TIME_BYTES
+        || rest.len() != time_len + TRASH_ID_BYTES + 32
+    {
+        return Err(AppError::Conflict);
+    }
+    let (body, tag) = bytes.split_at(bytes.len() - 32);
+    trash_cursor_mac(key, identity, share_id, access, body)
+        .verify_slice(tag)
+        .map_err(|_| AppError::Conflict)?;
+    let deleted_at = std::str::from_utf8(&rest[..time_len]).map_err(|_| AppError::Conflict)?;
+    let id = std::str::from_utf8(&rest[time_len..time_len + TRASH_ID_BYTES])
+        .map_err(|_| AppError::Conflict)?;
+    Ok(TrashPosition {
+        deleted_at: deleted_at.to_owned(),
+        id: id.to_owned(),
+    })
+}
+
+fn trash_cursor_mac(
+    key: &[u8; 32],
+    identity: &AuthenticatedIdentity,
+    share_id: &ShareId,
+    access: AccessLevel,
+    body: &[u8],
+) -> Hmac<Sha256> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts keys of any size");
+    for value in [
+        b"crabinet:trash-cursor".as_slice(),
+        identity.subject().as_bytes(),
+        share_id.as_str().as_bytes(),
+        body,
+    ] {
+        mac.update(&(value.len() as u64).to_be_bytes());
+        mac.update(value);
+    }
+    mac.update(&[match access {
+        AccessLevel::ReadOnly => 0,
+        AccessLevel::ReadWrite => 1,
+    }]);
+    mac
 }
 
 async fn restore_trash_item(
@@ -801,6 +1001,74 @@ async fn purge_trash_item_inner(
     Ok(inert_json(
         StatusCode::ACCEPTED,
         serde_json::json!({"outcome": "accepted"}),
+    ))
+}
+
+async fn empty_trash(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    _csrf: CsrfVerified,
+    ApiPath(raw_share_id): ApiPath<String>,
+) -> Result<Response, AppError> {
+    let result = empty_trash_inner(&state, &identity, &raw_share_id).await;
+    audited(&identity, &raw_share_id, "empty_trash", result)
+}
+
+/// Permanently removes every published item in the share's Trash, in
+/// bounded batches that each hold the commit lock only briefly, so writers
+/// to the share interleave with a large Empty Trash.
+async fn empty_trash_inner(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share_id: &str,
+) -> MutationResult<Response> {
+    let share_id = parse_share_id(raw_share_id)?;
+    let authorized = state.browse().authorize_owned(identity, &share_id)?;
+    require_write_access(authorized.access())?;
+    let batch_entries = state.mutations().trash_empty_batch_entries;
+    let budget = state.mutations().trash_empty_budget;
+    let started = Instant::now();
+    let mut sweep = TrashSweep::default();
+    let (mut purged, mut failed) = (0, 0);
+    let finished = loop {
+        let commit = state.mutations().commit_lock(&share_id).await;
+        let share = authorized.clone();
+        let (returned, result) = run_blocking(move || {
+            let _commit = commit;
+            let result = share.view().empty_trash_batch(&mut sweep, batch_entries);
+            (sweep, result)
+        })
+        .await?;
+        sweep = returned;
+        let batch = result?;
+        purged += batch.purged;
+        failed += batch.failed;
+        if batch.finished {
+            break true;
+        }
+        if started.elapsed() >= budget {
+            break false;
+        }
+    };
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation = "empty_trash",
+        purged,
+        failed,
+        complete = finished,
+        outcome = "success"
+    );
+    Ok(inert_json(
+        StatusCode::OK,
+        EmptyTrashResponse {
+            share_id: share_id.to_string(),
+            outcome: "success",
+            purged,
+            failed,
+            more_remaining: !finished,
+        },
     ))
 }
 
@@ -914,28 +1182,20 @@ async fn upload_files_inner(
         return Err(Rejection::new(AppError::InvalidRequest, "no_files"));
     }
 
-    let mut outcomes = Vec::with_capacity(staged.len());
-    for upload in staged {
-        let path = upload.path;
-        let is_replacement = upload.expected.is_some();
-        let commit = state.mutations().commit_lock(&share_id).await;
-        let share = authorized.clone();
-        let publish = run_blocking(move || {
-            let _commit = commit;
-            ensure_quota(
-                &share.view(),
-                limits,
-                upload.size,
-                upload.expected.map_or(0, |metadata| metadata.size),
-            )?;
-            match upload.expected {
-                Some(expected) => upload.pending.publish_replacement(expected),
-                None => upload.pending.publish_new(),
-            }
-            .map_err(Rejection::from)
-        })
-        .await
-        .unwrap_or_else(|error| Err(error.into()));
+    // Publish every staged file under one hold of the commit lock. The share
+    // is measured once for the whole request, and each published file's
+    // size is then added to that figure, instead of rescanning the share for
+    // every file.
+    let quota = state.mutations().quota();
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let share = authorized.clone();
+    let published = run_blocking(move || {
+        let _commit = commit;
+        publish_staged(&share.view(), quota, staged)
+    })
+    .await?;
+    let mut outcomes = Vec::with_capacity(published.len());
+    for (path, is_replacement, publish) in published {
         match publish {
             Ok(()) => {
                 tracing::info!(
@@ -959,6 +1219,8 @@ async fn upload_files_inner(
                 let outcome = match rejection.error {
                     AppError::Conflict => "conflict",
                     AppError::TooLarge => "quota_exceeded",
+                    AppError::ShareTooLargeToMeasure => "share_too_large_to_measure",
+                    AppError::ShareTooDeepToMeasure => "share_too_deep_to_measure",
                     _ => "error",
                 };
                 audit_rejected(identity, share_id.as_str(), "upload", rejection.reason);
@@ -1133,28 +1395,120 @@ fn require_if_match_value(
     }
 }
 
+/// Publishes staged uploads in order. Runs on the blocking pool with the
+/// share's commit lock held, so the single measurement stays accurate as
+/// each published file's size is added to it.
+fn publish_staged(
+    share: &AuthorizedShare<'_>,
+    quota: Quota,
+    staged: Vec<StagedUpload>,
+) -> Vec<(VirtualPath, bool, MutationResult<()>)> {
+    // One measurement covers every file: usage above the limit plus the
+    // largest replaced size exceeds the quota for every file in the request.
+    let headroom = staged
+        .iter()
+        .filter_map(|upload| upload.expected.map(|metadata| metadata.size))
+        .max()
+        .unwrap_or(0);
+    let mut usage = quota
+        .max_share_bytes
+        .map(|limit| measure_usage(share, quota, limit, headroom).map(|usage| (limit, usage)))
+        .transpose();
+    staged
+        .into_iter()
+        .map(|upload| {
+            let replacing = upload.expected.map_or(0, |metadata| metadata.size);
+            let checked = match &usage {
+                Err(rejection) => Err(*rejection),
+                Ok(Some((limit, current))) => {
+                    within_quota(*current, *limit, upload.size, replacing)
+                }
+                Ok(None) => Ok(()),
+            };
+            let result = checked.and_then(|()| {
+                match upload.expected {
+                    Some(expected) => upload.pending.publish_replacement(expected),
+                    None => upload.pending.publish_new(),
+                }
+                .map_err(Rejection::from)
+            });
+            if result.is_ok()
+                && let Ok(Some((_, current))) = &mut usage
+            {
+                *current = current
+                    .saturating_sub(replacing)
+                    .saturating_add(upload.size);
+            }
+            (upload.path, upload.expected.is_some(), result)
+        })
+        .collect()
+}
+
 /// Runs on the blocking pool with the share's commit lock held.
 fn ensure_quota(
     authorized: &AuthorizedShare<'_>,
-    limits: MutationLimits,
+    quota: Quota,
     incoming: u64,
     replacing: u64,
 ) -> MutationResult<()> {
-    let Some(limit) = limits.max_share_bytes else {
+    let Some(limit) = quota.max_share_bytes else {
         return Ok(());
     };
-    let exceeded = || Rejection::new(AppError::TooLarge, "quota");
-    let usage =
-        match authorized.usage_bounded(QUOTA_SCAN_ENTRY_LIMIT, limit.saturating_add(replacing)) {
-            Ok(usage) => usage,
-            Err(error) if error.code() == FsErrorCode::TooLarge => return Err(exceeded()),
-            Err(error) => return Err(error.into()),
-        };
+    let usage = measure_usage(authorized, quota, limit, replacing)?;
+    within_quota(usage, limit, incoming, replacing)
+}
+
+fn quota_exceeded() -> Rejection {
+    Rejection::new(AppError::TooLarge, "quota")
+}
+
+/// Measures the share once. `headroom` is the most the caller may replace,
+/// so a share above `limit + headroom` is over quota for every write. A
+/// share that cannot be measured gets its own error and an operator log
+/// naming the cause, never `quota_exceeded`.
+fn measure_usage(
+    authorized: &AuthorizedShare<'_>,
+    quota: Quota,
+    limit: u64,
+    headroom: u64,
+) -> MutationResult<u64> {
+    match authorized.usage_bounded(quota.scan_entries, limit.saturating_add(headroom)) {
+        Ok(usage) => Ok(usage),
+        Err(UsageError::LimitExceeded) => Err(quota_exceeded()),
+        Err(UsageError::TooManyEntries) => {
+            tracing::error!(
+                share_id = authorized.share_id().as_str(),
+                max_entries = quota.scan_entries,
+                "quota measurement stopped: the share holds more entries than one scan may visit, so writes that need a quota check are refused"
+            );
+            Err(Rejection::new(
+                AppError::ShareTooLargeToMeasure,
+                "share_too_large_to_measure",
+            ))
+        }
+        Err(UsageError::TooDeep) => {
+            tracing::error!(
+                share_id = authorized.share_id().as_str(),
+                max_depth = MAX_PATH_DEPTH,
+                "quota measurement stopped: the share or its Trash holds folders nested deeper than the folder depth limit, so writes that need a quota check are refused until an operator flattens or removes them"
+            );
+            Err(Rejection::new(
+                AppError::ShareTooDeepToMeasure,
+                "share_too_deep_to_measure",
+            ))
+        }
+        Err(UsageError::Fs(error)) => Err(error.into()),
+    }
+}
+
+fn within_quota(usage: u64, limit: u64, incoming: u64, replacing: u64) -> MutationResult<()> {
     let projected = usage
         .saturating_sub(replacing)
         .checked_add(incoming)
-        .ok_or_else(exceeded)?;
-    (projected <= limit).then_some(()).ok_or_else(exceeded)
+        .ok_or_else(quota_exceeded)?;
+    (projected <= limit)
+        .then_some(())
+        .ok_or_else(quota_exceeded)
 }
 
 fn finish_mutation(
@@ -1227,6 +1581,9 @@ fn app_reason(error: &AppError) -> &'static str {
         AppError::InvalidRequest => "invalid_request",
         AppError::Conflict => "conflict",
         AppError::TooLarge => "too_large",
+        AppError::PathTooDeep => "path_too_deep",
+        AppError::ShareTooLargeToMeasure => "share_too_large_to_measure",
+        AppError::ShareTooDeepToMeasure => "share_too_deep_to_measure",
         AppError::Busy | AppError::TooManyRequests => "busy",
         AppError::UnsupportedMedia => "unsupported_media",
         AppError::Unauthorized
@@ -1244,6 +1601,7 @@ fn fs_reason(code: FsErrorCode) -> &'static str {
         FsErrorCode::InvalidPath => "invalid_path",
         FsErrorCode::NotFound => "not_found",
         FsErrorCode::TooLarge => "too_large",
+        FsErrorCode::TooDeep => "path_too_deep",
         FsErrorCode::UnsupportedEntry => "unsupported_entry",
         FsErrorCode::Unavailable => "unavailable",
     }
@@ -1256,9 +1614,72 @@ fn map_mutation_fs_error(error: FsError) -> AppError {
         FsErrorCode::CrossDevice => AppError::InvalidRequest,
         FsErrorCode::InvalidPath => AppError::InvalidRequest,
         FsErrorCode::TooLarge => AppError::TooLarge,
+        FsErrorCode::TooDeep => AppError::PathTooDeep,
         FsErrorCode::Unavailable => AppError::Internal,
         FsErrorCode::NotFound | FsErrorCode::UnsupportedEntry => AppError::NotFound,
     }
+}
+
+/// Removes Trash items that expired by `now` from every share. For each share, bounded
+/// batches of `batch_entries` directory names repeat until the sweep reaches
+/// the end of Trash or `budget` is spent; the share's commit lock is taken
+/// for one batch at a time so writes are not held up for the whole run.
+/// Returns the number of items purged.
+pub async fn collect_expired_trash(
+    state: &AppState,
+    now: SystemTime,
+    batch_entries: usize,
+    budget: Duration,
+) -> usize {
+    let mut total = 0;
+    for (share_id, filesystem) in state.browse().trash_gc_targets() {
+        let started = Instant::now();
+        let mut purged = 0;
+        let mut batches = 0_usize;
+        loop {
+            let commit = state.mutations().commit_lock(&share_id).await;
+            let filesystem = Arc::clone(&filesystem);
+            let result = tokio::task::spawn_blocking(move || {
+                let _commit = commit;
+                filesystem.gc_expired_trash(now, batch_entries)
+            })
+            .await;
+            batches += 1;
+            match result {
+                Ok(Ok(batch)) => {
+                    purged += batch.purged;
+                    if batch.finished {
+                        break;
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    tracing::warn!(
+                        share_id = share_id.as_str(),
+                        "trash cleanup failed; will retry later"
+                    );
+                    break;
+                }
+            }
+            if started.elapsed() >= budget {
+                tracing::info!(
+                    share_id = share_id.as_str(),
+                    batches,
+                    "trash cleanup reached its time budget; the next run continues the sweep"
+                );
+                break;
+            }
+        }
+        if purged > 0 {
+            tracing::info!(
+                share_id = share_id.as_str(),
+                removed = purged,
+                batches,
+                "expired trash items purged"
+            );
+        }
+        total += purged;
+    }
+    total
 }
 
 fn inert_json(status: StatusCode, value: impl Serialize) -> Response {
@@ -1303,6 +1724,7 @@ mod tests {
     struct Fixture {
         root: TempDir,
         app: Router,
+        state: AppState,
         identity: AuthenticatedIdentity,
         upload_gate: Arc<Semaphore>,
         text_save_gate: Arc<Semaphore>,
@@ -1345,14 +1767,14 @@ mod tests {
         let upload_gate = Arc::clone(mutations.upload_gate.process_semaphore());
         let text_save_gate = Arc::clone(mutations.text_save_gate.process_semaphore());
         let blocking_gate = Arc::clone(browse.blocking_gate());
-        let app = app::router(
-            AppState::new(true)
-                .with_browse(browse)
-                .with_mutations(mutations),
-        );
+        let state = AppState::new(true)
+            .with_browse(browse)
+            .with_mutations(mutations);
+        let app = app::router(state.clone());
         Fixture {
             root,
             app,
+            state,
             identity: AuthenticatedIdentity::new("user-1", vec![grant]),
             upload_gate,
             text_save_gate,
@@ -2037,7 +2459,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let limits = MutationLimits {
-            max_share_bytes: Some(30),
+            max_share_bytes: Some(30 + DIRECTORY_QUOTA_BYTES),
             ..MutationLimits::default()
         };
         let fixture = fixture(AccessLevel::ReadWrite, false, limits);
@@ -2073,7 +2495,7 @@ mod tests {
             value["outcomes"][0]["outcome"].clone()
         }
 
-        // Usage is 13 fixture bytes plus the 10-byte hard link. The symlink's
+        // Usage is 13 fixture bytes, one directory, and the 10-byte hard link. The symlink's
         // 4096-byte target is not followed, so 7 more bytes fit exactly.
         let response = send(
             &fixture.app,
@@ -2602,5 +3024,516 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), state.commit_lock(&documents))
             .await
             .expect("released lock is available");
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn upload_request(name: &str, contents: &[u8]) -> Request<Body> {
+        let boundary = "depth-quota-boundary";
+        Request::post("/api/v1/shares/documents/uploads")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(multipart_body(boundary, &[(name, contents)])))
+            .unwrap()
+    }
+
+    fn mkdir_request(path: &str) -> Request<Body> {
+        json_request(
+            "POST",
+            "/api/v1/shares/documents/directories",
+            json!({ "path": path }),
+        )
+    }
+
+    fn depth_path(levels: usize) -> String {
+        (0..levels)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Moves fixture files to Trash directly through the share capability.
+    fn trash_files(fixture: &Fixture, count: usize) {
+        let (_, share) = fixture
+            .state
+            .browse()
+            .trash_gc_targets()
+            .into_iter()
+            .next()
+            .expect("fixture share");
+        // Items are set up with write access even when the fixture's user
+        // holds a read-only grant.
+        let grant = ShareGrant {
+            share_id: share.id().clone(),
+            access: AccessLevel::ReadWrite,
+        };
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("write access");
+        for index in 0..count {
+            let name = format!("trashed-{index:02}.txt");
+            fs::write(fixture.root.path().join(&name), name.as_bytes()).unwrap();
+            let path = VirtualPath::parse(&name).unwrap();
+            view.move_to_trash(&path, view.metadata(&path).unwrap(), "user-1", 1)
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn directories_count_toward_quota_and_mkdir_beyond_it_is_rejected() {
+        // The fixture holds 13 file bytes and one directory, so exactly one
+        // more directory fits.
+        let limits = MutationLimits {
+            max_share_bytes: Some(13 + 2 * DIRECTORY_QUOTA_BYTES),
+            ..MutationLimits::default()
+        };
+        let fixture = fixture(AccessLevel::ReadWrite, false, limits);
+        let created = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            mkdir_request("first"),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let rejected = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            mkdir_request("second"),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!fixture.root.path().join("second").exists());
+        // The new directory counts, so not even a one-byte file fits now.
+        let file = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            upload_request("one.txt", b"1"),
+        )
+        .await;
+        assert_eq!(
+            json_body(file).await["outcomes"][0]["outcome"],
+            "quota_exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_beyond_the_scan_entry_bound_fails_distinctly_not_as_quota() {
+        let limits = MutationLimits {
+            max_share_bytes: Some(1 << 30),
+            ..MutationLimits::default()
+        };
+        // The fixture alone holds more entries than this bound.
+        let mutations = MutationState::new(limits)
+            .expect("mutation state")
+            .with_quota_scan_entries(2);
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        let upload = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            upload_request("new.txt", b"new"),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(
+            json_body(upload).await["outcomes"][0]["outcome"],
+            "share_too_large_to_measure"
+        );
+        assert!(!fixture.root.path().join("new.txt").exists());
+        let mkdir = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            mkdir_request("folder"),
+        )
+        .await;
+        assert_eq!(mkdir.status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(
+            json_body(mkdir).await["error"]["code"],
+            "share_too_large_to_measure"
+        );
+        assert!(!fixture.root.path().join("folder").exists());
+    }
+
+    #[tokio::test]
+    async fn a_pre_existing_tree_deeper_than_the_limit_fails_writes_distinctly() {
+        let limits = MutationLimits {
+            max_share_bytes: Some(1 << 30),
+            ..MutationLimits::default()
+        };
+        let fixture = fixture(AccessLevel::ReadWrite, false, limits);
+        // Created out of band, or by a version without the depth limit.
+        let deep = fixture.root.path().join(depth_path(70));
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf.txt"), b"leaf").unwrap();
+        let upload = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            upload_request("new.txt", b"new"),
+        )
+        .await;
+        assert_eq!(upload.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(
+            json_body(upload).await["outcomes"][0]["outcome"],
+            "share_too_deep_to_measure"
+        );
+        assert!(!fixture.root.path().join("new.txt").exists());
+        let mkdir = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            mkdir_request("folder"),
+        )
+        .await;
+        assert_eq!(mkdir.status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(
+            json_body(mkdir).await["error"]["code"],
+            "share_too_deep_to_measure"
+        );
+        // Listing inside the tree still works up to the depth limit.
+        let listing = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            Request::get(format!(
+                "/api/v1/shares/documents/directory?path={}",
+                depth_path(MAX_PATH_DEPTH)
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(listing.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(listing).await["entries"][0]["name"],
+            format!("d{MAX_PATH_DEPTH}")
+        );
+    }
+
+    #[tokio::test]
+    async fn paths_and_moves_deeper_than_the_limit_are_rejected_without_side_effects() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        fs::create_dir_all(fixture.root.path().join(depth_path(MAX_PATH_DEPTH - 1))).unwrap();
+        // A request path with 64 components is valid; 65 is a grammar error.
+        let at_limit = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            mkdir_request(&format!("{}/last", depth_path(MAX_PATH_DEPTH - 1))),
+        )
+        .await;
+        assert_eq!(at_limit.status(), StatusCode::CREATED);
+        let beyond = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            mkdir_request(&format!("{}/last/beyond", depth_path(MAX_PATH_DEPTH - 1))),
+        )
+        .await;
+        assert_eq!(beyond.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(beyond).await["error"]["code"], "invalid_request");
+
+        // `nonempty/child.txt` moved to depth 64 would put the child at 65.
+        let etag = metadata_etag(&fixture, "nonempty").await;
+        let destination = format!("{}/nonempty", depth_path(MAX_PATH_DEPTH - 1));
+        let moved = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            Request::post("/api/v1/shares/documents/move")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, etag)
+                .body(Body::from(
+                    json!({ "source": "nonempty", "destination": destination }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(moved.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(moved).await["error"]["code"], "path_too_deep");
+        assert!(fixture.root.path().join("nonempty/child.txt").exists());
+        assert!(!fixture.root.path().join(&destination).exists());
+    }
+
+    #[tokio::test]
+    async fn trash_listing_pages_with_a_bound_cursor_and_skips_corrupt_items() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        trash_files(&fixture, 3);
+        let list = |query: String, identity: &AuthenticatedIdentity| {
+            let app = fixture.app.clone();
+            let identity = identity.clone();
+            async move {
+                send(
+                    &app,
+                    Some(&identity),
+                    false,
+                    Request::get(format!("/api/v1/shares/documents/trash{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+            }
+        };
+        let first = list("?limit=2".into(), &fixture.identity).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = json_body(first).await;
+        assert_eq!(first["items"].as_array().unwrap().len(), 2);
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_owned();
+        let second =
+            json_body(list(format!("?limit=2&cursor={cursor}"), &fixture.identity).await).await;
+        let second_items = second["items"].as_array().unwrap();
+        assert_eq!(second_items.len(), 1);
+        assert!(second.get("nextCursor").is_none());
+        let mut seen: Vec<_> = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second_items)
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3);
+
+        // A forged, altered, or replayed cursor is rejected.
+        let mut tampered = cursor.clone().into_bytes();
+        let last = tampered.last_mut().unwrap();
+        *last = if *last == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered).unwrap();
+        let other = AuthenticatedIdentity::new(
+            "user-2",
+            vec![ShareGrant {
+                share_id: ShareId::new("documents").unwrap(),
+                access: AccessLevel::ReadWrite,
+            }],
+        );
+        let downgraded = AuthenticatedIdentity::new(
+            "user-1",
+            vec![ShareGrant {
+                share_id: ShareId::new("documents").unwrap(),
+                access: AccessLevel::ReadOnly,
+            }],
+        );
+        for (identity, cursor) in [
+            (&fixture.identity, tampered.as_str()),
+            (&fixture.identity, "AQ"),
+            (&other, cursor.as_str()),
+            (&downgraded, cursor.as_str()),
+        ] {
+            let response = list(format!("?limit=2&cursor={cursor}"), identity).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "cursor {cursor}");
+        }
+        for limit in ["0", "201"] {
+            let response = list(format!("?limit={limit}"), &fixture.identity).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // A corrupt sidecar hides only its own item.
+        let trash = fixture.root.path().join(".crabinet/trash");
+        let corrupt = fs::read_dir(&trash)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .find(|name| name.ends_with(".json"))
+            .unwrap();
+        fs::write(trash.join(&corrupt), b"{").unwrap();
+        let listed = list(String::new(), &fixture.identity).await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(listed).await["items"].as_array().unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn trash_collection_runs_several_batches_per_run_within_its_budget() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        trash_files(&fixture, 12);
+        let after_retention = SystemTime::now() + Duration::from_secs(2 * 86_400);
+        // A zero budget allows exactly one batch, and three names can
+        // purge at most three items.
+        let one_batch =
+            collect_expired_trash(&fixture.state, after_retention, 3, Duration::ZERO).await;
+        assert!(one_batch <= 3);
+        // A real budget keeps taking batches, releasing the commit lock
+        // between them, until the sweep reaches the end of Trash, so one run
+        // purges more than any single batch can.
+        let budget = Duration::from_secs(30);
+        let run = collect_expired_trash(&fixture.state, after_retention, 3, budget).await;
+        assert!(run > 3, "one run purged only {run} items");
+        // Entries renamed during a sweep can be reached only by the next
+        // one, depending on the filesystem's directory order.
+        let mut purged = one_batch + run;
+        for _ in 0..3 {
+            if purged == 12 {
+                break;
+            }
+            purged += collect_expired_trash(&fixture.state, after_retention, 3, budget).await;
+        }
+        assert_eq!(purged, 12);
+        assert_eq!(
+            fs::read_dir(fixture.root.path().join(".crabinet/trash"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    fn empty_trash_request() -> Request<Body> {
+        Request::post("/api/v1/shares/documents/trash/empty")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn trash_directory_entries(fixture: &Fixture) -> usize {
+        fs::read_dir(fixture.root.path().join(".crabinet/trash"))
+            .unwrap()
+            .count()
+    }
+
+    #[tokio::test]
+    async fn empty_trash_removes_more_than_a_listing_page_in_batches_and_is_audited() {
+        // Seven names per batch need dozens of batches, each taking and
+        // releasing the commit lock.
+        let mutations = MutationState::new(MutationLimits::default())
+            .unwrap()
+            .with_trash_empty_batches(7, Duration::from_secs(60));
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        let items = TRASH_PAGE_DEFAULT_LIMIT + 50;
+        trash_files(&fixture, items);
+        let logs = crate::audit::capture::start();
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            empty_trash_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        assert_eq!(
+            json_body(response).await,
+            json!({
+                "shareId": "documents",
+                "outcome": "success",
+                "purged": items,
+                "failed": 0,
+                "moreRemaining": false,
+            })
+        );
+        assert_eq!(trash_directory_entries(&fixture), 0);
+        let listing = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            Request::get("/api/v1/shares/documents/trash")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json_body(listing).await["items"], json!([]));
+        let emitted = logs.take();
+        assert!(emitted.contains("empty_trash"), "no audit event: {emitted}");
+        assert!(emitted.contains(&format!("purged={items}")), "{emitted}");
+        assert!(emitted.contains("success"), "{emitted}");
+        // Emptying an empty Trash succeeds and removes nothing.
+        let again = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            empty_trash_request(),
+        )
+        .await;
+        assert_eq!(json_body(again).await["purged"], 0);
+    }
+
+    #[tokio::test]
+    async fn empty_trash_reports_more_remaining_when_its_budget_runs_out() {
+        // A zero budget allows one batch per request.
+        let mutations = MutationState::new(MutationLimits::default())
+            .unwrap()
+            .with_trash_empty_batches(6, Duration::ZERO);
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        trash_files(&fixture, 20);
+        let first = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            empty_trash_request(),
+        )
+        .await;
+        let first = json_body(first).await;
+        assert_eq!(first["moreRemaining"], true);
+        let mut purged = first["purged"].as_u64().unwrap();
+        assert!(purged <= 6, "one batch purged {purged}");
+        let mut requests = 1;
+        loop {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                empty_trash_request(),
+            )
+            .await;
+            let body = json_body(response).await;
+            purged += body["purged"].as_u64().unwrap();
+            requests += 1;
+            if body["moreRemaining"] == false {
+                break;
+            }
+            assert!(requests < 100, "Empty Trash never finished");
+        }
+        assert_eq!(purged, 20);
+        assert_eq!(trash_directory_entries(&fixture), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_trash_requires_write_access_and_csrf_and_audits_refusals() {
+        let fixture = fixture(AccessLevel::ReadOnly, false, MutationLimits::default());
+        trash_files(&fixture, 3);
+        let logs = crate::audit::capture::start();
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            empty_trash_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let emitted = logs.take();
+        assert!(emitted.contains("empty_trash"), "no audit event: {emitted}");
+        assert!(emitted.contains("rejected"), "{emitted}");
+        assert!(emitted.contains("access_denied"), "{emitted}");
+        assert_eq!(trash_directory_entries(&fixture), 6);
+
+        let writer = fixture_with_state(
+            AccessLevel::ReadWrite,
+            false,
+            MutationState::new(MutationLimits::default()).unwrap(),
+        );
+        trash_files(&writer, 3);
+        let without_csrf = send(
+            &writer.app,
+            Some(&writer.identity),
+            false,
+            empty_trash_request(),
+        )
+        .await;
+        assert_eq!(without_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(trash_directory_entries(&writer), 6);
     }
 }

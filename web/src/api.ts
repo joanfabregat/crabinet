@@ -127,6 +127,22 @@ export interface TrashPage {
   items: TrashItem[];
   /** Days an item stays in Trash; older servers leave it out. */
   retentionDays?: number;
+  /** Opaque position of the next page; omitted on the last page. */
+  nextCursor?: string;
+}
+
+/** Items per Trash page; the server accepts at most 200. */
+export const trashPageSize = 100;
+
+/** The result of one Empty Trash request for a share. */
+export interface EmptyTrashResult {
+  shareId: string;
+  /** Items this request deleted permanently. */
+  purged: number;
+  /** Items that could not be deleted and remain in Trash. */
+  failed: number;
+  /** The request ran out of time; ask again to continue. */
+  moreRemaining: boolean;
 }
 
 export interface TrashResult extends MutationResult {
@@ -134,7 +150,23 @@ export interface TrashResult extends MutationResult {
 }
 
 export type UploadOutcomeKind =
-  "created" | "replaced" | "conflict" | "quota_exceeded" | "error";
+  | "created"
+  | "replaced"
+  | "conflict"
+  | "quota_exceeded"
+  | "share_too_large_to_measure"
+  | "share_too_deep_to_measure"
+  | "error";
+
+const uploadOutcomeKinds: ReadonlySet<unknown> = new Set<UploadOutcomeKind>([
+  "created",
+  "replaced",
+  "conflict",
+  "quota_exceeded",
+  "share_too_large_to_measure",
+  "share_too_deep_to_measure",
+  "error",
+]);
 
 export interface UploadOutcome {
   path: string;
@@ -302,7 +334,12 @@ export interface ApiClient {
     csrfToken: string,
     signal?: AbortSignal,
   ): Promise<TrashResult>;
-  trash(shareId: string, signal?: AbortSignal): Promise<TrashPage>;
+  /** One page of a share's Trash, newest first; pass `nextCursor` for more. */
+  trash(
+    shareId: string,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<TrashPage>;
   restoreTrash(
     shareId: string,
     id: string,
@@ -316,6 +353,12 @@ export interface ApiClient {
     csrfToken: string,
     signal?: AbortSignal,
   ): Promise<void>;
+  /** Permanently deletes everything in one share's Trash, not just a page. */
+  emptyTrash(
+    shareId: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<EmptyTrashResult>;
   uploadFile(
     shareId: string,
     directory: string,
@@ -634,11 +677,18 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         shareId,
         path,
       ),
-    trash: async (shareId, signal) =>
-      parseTrashPage(
-        await request<unknown>(shareApiUrl(shareId, "trash"), { signal }, true),
+    trash: async (shareId, cursor, signal) => {
+      const query = new URLSearchParams({ limit: String(trashPageSize) });
+      if (cursor) query.set("cursor", cursor);
+      return parseTrashPage(
+        await request<unknown>(
+          `${shareApiUrl(shareId, "trash")}?${query.toString()}`,
+          { signal },
+          true,
+        ),
         shareId,
-      ),
+      );
+    },
     restoreTrash: async (shareId, id, destination, csrfToken, signal) => {
       if (destination !== undefined && !isValidVirtualPath(destination))
         throw new ApiError(
@@ -663,6 +713,15 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         { method: "DELETE", signal, headers: { "X-CSRF-Token": csrfToken } },
       );
     },
+    emptyTrash: async (shareId, csrfToken, signal) =>
+      parseEmptyTrashResult(
+        await request<unknown>(`${shareApiUrl(shareId, "trash")}/empty`, {
+          method: "POST",
+          signal,
+          headers: { "X-CSRF-Token": csrfToken },
+        }),
+        shareId,
+      ),
     uploadFile: (shareId, directory, file, csrfToken, uploadOptions = {}) =>
       uploadWithXhr(
         xhrFactory,
@@ -1253,6 +1312,24 @@ function parseTrashResult(
   return value as unknown as TrashResult;
 }
 
+function parseEmptyTrashResult(
+  value: unknown,
+  expectedShareId: string,
+): EmptyTrashResult {
+  const isCount = (count: unknown) =>
+    Number.isInteger(count) && (count as number) >= 0;
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    value.outcome !== "success" ||
+    !isCount(value.purged) ||
+    !isCount(value.failed) ||
+    typeof value.moreRemaining !== "boolean"
+  )
+    throw invalidResponse();
+  return value as unknown as EmptyTrashResult;
+}
+
 function parseTrashPage(value: unknown, expectedShareId: string): TrashPage {
   if (
     !isRecord(value) ||
@@ -1273,7 +1350,9 @@ function parseTrashPage(value: unknown, expectedShareId: string): TrashPage {
       !(
         Number.isInteger(value.retentionDays) &&
         (value.retentionDays as number) > 0
-      ))
+      )) ||
+    (value.nextCursor !== undefined &&
+      (typeof value.nextCursor !== "string" || value.nextCursor.length === 0))
   )
     throw invalidResponse();
   return value as unknown as TrashPage;
@@ -1291,11 +1370,7 @@ function parseUploadResult(
       (outcome) =>
         isRecord(outcome) &&
         isValidVirtualPath(outcome.path) &&
-        (outcome.outcome === "created" ||
-          outcome.outcome === "replaced" ||
-          outcome.outcome === "conflict" ||
-          outcome.outcome === "quota_exceeded" ||
-          outcome.outcome === "error"),
+        uploadOutcomeKinds.has(outcome.outcome),
     )
   ) {
     throw invalidResponse();

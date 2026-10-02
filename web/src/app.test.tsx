@@ -180,6 +180,14 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       overrides.trash ?? vi.fn(async (shareId) => ({ shareId, items: [] })),
     restoreTrash: overrides.restoreTrash ?? vi.fn(async () => undefined),
     purgeTrash: overrides.purgeTrash ?? vi.fn(async () => undefined),
+    emptyTrash:
+      overrides.emptyTrash ??
+      vi.fn(async (shareId) => ({
+        shareId,
+        purged: 0,
+        failed: 0,
+        moreRemaining: false,
+      })),
     uploadFile:
       overrides.uploadFile ??
       vi.fn(async (shareId, directory, file) => ({
@@ -1773,13 +1781,32 @@ describe("writable file operations", () => {
       expiresAt: "2026-10-01T10:00:00Z",
     }));
     const purgeTrash = vi.fn<ApiClient["purgeTrash"]>(async () => undefined);
+    let emptied = false;
+    let requests = 0;
+    // The first request runs out of time; the second finishes the share.
+    const emptyTrash = vi.fn<ApiClient["emptyTrash"]>(async (shareId) => {
+      requests += 1;
+      const first = requests === 1;
+      emptied = !first;
+      return {
+        shareId,
+        purged: first ? 150 : 52,
+        failed: 0,
+        moreRemaining: first,
+      };
+    });
     const navigation = writableNavigation();
     navigation.restore({ shareId: "work", path: "", view: "trash" });
     render(
       <App
         api={fakeApi({
-          trash: vi.fn(async (shareId) => ({ shareId, items })),
+          trash: vi.fn(async (shareId) =>
+            emptied && shareId === "work"
+              ? { shareId, items: [] }
+              : { shareId, items, nextCursor: "more" },
+          ),
           purgeTrash,
+          emptyTrash,
         })}
         navigation={navigation}
       />,
@@ -1789,22 +1816,29 @@ describe("writable file operations", () => {
     });
     expect(emptyButton.querySelector(".lucide-trash-2")).not.toBeNull();
     fireEvent.click(emptyButton);
-    // Reference is read only, so its items stay out of the count.
+    // Reference is read only, so its items stay out of the count, and the
+    // writable share's unloaded pages are included.
     const dialog = screen.getByRole("dialog", { name: "Empty Trash?" });
     expect(
-      within(dialog).getByText(/Permanently delete 2 items/),
+      within(dialog).getByText(/Permanently delete all 2\+ items/),
     ).toBeVisible();
-    expect(purgeTrash).not.toHaveBeenCalled();
+    expect(within(dialog).queryByText(/loaded/)).toBeNull();
+    expect(emptyTrash).not.toHaveBeenCalled();
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Empty Trash" }),
     );
-    await waitFor(() => expect(purgeTrash).toHaveBeenCalledTimes(2));
-    expect(purgeTrash.mock.calls.map((call) => call[1])).toEqual([
-      "deleted-0",
-      "deleted-1",
+    expect(
+      await screen.findByText("Permanently deleted 202 items."),
+    ).toBeVisible();
+    expect(emptyTrash.mock.calls.map((call) => call[0])).toEqual([
+      "work",
+      "work",
     ]);
-    expect(purgeTrash.mock.calls.every((call) => call[0] === "work")).toBe(
-      true,
+    expect(purgeTrash).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: /Working files/ }),
+      ).not.toBeInTheDocument(),
     );
   });
 

@@ -197,7 +197,7 @@ impl From<FsErrorCode> for PreviewError {
             FsErrorCode::AccessDenied => Self::AccessDenied,
             FsErrorCode::Conflict => Self::Unavailable,
             FsErrorCode::CrossDevice => Self::Unavailable,
-            FsErrorCode::InvalidPath => Self::InvalidPath,
+            FsErrorCode::InvalidPath | FsErrorCode::TooDeep => Self::InvalidPath,
             FsErrorCode::NotFound => Self::NotFound,
             FsErrorCode::TooLarge => Self::TooLarge,
             FsErrorCode::UnsupportedEntry => Self::UnsupportedEntry,

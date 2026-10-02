@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { Shredder, Trash2, Undo2 } from "lucide-preact";
 
 import {
@@ -10,7 +10,7 @@ import {
   type TrashItem,
 } from "./api";
 import { EntryIcon } from "./file-icons";
-import { Modal } from "./operations";
+import { Modal, shareStateMessages } from "./operations";
 import { useToast } from "./toast";
 import { FolderPicker } from "./tree";
 import { isValidPathComponent } from "./virtual-path";
@@ -30,7 +30,24 @@ interface ShareTrash {
   share: Share;
   items: TrashItem[];
   failed: boolean;
+  /** Where the next page starts; absent once every item is loaded. */
+  nextCursor?: string;
+  loadingMore?: boolean;
+  /** The last attempt to load more failed. */
+  moreFailed?: boolean;
 }
+
+/** Appends a page, dropping items already shown. */
+function mergeItems(current: TrashItem[], next: TrashItem[]): TrashItem[] {
+  const seen = new Set(current.map((item) => item.id));
+  return [...current, ...next.filter((item) => !seen.has(item.id))];
+}
+
+/**
+ * Empty Trash requests sent for one share before giving up. Each request
+ * works for up to about 20 seconds, so this covers a very large Trash.
+ */
+const maxEmptyTrashRequests = 50;
 
 /** An item together with the share whose Trash holds it. */
 interface TrashTarget {
@@ -102,6 +119,7 @@ export function TrashView({
   onChanged,
 }: TrashViewProps) {
   const [groups, setGroups] = useState<ShareTrash[]>([]);
+  const loadMoreControllers = useRef(new Map<string, AbortController>());
   const [retentionDays, setRetentionDays] = useState<number>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -119,8 +137,10 @@ export function TrashView({
     const controller = new AbortController();
     setLoading(true);
     setError(undefined);
+    loadMoreControllers.current.forEach((pending) => pending.abort());
+    loadMoreControllers.current.clear();
     void Promise.allSettled(
-      shares.map((share) => api.trash(share.id, controller.signal)),
+      shares.map((share) => api.trash(share.id, undefined, controller.signal)),
     ).then((results) => {
       if (controller.signal.aborted) return;
       if (
@@ -143,7 +163,12 @@ export function TrashView({
         shares.map((share, index) => {
           const result = results[index]!;
           return result.status === "fulfilled"
-            ? { share, items: result.value.items, failed: false }
+            ? {
+                share,
+                items: result.value.items,
+                failed: false,
+                nextCursor: result.value.nextCursor,
+              }
             : { share, items: [], failed: true };
         }),
       );
@@ -151,6 +176,57 @@ export function TrashView({
     });
     return () => controller.abort();
   }, [api, shares, revision, onSessionExpired]);
+
+  useEffect(() => {
+    const pending = loadMoreControllers.current;
+    return () => pending.forEach((controller) => controller.abort());
+  }, []);
+
+  const updateGroup = (shareId: string, change: Partial<ShareTrash>) =>
+    setGroups((current) =>
+      current.map((group) =>
+        group.share.id === shareId ? { ...group, ...change } : group,
+      ),
+    );
+
+  /** Loads the next page of one share's Trash below what is shown. */
+  const loadMore = async (group: ShareTrash) => {
+    const shareId = group.share.id;
+    if (!group.nextCursor || loadMoreControllers.current.has(shareId)) return;
+    const controller = new AbortController();
+    loadMoreControllers.current.set(shareId, controller);
+    updateGroup(shareId, { loadingMore: true, moreFailed: false });
+    try {
+      const page = await api.trash(
+        shareId,
+        group.nextCursor,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setGroups((current) =>
+        current.map((entry) =>
+          entry.share.id === shareId
+            ? {
+                ...entry,
+                items: mergeItems(entry.items, page.items),
+                nextCursor: page.nextCursor,
+                loadingMore: false,
+              }
+            : entry,
+        ),
+      );
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (cause instanceof ApiError && cause.kind === "unauthorized") {
+        onSessionExpired();
+        return;
+      }
+      updateGroup(shareId, { loadingMore: false, moreFailed: true });
+    } finally {
+      if (loadMoreControllers.current.get(shareId) === controller)
+        loadMoreControllers.current.delete(shareId);
+    }
+  };
 
   const removeItem = ({ share, item }: TrashTarget) =>
     setGroups((current) =>
@@ -208,11 +284,17 @@ export function TrashView({
       if (
         destination === undefined &&
         cause instanceof ApiError &&
-        (cause.kind === "conflict" || cause.kind === "not-found")
+        (cause.kind === "conflict" ||
+          cause.kind === "not-found" ||
+          cause.code === "path_too_deep")
       ) {
         setDestinationDirectory("");
         setDestinationName(nameOf(item.originalPath));
         setRestoreTarget(target);
+      } else if (cause instanceof ApiError && cause.code === "path_too_deep") {
+        setError(
+          `Could not restore this item there. ${shareStateMessages.path_too_deep} Choose a folder nearer the top.`,
+        );
       } else {
         setError(
           "Could not restore this item. Check the destination and try again.",
@@ -247,40 +329,69 @@ export function TrashView({
         api.purgeTrash(target.share.id, target.item.id, token),
       );
       showToast(`Permanently deleted ${nameOf(target.item.originalPath)}.`);
-    } catch {
-      setError("Could not permanently delete this item. Try again.");
+    } catch (cause) {
+      setError(
+        cause instanceof ApiError && cause.code === "path_too_deep"
+          ? "This item contains folders nested more than 64 levels deep and cannot be deleted from Trash here. Ask an administrator."
+          : "Could not permanently delete this item. Try again.",
+      );
     }
   };
 
-  // Only shares with write access can be emptied.
-  const purgeable = groups
-    .filter((group) => group.share.access === "read-write")
-    .flatMap((group) =>
-      group.items.map((item) => ({ share: group.share, item })),
-    );
+  // Only shares with write access can be emptied. The server empties a
+  // share's whole Trash, including pages not loaded here.
+  const emptiable = groups.filter(
+    (group) =>
+      group.share.access === "read-write" &&
+      (group.items.length > 0 || group.nextCursor !== undefined),
+  );
+  const loadedCount = emptiable.reduce(
+    (count, group) => count + group.items.length,
+    0,
+  );
+  const moreThanLoaded = emptiable.some(
+    (group) => group.nextCursor !== undefined,
+  );
 
   const emptyTrash = async () => {
     setEmptying(true);
     setError(undefined);
     let purged = 0;
+    let failed = 0;
+    let unfinished = false;
     try {
-      // Empty the displayed snapshot. Items added by another user while this
-      // runs are preserved and will appear after the final refresh.
-      for (const target of purgeable) {
-        await withCsrfRetry(
-          api,
-          csrfToken,
-          userId,
-          onSessionRefreshed,
-          (token) => api.purgeTrash(target.share.id, target.item.id, token),
-        );
-        purged += 1;
-        removeItem(target);
+      for (const group of emptiable) {
+        // One request empties the share unless its time budget runs out;
+        // then the server says more remains and the next request continues.
+        for (let request = 0; request < maxEmptyTrashRequests; request += 1) {
+          const result = await withCsrfRetry(
+            api,
+            csrfToken,
+            userId,
+            onSessionRefreshed,
+            (token) => api.emptyTrash(group.share.id, token),
+          );
+          purged += result.purged;
+          failed += result.failed;
+          unfinished = result.moreRemaining;
+          if (!result.moreRemaining) break;
+        }
+        if (unfinished) break;
       }
       setConfirmEmpty(false);
       showToast(
         `Permanently deleted ${purged} ${purged === 1 ? "item" : "items"}.`,
       );
+      if (unfinished)
+        setError(
+          "Trash is still being emptied. Use Empty Trash again to delete the rest.",
+        );
+      else if (failed > 0)
+        setError(
+          failed === 1
+            ? "1 item could not be deleted and remains in Trash."
+            : `${failed} items could not be deleted and remain in Trash.`,
+        );
       onChanged();
       setRevision((value) => value + 1);
     } catch (cause) {
@@ -288,6 +399,7 @@ export function TrashView({
         onSessionExpired();
       else {
         setError("Could not empty all of Trash. What remains is listed below.");
+        onChanged();
         setRevision((value) => value + 1);
       }
       setConfirmEmpty(false);
@@ -314,7 +426,7 @@ export function TrashView({
           <h1 id="trash-title">Trash</h1>
         </div>
         <div class="directory-heading-actions">
-          {purgeable.length > 0 && !loading && (
+          {emptiable.length > 0 && !loading && (
             <button
               type="button"
               class="button button-danger"
@@ -368,8 +480,11 @@ export function TrashView({
               <h2 class="trash-group-title" id={`trash-group-${index}`}>
                 {group.share.name}{" "}
                 <span class="trash-group-count">
-                  <span aria-hidden="true">—</span> {group.items.length}{" "}
-                  {group.items.length === 1 ? "item" : "items"}
+                  <span aria-hidden="true">—</span> {group.items.length}
+                  {group.nextCursor ? "+" : ""}{" "}
+                  {group.items.length === 1 && !group.nextCursor
+                    ? "item"
+                    : "items"}
                 </span>
               </h2>
               {group.failed ? (
@@ -395,6 +510,25 @@ export function TrashView({
                     />
                   ))}
                 </ul>
+              )}
+              {!group.failed && group.moreFailed && (
+                <div class="notice notice-danger" role="alert">
+                  More items could not be loaded. Use Load more to try again.
+                </div>
+              )}
+              {!group.failed && group.nextCursor && (
+                <div class="load-more">
+                  <button
+                    type="button"
+                    class="button button-secondary"
+                    aria-label={`Load more from ${group.share.name}`}
+                    disabled={group.loadingMore || emptying}
+                    aria-busy={group.loadingMore ? "true" : undefined}
+                    onClick={() => void loadMore(group)}
+                  >
+                    {group.loadingMore ? "Loading…" : "Load more"}
+                  </button>
+                </div>
               )}
             </section>
           ))}
@@ -484,10 +618,11 @@ export function TrashView({
           onClose={() => setConfirmEmpty(false)}
         >
           <p>
-            Permanently delete {purgeable.length}{" "}
-            {purgeable.length === 1 ? "item" : "items"} from Trash? This cannot
-            be undone. Items in read-only shared folders, and items added while
-            this runs, will remain in Trash.
+            {moreThanLoaded
+              ? `Permanently delete all ${loadedCount}+ items from Trash?`
+              : `Permanently delete ${loadedCount} ${loadedCount === 1 ? "item" : "items"} from Trash?`}{" "}
+            This cannot be undone. Items in read-only shared folders will remain
+            in Trash.
           </p>
           <div class="dialog-actions">
             <button

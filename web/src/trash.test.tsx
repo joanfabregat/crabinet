@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ApiClient, Share, TrashItem } from "./api";
+import { ApiError, type ApiClient, type Share, type TrashItem } from "./api";
 import { ToastProvider } from "./toast";
 import { TrashView } from "./trash";
 
@@ -267,6 +267,183 @@ describe("TrashView", () => {
     expect(
       within(heading).queryByRole("button", { name: /refresh/i }),
     ).toBeNull();
+  });
+
+  it("loads further pages per share with Load more", async () => {
+    const older = item({
+      id: "deleted-2",
+      originalPath: "older.txt",
+      deletedAt: "2026-09-20T12:00:00Z",
+    });
+    let failNext = true;
+    const trash = renderTrash(async (shareId, cursor) => {
+      if (!cursor) return { shareId, items: [item()], nextCursor: "page-2" };
+      if (failNext) {
+        failNext = false;
+        throw new Error("offline");
+      }
+      // A repeat of the first page's item is shown once.
+      return { shareId, items: [item(), older] };
+    });
+
+    const title = await screen.findByRole("heading", {
+      name: /Working files/,
+    });
+    expect(title).toHaveTextContent("Working files — 1+ items");
+    const loadMore = screen.getByRole("button", {
+      name: "Load more from Working files",
+    });
+    expect(loadMore).toHaveTextContent("Load more");
+
+    fireEvent.click(loadMore);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "More items could not be loaded.",
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Load more from Working files" }),
+    );
+    expect(await screen.findByText("older.txt")).toBeVisible();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(title).toHaveTextContent("Working files — 2 items");
+    expect(screen.queryByRole("button", { name: /Load more/ })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(trash).toHaveBeenLastCalledWith(
+      "work",
+      "page-2",
+      expect.any(AbortSignal),
+    );
+  });
+
+  function renderEmptiable(
+    emptyTrash: ApiClient["emptyTrash"],
+    trash: ApiClient["trash"],
+  ) {
+    const api = {
+      trash: vi.fn(trash),
+      restoreTrash: vi.fn(async () => undefined),
+      purgeTrash: vi.fn(async () => undefined),
+      emptyTrash: vi.fn(emptyTrash),
+    };
+    const onChanged = vi.fn();
+    render(
+      <ToastProvider>
+        <TrashView
+          api={api as unknown as ApiClient}
+          shares={[writable]}
+          csrfToken="csrf"
+          userId="u-1"
+          onSessionExpired={vi.fn()}
+          onSessionRefreshed={vi.fn()}
+          onChanged={onChanged}
+        />
+      </ToastProvider>,
+    );
+    return { api, onChanged };
+  }
+
+  it("empties a share's whole Trash on the server, including unloaded pages", async () => {
+    let emptied = false;
+    const { api, onChanged } = renderEmptiable(
+      async (shareId) => {
+        // The first request runs out of time and the client continues.
+        const first = !emptied && api.emptyTrash.mock.calls.length === 1;
+        emptied = !first;
+        return {
+          shareId,
+          purged: first ? 120 : 30,
+          failed: 0,
+          moreRemaining: first,
+        };
+      },
+      async (shareId) =>
+        emptied
+          ? { shareId, items: [] }
+          : { shareId, items: [item()], nextCursor: "page-2" },
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
+    const dialog = screen.getByRole("dialog", { name: "Empty Trash?" });
+    expect(dialog).toHaveTextContent(
+      "Permanently delete all 1+ items from Trash?",
+    );
+    expect(dialog).not.toHaveTextContent("loaded");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Empty Trash" }),
+    );
+
+    expect(
+      await screen.findByText("Permanently deleted 150 items."),
+    ).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Trash is empty." }),
+    ).toBeVisible();
+    expect(api.emptyTrash.mock.calls).toEqual([
+      ["work", "csrf"],
+      ["work", "csrf"],
+    ]);
+    expect(api.purgeTrash).not.toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("reports items Empty Trash could not delete", async () => {
+    renderEmptiable(
+      async (shareId) => ({
+        shareId,
+        purged: 3,
+        failed: 1,
+        moreRemaining: false,
+      }),
+      async (shareId) => ({ shareId, items: [item()] }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Empty Trash" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Empty Trash?" })).getByRole(
+        "button",
+        { name: "Empty Trash" },
+      ),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "1 item could not be deleted and remains in Trash.",
+    );
+  });
+
+  it("opens the destination picker when the original location is too deep", async () => {
+    const api = {
+      trash: vi.fn(async (shareId: string) => ({ shareId, items: [item()] })),
+      restoreTrash: vi.fn(async () => {
+        throw new ApiError("server", "too deep", {
+          status: 400,
+          code: "path_too_deep",
+        });
+      }),
+      purgeTrash: vi.fn(async () => undefined),
+      directory: vi.fn(async (shareId: string, path: string) => ({
+        shareId,
+        path,
+        entries: [],
+      })),
+    };
+    render(
+      <TrashView
+        api={api as unknown as ApiClient}
+        shares={[writable]}
+        csrfToken="csrf"
+        userId="u-1"
+        onSessionExpired={vi.fn()}
+        onSessionRefreshed={vi.fn()}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Restore notes.txt" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "Restore notes.txt" }),
+    ).toBeVisible();
   });
 
   it("recovers from a load error with Try again", async () => {
