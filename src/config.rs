@@ -10,6 +10,8 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::client_address::IpNetwork;
+
 const CONFIG_VERSION: u32 = 1;
 const MIN_SESSION_SECRET_BYTES: usize = 32;
 const MAX_SESSION_SECRET_BYTES: usize = 4096;
@@ -126,6 +128,21 @@ struct RawServerConfig {
     #[serde(default = "default_login_attempts_per_minute")]
     #[schemars(range(min = 1, max = 1_000))]
     login_attempts_per_minute: u32,
+    /// Password sign-in attempts allowed from one source address each minute,
+    /// counted across all usernames and checked before any password hashing.
+    /// IPv6 sources are grouped by /64.
+    #[serde(default = "default_login_attempts_per_source_per_minute")]
+    #[schemars(range(min = 1, max = 10_000))]
+    login_attempts_per_source_per_minute: u32,
+    /// Reverse proxy addresses or CIDR ranges, such as "192.0.2.10" or
+    /// "2001:db8::/64", whose `trusted_proxy_header` names the client. Empty,
+    /// the default, ignores forwarding headers and uses the TCP peer.
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    trusted_proxies: Vec<String>,
+    /// Forwarding header a trusted proxy sets to name the client.
+    #[serde(default)]
+    trusted_proxy_header: ForwardedHeader,
     /// Maximum simultaneously active sessions retained for one user.
     #[serde(default = "default_max_sessions_per_user")]
     #[schemars(range(min = 1, max = 256))]
@@ -193,6 +210,17 @@ struct RawGrant {
 pub enum Permission {
     Read,
     Write,
+}
+
+/// Header from which a trusted reverse proxy's client address is read.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForwardedHeader {
+    /// `X-Forwarded-For: client, proxy1, proxy2`.
+    #[default]
+    XForwardedFor,
+    /// RFC 7239 `Forwarded: for=client, for=proxy1`.
+    Forwarded,
 }
 
 pub struct Config {
@@ -270,6 +298,9 @@ pub struct ServerConfig {
     session_idle_timeout_seconds: u64,
     session_absolute_timeout_seconds: u64,
     login_attempts_per_minute: u32,
+    login_attempts_per_source_per_minute: u32,
+    trusted_proxies: Vec<IpNetwork>,
+    trusted_proxy_header: ForwardedHeader,
     max_sessions_per_user: usize,
     max_sessions_total: usize,
     trash_retention_days: u16,
@@ -374,6 +405,12 @@ impl Config {
                 "server.login_attempts_per_minute must be between 1 and 1000".into(),
             ));
         }
+        if !(1..=10_000).contains(&raw.server.login_attempts_per_source_per_minute) {
+            return Err(ConfigError::Validation(
+                "server.login_attempts_per_source_per_minute must be between 1 and 10000".into(),
+            ));
+        }
+        let trusted_proxies = validate_trusted_proxies(&raw.server.trusted_proxies)?;
         if !(1..=256).contains(&raw.server.max_sessions_per_user) {
             return Err(ConfigError::Validation(
                 "server.max_sessions_per_user must be between 1 and 256".into(),
@@ -607,6 +644,11 @@ impl Config {
                 session_idle_timeout_seconds: raw.server.session_idle_timeout_seconds,
                 session_absolute_timeout_seconds: raw.server.session_absolute_timeout_seconds,
                 login_attempts_per_minute: raw.server.login_attempts_per_minute,
+                login_attempts_per_source_per_minute: raw
+                    .server
+                    .login_attempts_per_source_per_minute,
+                trusted_proxies,
+                trusted_proxy_header: raw.server.trusted_proxy_header,
                 max_sessions_per_user: raw.server.max_sessions_per_user,
                 max_sessions_total: raw.server.max_sessions_total,
                 trash_retention_days: raw.server.trash_retention_days,
@@ -683,6 +725,18 @@ impl ServerConfig {
 
     pub fn login_attempts_per_minute(&self) -> u32 {
         self.login_attempts_per_minute
+    }
+
+    pub fn login_attempts_per_source_per_minute(&self) -> u32 {
+        self.login_attempts_per_source_per_minute
+    }
+
+    pub fn trusted_proxies(&self) -> &[IpNetwork] {
+        &self.trusted_proxies
+    }
+
+    pub fn trusted_proxy_header(&self) -> ForwardedHeader {
+        self.trusted_proxy_header
     }
 
     pub fn max_sessions_per_user(&self) -> usize {
@@ -779,6 +833,37 @@ const fn default_session_absolute_timeout_seconds() -> u64 {
 
 const fn default_login_attempts_per_minute() -> u32 {
     5
+}
+
+const fn default_login_attempts_per_source_per_minute() -> u32 {
+    20
+}
+
+const MAX_TRUSTED_PROXIES: usize = 64;
+
+/// Parses `server.trusted_proxies`. A network covering every address would let
+/// any client choose its own rate-limit source, so prefix length 0 is refused.
+fn validate_trusted_proxies(entries: &[String]) -> Result<Vec<IpNetwork>, ConfigError> {
+    if entries.len() > MAX_TRUSTED_PROXIES {
+        return Err(ConfigError::Validation(format!(
+            "server.trusted_proxies must list at most {MAX_TRUSTED_PROXIES} entries"
+        )));
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let network = IpNetwork::parse(entry).map_err(|reason| {
+                ConfigError::Validation(format!("server.trusted_proxies[{index}] {reason}"))
+            })?;
+            if network.prefix() == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "server.trusted_proxies[{index}] ({network}) trusts every address, which would let any client choose its own address; list only the reverse proxy's addresses"
+                )));
+            }
+            Ok(network)
+        })
+        .collect()
 }
 
 const fn default_max_sessions_per_user() -> usize {
@@ -1240,6 +1325,12 @@ permission = "write"
         assert_eq!(config.server().session_idle_timeout_seconds(), 1_800);
         assert_eq!(config.server().session_absolute_timeout_seconds(), 43_200);
         assert_eq!(config.server().login_attempts_per_minute(), 5);
+        assert_eq!(config.server().login_attempts_per_source_per_minute(), 20);
+        assert!(config.server().trusted_proxies().is_empty());
+        assert_eq!(
+            config.server().trusted_proxy_header(),
+            ForwardedHeader::XForwardedFor
+        );
         assert_eq!(config.server().max_sessions_per_user(), 16);
         assert_eq!(config.server().max_sessions_total(), 4_096);
         assert_eq!(config.server().trash_retention_days(), 30);
@@ -1541,6 +1632,91 @@ permission = "write"
                 .to_string()
                 .contains("no control characters")
         );
+    }
+
+    #[test]
+    fn trusted_proxies_and_source_limit_are_validated() {
+        let tree = TestTree::new();
+        let with = |settings: &str| {
+            tree.valid_text().replace(
+                "max_preview_size = \"1 MiB\"",
+                &format!("max_preview_size = \"1 MiB\"\n{settings}"),
+            )
+        };
+
+        let config = tree
+            .load(&with(
+                "trusted_proxies = [\"192.0.2.10\", \"198.51.100.0/24\", \"2001:db8::/64\", \"::1\"]\ntrusted_proxy_header = \"forwarded\"\nlogin_attempts_per_source_per_minute = 50",
+            ))
+            .unwrap();
+        let server = config.server();
+        assert_eq!(server.login_attempts_per_source_per_minute(), 50);
+        assert_eq!(server.trusted_proxy_header(), ForwardedHeader::Forwarded);
+        let networks: Vec<String> = server
+            .trusted_proxies()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            networks,
+            [
+                "192.0.2.10/32",
+                "198.51.100.0/24",
+                "2001:db8::/64",
+                "::1/128"
+            ]
+        );
+        assert_eq!(
+            tree.load(&with("trusted_proxy_header = \"x-forwarded-for\""))
+                .unwrap()
+                .server()
+                .trusted_proxy_header(),
+            ForwardedHeader::XForwardedFor
+        );
+
+        for everything in ["0.0.0.0/0", "::/0"] {
+            let error = tree
+                .load(&with(&format!("trusted_proxies = [\"{everything}\"]")))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("trusts every address"), "{error}");
+        }
+        for invalid in [
+            "proxy.example.com",
+            "192.0.2.0/33",
+            "192.0.2.1/24",
+            "::ffff:192.0.2.0/120",
+        ] {
+            let error = tree
+                .load(&with(&format!("trusted_proxies = [\"{invalid}\"]")))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("server.trusted_proxies[0]"), "{error}");
+        }
+        let too_many = (0..65)
+            .map(|index| format!("\"192.0.2.{index}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            tree.load(&with(&format!("trusted_proxies = [{too_many}]")))
+                .unwrap_err()
+                .to_string()
+                .contains("at most 64")
+        );
+        assert!(
+            tree.load(&with("trusted_proxy_header = \"x-real-ip\""))
+                .is_err()
+        );
+        for limit in ["0", "10001"] {
+            assert!(
+                tree.load(&with(&format!(
+                    "login_attempts_per_source_per_minute = {limit}"
+                )))
+                .unwrap_err()
+                .to_string()
+                .contains("login_attempts_per_source_per_minute")
+            );
+        }
     }
 
     #[test]

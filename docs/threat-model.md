@@ -23,7 +23,7 @@ This model covers the application, its OCI image, its configuration and secret m
 4. The application process to read-only configuration, secret files, SQLite state, and share mounts.
 5. Build dependencies and GitHub Actions to release binaries and OCI images.
 
-Configuration and mounted share roots are operator-trusted at startup. Filenames, paths below a share, file contents, HTTP input, cookies, multipart metadata, and authenticated non-administrator users are untrusted.
+Configuration and mounted share roots are operator-trusted at startup. Reverse proxies listed in `server.trusted_proxies` are trusted only to report the connecting client's address, and only for login rate limiting; forwarding headers from any other peer are ignored. Filenames, paths below a share, file contents, HTTP input, cookies, multipart metadata, and authenticated non-administrator users are untrusted.
 
 ## Attacker classes
 
@@ -62,7 +62,7 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 | Symlink/TOCTOU escape | No-follow directory-relative operations; reject links and special files | Race-oriented temporary-filesystem tests |
 | Broken access control | Central grant evaluator; authorization at every handler and filesystem operation | Exhaustive user/share/operation matrix |
 | Password cracking | Argon2id with enforced parameters and salts; protected configuration | PHC policy tests and release benchmarks |
-| Login denial of service | Rate limiting and bounded concurrent Argon2 operations | Concurrency and memory tests |
+| Login denial of service | Per-source limit checked before the shared Argon2 verifier, per-account-and-source limit, bounded concurrent Argon2 operations, client address taken from forwarding headers only for explicitly trusted proxies (right-to-left, falling back to the TCP peer) | Concurrency, username-flood, shared-proxy lockout, and header-spoofing tests |
 | Session theft/fixation | Random opaque IDs, hashed server records, rotation, expiry, secure cookies | HTTP integration tests |
 | Passkey account confusion or replay | Discoverable credential and user-handle mapping, origin and relying-party checks, user verification, single-use expiring challenges | WebAuthn unit and router tests |
 | CSRF | CSRF token plus Origin/Referer validation and SameSite cookies | Cross-origin request tests |

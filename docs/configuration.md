@@ -50,7 +50,22 @@ crabinet hash-password
 
 The command reads the password twice with terminal echo disabled and writes only the resulting salted Argon2id v19 PHC string to standard output. It uses `m=65536` KiB, `t=3`, and `p=1`. A clear-text password is deliberately not accepted as a command-line argument or environment variable. Copy the PHC string into the applicable `users` entry. Unsupported algorithms, malformed PHC strings, or hashes without salt and accepted work-factor parameters are rejected during validation.
 
-`auth_max_concurrent` bounds simultaneous Argon2 work. The default is one and is appropriate for a small pod. Generated hashes use 64 MiB; accepted configuration hashes are bounded at 256 MiB, so size the container for the largest accepted configured hash multiplied by this concurrency plus normal process memory. Benchmark the release binary in the intended container before increasing it. `session_idle_timeout_seconds` and `session_absolute_timeout_seconds` default to 30 minutes and 12 hours. Login attempts default to five per normalized account identifier and source address per minute, with bounded in-memory tracking. `max_sessions_per_user` and `max_sessions_total` default to 16 and 4096; successful login removes the deterministically oldest excess rows after expired-session cleanup.
+`auth_max_concurrent` bounds simultaneous Argon2 work. The default is one and is appropriate for a small pod. Generated hashes use 64 MiB; accepted configuration hashes are bounded at 256 MiB, so size the container for the largest accepted configured hash multiplied by this concurrency plus normal process memory. Benchmark the release binary in the intended container before increasing it. `session_idle_timeout_seconds` and `session_absolute_timeout_seconds` default to 30 minutes and 12 hours. `login_attempts_per_minute` (default 5, 1–1000) limits attempts per normalized account identifier and source address each minute. `login_attempts_per_source_per_minute` (default 20, 1–10000) limits attempts from one source address each minute across all usernames, before any Argon2 work, so one source cannot keep the verifier busy by cycling usernames; keep it at least as large as `login_attempts_per_minute`, or the per-account limit never applies. Both use bounded in-memory tracking described in [authentication](authentication.md). `max_sessions_per_user` and `max_sessions_total` default to 16 and 4096; successful login removes the deterministically oldest excess rows after expired-session cleanup.
+
+### Trusted reverse proxies
+
+The source address used by both login limiters is the TCP peer unless `server.trusted_proxies` is set. Behind a reverse proxy every client shares the proxy's address, so list the proxy's own addresses:
+
+```toml
+[server]
+trusted_proxies = ["127.0.0.1", "::1", "192.0.2.0/28", "2001:db8:1::/64"]
+trusted_proxy_header = "x-forwarded-for"
+```
+
+- `trusted_proxies` (default empty) takes up to 64 IPv4 or IPv6 addresses or CIDR ranges. A bare address means that single host. Ranges must not have host bits set, IPv4-mapped IPv6 forms must be written as IPv4, and `0.0.0.0/0` and `::/0` are rejected because they would let any client choose its own address. Empty means forwarding headers are ignored.
+- `trusted_proxy_header` is `"x-forwarded-for"` (default) or `"forwarded"` for RFC 7239 `Forwarded: for=…`. Configure the proxy to append the connecting address to that header.
+
+Only when the TCP peer is inside a trusted range does Crabinet read the header. Multiple instances are joined in order, and the addresses are walked from right to left: trusted addresses are skipped, and the first untrusted address is the client. Ports, IPv6 brackets, Forwarded quoting, and IPv4-mapped IPv6 are normalized. If the header is missing, not ASCII, longer than 8 KiB, has more than 64 entries, contains a malformed or obfuscated (`unknown`, `_name`) entry before an untrusted one, or names only trusted addresses, the TCP peer is used. Entries a client prepends are therefore never chosen while the proxy appends the real address. The resolved address is grouped like a direct peer (IPv6 by /64) and only selects rate-limit buckets.
 
 Set `disabled = true` on a user to reject both new logins and sessions that remain in SQLite. The committed example is deliberately disabled so copying it cannot activate its illustrative hash. Because configuration is immutable, this takes effect when Crabinet restarts. Re-enabling a user requires a usable method under the selected authentication settings.
 

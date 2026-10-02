@@ -1,0 +1,10 @@
+version = 1
+[server]
+listen = "127.0.0.1:8080"
+database_path = "database.sqlite3"
+session_secret_file = "{{SECRET}}"
+max_upload_size = "10 MiB"
+max_preview_size = "1 MiB"
+trusted_proxy_header = "x-real-ip"
+{{USER}}
+{{SHARE}}

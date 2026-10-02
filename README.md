@@ -167,9 +167,22 @@ Start with a 256 MiB limit and `auth_max_concurrent = 1`. A default Argon2id ver
 
 ## TLS and reverse proxies
 
-Terminate TLS at a reverse proxy and forward to Crabinet over a private loopback, Unix-network namespace, or pod network. Preserve the original `Host` exactly: login, logout, and mutations compare `Origin`/`Referer` authority with `Host`. Do not rewrite these headers. Crabinet intentionally ignores `X-Forwarded-For` and similar client-address headers; its login limiter sees the TCP peer, so a shared proxy should enforce an additional per-client login limit.
+Terminate TLS at a reverse proxy and forward to Crabinet over a private loopback, Unix-network namespace, or pod network. Preserve the original `Host` exactly: login, logout, and mutations compare `Origin`/`Referer` authority with `Host`. Do not rewrite these headers.
 
-Do not publish the backend port beyond the proxy. Apply conservative request-body and timeout limits at the proxy, but keep them at least as large as Crabinet's configured upload size plus multipart framing. Crabinet closes a connection that does not send a complete request head within `server.header_read_timeout_seconds` (default 300), including an idle keep-alive connection between requests, and closes new connections above `server.max_connections`. The default exceeds common proxy idle upstream timeouts (Caddy two minutes, nginx 60 seconds), so the proxy closes idle upstream connections first; see [configuration](docs/configuration.md). Add HSTS at the TLS endpoint after validating HTTPS. No forwarded-header trust list is needed because Crabinet does not consume forwarded client identity; if that behavior changes, it must be an explicit reviewed configuration feature.
+By default Crabinet ignores `X-Forwarded-For` and `Forwarded`, and its login limiter keys attempts on the TCP peer. Behind a proxy every client then shares the proxy's address: one client's failed attempts against an account would also block that account's password sign-in for everyone else. List the proxy's own addresses in `server.trusted_proxies` so the limiter sees the real client instead:
+
+```toml
+[server]
+listen = "127.0.0.1:8080"
+# Only connections from these addresses may name the client. Never list 0.0.0.0/0 or ::/0.
+trusted_proxies = ["127.0.0.1", "::1"]
+# "x-forwarded-for" (default) or "forwarded" (RFC 7239), whichever the proxy sets.
+trusted_proxy_header = "x-forwarded-for"
+```
+
+Configure the proxy to append the connecting address to that header (for example nginx `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). Crabinet reads the header only when the TCP peer is inside a trusted range, walks its addresses from the right, skips trusted proxies, and uses the first untrusted address; a missing, malformed, or oversized header falls back to the TCP peer. Addresses that clients put at the left of the header are therefore never used. The resolved address is used only for login rate limiting, never for authorization.
+
+Do not publish the backend port beyond the proxy, and keep every listed range limited to proxies you operate: any host inside it can choose its rate-limit source. Apply conservative request-body and timeout limits at the proxy, but keep them at least as large as Crabinet's configured upload size plus multipart framing. Crabinet closes a connection that does not send a complete request head within `server.header_read_timeout_seconds` (default 300), including an idle keep-alive connection between requests, and closes new connections above `server.max_connections`. The default exceeds common proxy idle upstream timeouts (Caddy two minutes, nginx 60 seconds), so the proxy closes idle upstream connections first; see [configuration](docs/configuration.md). Add HSTS at the TLS endpoint after validating HTTPS.
 
 ## Backup and restore
 

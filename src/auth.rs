@@ -5,6 +5,7 @@ mod passkeys;
 use std::{
     collections::HashMap,
     fs::OpenOptions,
+    hash::Hash,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -33,6 +34,7 @@ use tokio::sync::Semaphore;
 use crate::{
     app::AppState,
     browse::{AuthenticatedIdentity, BrowseState},
+    client_address::TrustedProxies,
     config::{Config, Permission},
     error::AppError,
     filesystem::{AccessLevel, EntryKind, ShareGrant, ShareId, VirtualPath},
@@ -133,7 +135,9 @@ struct AuthInner {
     absolute_timeout_seconds: i64,
     max_sessions_per_user: usize,
     max_sessions_total: usize,
-    rate_limit: Mutex<RateLimiter>,
+    rate_limit: Mutex<RateLimiter<RateLimitKey>>,
+    source_rate_limit: Mutex<RateLimiter<Option<IpAddr>>>,
+    trusted_proxies: TrustedProxies,
     clock: Arc<dyn Clock>,
 }
 
@@ -213,8 +217,8 @@ struct AttemptWindow {
     last_seen_at: i64,
 }
 
-struct RateLimiter {
-    entries: HashMap<RateLimitKey, AttemptWindow>,
+struct RateLimiter<K> {
+    entries: HashMap<K, AttemptWindow>,
     attempts_per_window: u32,
 }
 
@@ -224,6 +228,7 @@ struct LoginRequest {
     password: String,
 }
 
+/// The TCP peer of the connection, before any trusted-proxy resolution.
 struct PeerAddress(Option<IpAddr>);
 
 impl<S> FromRequestParts<S> for PeerAddress
@@ -237,7 +242,7 @@ where
             parts
                 .extensions
                 .get::<ConnectInfo<SocketAddr>>()
-                .map(|address| rate_limit_source(address.0.ip())),
+                .map(|address| address.0.ip()),
         ))
     }
 }
@@ -425,12 +430,17 @@ impl AuthService {
             server.session_idle_timeout_seconds() as i64,
             server.session_absolute_timeout_seconds() as i64,
             server.login_attempts_per_minute(),
+            server.login_attempts_per_source_per_minute(),
             server.max_sessions_per_user(),
             server.max_sessions_total(),
             Arc::new(SystemClock),
         );
         let inner = Arc::get_mut(&mut auth.inner).expect("new auth service has one owner");
         inner.gravatar_enabled = config.auth().gravatar_enabled();
+        inner.trusted_proxies = TrustedProxies::new(
+            server.trusted_proxies().to_vec(),
+            server.trusted_proxy_header(),
+        );
         inner.dummy_password_hash = dummy_password_hash(
             config
                 .users()
@@ -454,6 +464,7 @@ impl AuthService {
         idle_timeout_seconds: i64,
         absolute_timeout_seconds: i64,
         login_attempts_per_minute: u32,
+        login_attempts_per_source_per_minute: u32,
         max_sessions_per_user: usize,
         max_sessions_total: usize,
         clock: Arc<dyn Clock>,
@@ -477,6 +488,11 @@ impl AuthService {
                     entries: HashMap::new(),
                     attempts_per_window: login_attempts_per_minute,
                 }),
+                source_rate_limit: Mutex::new(RateLimiter {
+                    entries: HashMap::new(),
+                    attempts_per_window: login_attempts_per_source_per_minute,
+                }),
+                trusted_proxies: TrustedProxies::default(),
                 clock,
             }),
         }
@@ -506,10 +522,23 @@ impl AuthService {
         if password.len() > MAX_PASSWORD_BYTES {
             return Err(AppError::AuthenticationFailed);
         }
-        // The permit is taken before the limiter is consulted, so new limiter
-        // keys can only be created at the bounded verification rate. It is
-        // moved into the blocking task below: cancelling the request cannot
-        // release it while a detached Argon2 computation is still running.
+        // The per-source cap is counted across all usernames and costs no
+        // Argon2 work, so one source cycling usernames is refused here instead
+        // of queueing for the shared verifier ahead of everyone else.
+        if !self
+            .inner
+            .source_rate_limit
+            .lock()
+            .map_err(|_| AppError::Internal)?
+            .allow(source, self.inner.clock.now())
+        {
+            return Err(AppError::TooManyRequests);
+        }
+        // The permit is taken before the per-account limiter is consulted, so
+        // new (account, source) keys can only be created at the bounded
+        // verification rate. It is moved into the blocking task below:
+        // cancelling the request cannot release it while a detached Argon2
+        // computation is still running.
         let permit = tokio::time::timeout(
             VERIFIER_WAIT,
             Arc::clone(&self.inner.verifier_slots).acquire_owned(),
@@ -1175,8 +1204,8 @@ impl SessionStore {
     }
 }
 
-impl RateLimiter {
-    fn allow(&mut self, key: RateLimitKey, now: i64) -> bool {
+impl<K: Clone + Eq + Hash> RateLimiter<K> {
+    fn allow(&mut self, key: K, now: i64) -> bool {
         self.entries.retain(|_, window| {
             now.saturating_sub(window.last_seen_at) < RATE_LIMIT_WINDOW_SECONDS
         });
@@ -1217,7 +1246,7 @@ impl RateLimiter {
         true
     }
 
-    fn clear(&mut self, key: &RateLimitKey) {
+    fn clear(&mut self, key: &K) {
         self.entries.remove(key);
     }
 }
@@ -1337,13 +1366,15 @@ async fn update_display_preferences(
 
 async fn login(
     State(state): State<AppState>,
-    PeerAddress(source): PeerAddress,
+    PeerAddress(peer): PeerAddress,
     headers: HeaderMap,
     payload: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
     validate_same_origin(&headers)?;
     let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
+    let source = peer
+        .map(|peer| rate_limit_source(auth.inner.trusted_proxies.client_address(peer, &headers)));
     let session = auth
         .login(
             &payload.username,
@@ -1613,6 +1644,14 @@ mod tests {
     }
 
     fn test_auth(concurrency: usize, attempts: u32) -> TestAuth {
+        test_auth_with_source_limit(concurrency, attempts, 1_000)
+    }
+
+    fn test_auth_with_source_limit(
+        concurrency: usize,
+        attempts: u32,
+        attempts_per_source: u32,
+    ) -> TestAuth {
         let directory = tempfile::tempdir().unwrap();
         let store = SessionStore::open(&directory.path().join("sessions.sqlite3")).unwrap();
         let password_hash = test_hash("a very long unicode password 🙂");
@@ -1672,6 +1711,7 @@ mod tests {
             120,
             600,
             attempts,
+            attempts_per_source,
             2,
             3,
             clock.clone(),
@@ -2894,6 +2934,7 @@ mod tests {
             120,
             600,
             5,
+            20,
             2,
             3,
             auth.clock.clone(),
@@ -2925,6 +2966,7 @@ mod tests {
             120,
             600,
             5,
+            20,
             2,
             3,
             auth.clock.clone(),
@@ -3163,6 +3205,160 @@ mod tests {
         );
         let v4: IpAddr = "192.0.2.8".parse().unwrap();
         assert_eq!(rate_limit_source(v4), v4);
+    }
+
+    const ALICE_PASSWORD: &str = "a very long unicode password 🙂";
+
+    fn trust_test_proxy(auth: &mut TestAuth) {
+        let inner = Arc::get_mut(&mut auth.service.inner).expect("unshared test service");
+        inner.trusted_proxies = TrustedProxies::new(
+            vec![crate::client_address::IpNetwork::parse("192.0.2.0/28").unwrap()],
+            crate::config::ForwardedHeader::XForwardedFor,
+        );
+    }
+
+    /// A login relayed by the reverse proxy at 192.0.2.10, which appends the
+    /// client's address to whatever `X-Forwarded-For` the client sent.
+    fn proxied_login(username: &str, password: &str, client: &str) -> Request<Body> {
+        let payload = serde_json::json!({"username": username, "password": password});
+        let mut request = post("/api/v1/auth/login", payload.to_string());
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&format!("203.0.113.250, {client}")).unwrap(),
+        );
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 10], 4711))));
+        request
+    }
+
+    async fn error_code(response: Response) -> String {
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        value["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn username_flood_from_one_source_is_refused_before_the_verifier() {
+        let mut auth = test_auth_with_source_limit(1, 5, 3);
+        trust_test_proxy(&mut auth);
+        let app = app_router(AppState::with_auth(true, auth.service.clone()));
+        for index in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(proxied_login(
+                    &format!("random-{index}"),
+                    "wrong",
+                    "198.51.100.7",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // With the only verifier slot held, a request that waited for it
+        // would stall for VERIFIER_WAIT and then fail as busy. The flood is
+        // refused at once instead, so it never queues for the verifier.
+        let held = Arc::clone(&auth.service.inner.verifier_slots)
+            .acquire_owned()
+            .await
+            .unwrap();
+        for index in 3..60 {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                app.clone().oneshot(proxied_login(
+                    &format!("random-{index}"),
+                    "wrong",
+                    "198.51.100.7",
+                )),
+            )
+            .await
+            .expect("refused without waiting for the verifier")
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(error_code(response).await, "rate_limited");
+        }
+        // Refused attempts create no per-account limiter keys.
+        assert_eq!(
+            auth.service.inner.rate_limit.lock().unwrap().entries.len(),
+            3
+        );
+        assert_eq!(
+            auth.service
+                .inner
+                .source_rate_limit
+                .lock()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        drop(held);
+
+        let response = app
+            .clone()
+            .oneshot(proxied_login("Alice", ALICE_PASSWORD, "203.0.113.9"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn account_lockout_does_not_spread_to_other_clients_behind_a_trusted_proxy() {
+        let mut auth = test_auth_with_source_limit(1, 2, 1_000);
+        trust_test_proxy(&mut auth);
+        let app = app_router(AppState::with_auth(true, auth.service.clone()));
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(proxied_login("Alice", "wrong", "198.51.100.7"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let locked = app
+            .clone()
+            .oneshot(proxied_login("Alice", ALICE_PASSWORD, "198.51.100.7"))
+            .await
+            .unwrap();
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        // The attacker cannot leave its bucket by prepending another address.
+        let mut spoofed = proxied_login("Alice", ALICE_PASSWORD, "198.51.100.7");
+        spoofed.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 198.51.100.7"),
+        );
+        assert_eq!(
+            app.clone().oneshot(spoofed).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        let response = app
+            .clone()
+            .oneshot(proxied_login("Alice", ALICE_PASSWORD, "203.0.113.9"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Without the trusted-proxy setting the header is ignored, so every
+        // client shares the proxy's address and the lockout spreads.
+        let untrusted = test_auth_with_source_limit(1, 2, 1_000);
+        let app = app_router(AppState::with_auth(true, untrusted.service.clone()));
+        for _ in 0..2 {
+            app.clone()
+                .oneshot(proxied_login("Alice", "wrong", "198.51.100.7"))
+                .await
+                .unwrap();
+        }
+        let response = app
+            .clone()
+            .oneshot(proxied_login("Alice", ALICE_PASSWORD, "203.0.113.9"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

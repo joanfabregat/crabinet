@@ -10,6 +10,7 @@ auth_max_concurrent = 1
 session_idle_timeout_seconds = 60
 session_absolute_timeout_seconds = 300
 login_attempts_per_minute = 100
+login_attempts_per_source_per_minute = 100
 max_sessions_per_user = 8
 max_sessions_total = 32
 
