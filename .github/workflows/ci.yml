@@ -282,6 +282,14 @@ jobs:
           --config p/rust
           --exclude .semgrep
           --error --sarif --output semgrep.sarif .
+      # Semgrep keeps nosemgrep findings in SARIF as in-source suppressions,
+      # which code scanning still raises as alerts. The scan above already
+      # fails on every unsuppressed finding, so upload only those.
+      - name: Drop suppressed Semgrep results
+        if: always() && hashFiles('semgrep.sarif') != ''
+        run: |
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))' semgrep.sarif > semgrep.filtered.sarif
+          mv semgrep.filtered.sarif semgrep.sarif
       - name: Upload Semgrep SARIF
         if: always() && hashFiles('semgrep.sarif') != ''
         uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
