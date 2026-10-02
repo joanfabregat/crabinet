@@ -332,6 +332,15 @@
             "null"
           ]
         },
+        "oidc_subject": {
+          "description": "Optional OIDC `sub` claim this user's ID token must carry in addition\nto the verified email. Requires `email`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255,
+          "minLength": 1
+        },
         "password_hash": {
           "description": "An Argon2id PHC string produced by `crabinet hash-password`.",
           "type": [

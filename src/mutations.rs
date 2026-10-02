@@ -18,7 +18,9 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{DefaultBodyLimit, FromRequestParts, Multipart, Path, Query, State},
+    extract::{
+        DefaultBodyLimit, FromRequestParts, Multipart, State, multipart::MultipartRejection,
+    },
     http::{HeaderMap, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -34,6 +36,7 @@ use crate::{
     app::AppState,
     browse::{AuthenticatedIdentity, SubjectGate, run_blocking},
     error::AppError,
+    extract::{ApiJson, ApiPath, ApiQuery},
     filesystem::{
         AccessLevel, AuthorizedShare, EntryKind, EntryMetadata, EntryName, FsError, FsErrorCode,
         OwnedAuthorizedShare, PendingWrite, ShareId, TrashEntry, VirtualPath,
@@ -391,10 +394,14 @@ async fn create_directory(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path(raw_share_id): Path<String>,
-    Json(body): Json<PathBody>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    body: Result<ApiJson<PathBody>, AppError>,
 ) -> Result<Response, AppError> {
-    let result = create_directory_inner(&state, &identity, &raw_share_id, body).await;
+    let result = async {
+        let ApiJson(body) = body?;
+        create_directory_inner(&state, &identity, &raw_share_id, body).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "create_directory", result)
 }
 
@@ -431,10 +438,14 @@ async fn create_file(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path(raw_share_id): Path<String>,
-    Json(body): Json<PathBody>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    body: Result<ApiJson<PathBody>, AppError>,
 ) -> Result<Response, AppError> {
-    let result = create_file_inner(&state, &identity, &raw_share_id, body).await;
+    let result = async {
+        let ApiJson(body) = body?;
+        create_file_inner(&state, &identity, &raw_share_id, body).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "create_file", result)
 }
 
@@ -472,12 +483,16 @@ async fn save_text(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<PathQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    query: Result<ApiQuery<PathQuery>, AppError>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, AppError> {
-    let result = save_text_inner(&state, &identity, &raw_share_id, query, &headers, body).await;
+    let result = async {
+        let ApiQuery(query) = query?;
+        save_text_inner(&state, &identity, &raw_share_id, query, &headers, body).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "save_text", result)
 }
 
@@ -546,11 +561,15 @@ async fn move_entry(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path(raw_share_id): Path<String>,
+    ApiPath(raw_share_id): ApiPath<String>,
     headers: HeaderMap,
-    Json(body): Json<MoveBody>,
+    body: Result<ApiJson<MoveBody>, AppError>,
 ) -> Result<Response, AppError> {
-    let result = move_entry_inner(&state, &identity, &raw_share_id, &headers, body).await;
+    let result = async {
+        let ApiJson(body) = body?;
+        move_entry_inner(&state, &identity, &raw_share_id, &headers, body).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "move", result)
 }
 
@@ -599,11 +618,15 @@ async fn delete_entry(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<PathQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    query: Result<ApiQuery<PathQuery>, AppError>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let result = delete_entry_inner(&state, &identity, &raw_share_id, query, &headers).await;
+    let result = async {
+        let ApiQuery(query) = query?;
+        delete_entry_inner(&state, &identity, &raw_share_id, query, &headers).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "delete", result)
 }
 
@@ -653,7 +676,7 @@ async fn delete_entry_inner(
 async fn list_trash_items(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
-    Path(raw_share_id): Path<String>,
+    ApiPath(raw_share_id): ApiPath<String>,
 ) -> Result<Response, AppError> {
     let share_id = parse_share_id(&raw_share_id)?;
     let authorized = state.browse().authorize_owned(&identity, &share_id)?;
@@ -681,10 +704,14 @@ async fn restore_trash_item(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path((raw_share_id, item_id)): Path<(String, String)>,
-    Json(body): Json<RestoreTrashBody>,
+    ApiPath((raw_share_id, item_id)): ApiPath<(String, String)>,
+    body: Result<ApiJson<RestoreTrashBody>, AppError>,
 ) -> Result<Response, AppError> {
-    let result = restore_trash_item_inner(&state, &identity, &raw_share_id, &item_id, body).await;
+    let result = async {
+        let ApiJson(body) = body?;
+        restore_trash_item_inner(&state, &identity, &raw_share_id, &item_id, body).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "restore_trash", result)
 }
 
@@ -738,7 +765,7 @@ async fn purge_trash_item(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path((raw_share_id, item_id)): Path<(String, String)>,
+    ApiPath((raw_share_id, item_id)): ApiPath<(String, String)>,
 ) -> Result<Response, AppError> {
     let result = purge_trash_item_inner(&state, &identity, &raw_share_id, &item_id).await;
     audited(&identity, &raw_share_id, "purge_trash", result)
@@ -781,13 +808,17 @@ async fn upload_files(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
-    Path(raw_share_id): Path<String>,
-    Query(query): Query<UploadQuery>,
+    ApiPath(raw_share_id): ApiPath<String>,
+    query: Result<ApiQuery<UploadQuery>, AppError>,
     headers: HeaderMap,
-    multipart: Multipart,
+    multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<Response, AppError> {
-    let result =
-        upload_files_inner(&state, &identity, &raw_share_id, query, &headers, multipart).await;
+    let result = async {
+        let ApiQuery(query) = query?;
+        let multipart = multipart.map_err(|_| AppError::InvalidRequest)?;
+        upload_files_inner(&state, &identity, &raw_share_id, query, &headers, multipart).await
+    }
+    .await;
     audited(&identity, &raw_share_id, "upload", result)
 }
 
@@ -2108,43 +2139,9 @@ mod tests {
         assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"secret");
     }
 
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log buffer").extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
-        type Writer = Self;
-
-        fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    impl CapturedLogs {
-        fn take(&self) -> String {
-            let bytes = std::mem::take(&mut *self.0.lock().expect("log buffer"));
-            String::from_utf8(bytes).expect("UTF-8 logs")
-        }
-    }
-
     #[tokio::test]
     async fn every_rejected_mutation_emits_an_audit_event() {
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_ansi(false)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let logs = crate::audit::capture::start();
         let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
         let cases = [
             (
@@ -2193,10 +2190,38 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "not_found",
             ),
+            // Malformed envelopes are refused with the JSON error and audited.
+            (
+                Request::post("/api/v1/shares/documents/files")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"path\":"))
+                    .unwrap(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                Request::post("/api/v1/shares/documents/move")
+                    .body(Body::from(
+                        json!({"source":"a","destination":"b"}).to_string(),
+                    ))
+                    .unwrap(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                Request::post("/api/v1/shares/documents/uploads?path=x")
+                    .header(header::CONTENT_TYPE, "multipart/form-data")
+                    .body(Body::empty())
+                    .unwrap(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
         ];
         for (request, status, reason) in cases {
             let response = send(&fixture.app, Some(&fixture.identity), true, request).await;
             assert_eq!(response.status(), status, "{reason}");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             let emitted = logs.take();
             assert!(emitted.contains("rejected"), "no audit event: {emitted}");
             assert!(emitted.contains(reason), "missing {reason}: {emitted}");

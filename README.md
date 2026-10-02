@@ -209,9 +209,9 @@ The start-folder and passkey features migrate the SQLite schema through versions
 
 ## Troubleshooting and logs
 
-Crabinet emits structured JSON logs to standard output. Set `RUST_LOG=crabinet=debug` only during controlled diagnosis; logs are designed not to include passwords, password hashes, file contents, host paths, session tokens, or CSRF tokens. Every HTTP response includes `X-Request-ID`; correlate that value with the request span.
+Crabinet emits structured JSON logs to standard output. Set `RUST_LOG=crabinet=debug` only during controlled diagnosis; logs are designed not to include passwords, password hashes, file contents, host paths, session tokens, or CSRF tokens. Every HTTP response includes a server-generated `X-Request-ID`, replacing any value the client sent; correlate it with the request span. Sign-ins, logouts, expired or revoked sessions, refused share access, and mutations emit audit events marked `audit=true`; see [authentication](docs/authentication.md#audit-events).
 
-- Startup fails before listening: run `crabinet check-config`; verify secret mode/length, database parent existence, absolute non-overlapping share roots, that no sensitive path is inside a share, that `.index-staging` has been reviewed and removed from writable shares, and that writable share roots permit creation of private `.crabinet/staging` directories.
+- Startup fails before listening: run `crabinet check-config`; verify that the session and OIDC client secrets are owner-only (`chmod 600`; any group or other permission is rejected) and long enough, database parent existence, absolute non-overlapping share roots, that no sensitive path is inside a share, that `.index-staging` has been reviewed and removed from writable shares, and that writable share roots permit creation of private `.crabinet/staging` directories.
 - Login succeeds but the browser returns to login: confirm end-to-end HTTPS, preserved `Host`, and matching `Origin`; `Secure` cookies are not for plain network HTTP.
 - A user cannot see a share: grants are case-sensitive and absent-by-default; restart after changing the immutable configuration.
 - Writes return `403`: verify a `write` grant, `read_only = false`, a current session/CSRF token, and host filesystem permissions.

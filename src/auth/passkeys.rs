@@ -1,15 +1,13 @@
 //! WebAuthn passkeys bound to configuration-defined users.
 
 use super::*;
+use crate::extract::ApiPath;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
 
-use axum::{
-    extract::{DefaultBodyLimit, Path},
-    routing::patch,
-};
+use axum::{extract::DefaultBodyLimit, routing::patch};
 use webauthn_rs::prelude::{
     AuthenticationResult, DiscoverableAuthentication, DiscoverableKey, Passkey,
     PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential, Uuid, Webauthn,
@@ -370,7 +368,18 @@ async fn start_login(
     // Counted against the same per-source budget as password sign-in before
     // a ceremony is stored, so one source cannot flood the bounded pending
     // map and evict other users' in-progress ceremonies.
-    auth.allow_sign_in_source(auth.sign_in_source(peer, &headers))?;
+    auth.allow_sign_in_source(auth.sign_in_source(peer, &headers))
+        .map_err(|error| {
+            let rejection = LoginRejection::from_source_limit(error);
+            audit::sign_in_rejected(
+                "passkey_login",
+                rejection.reason,
+                None,
+                None,
+                auth.client_address(peer, &headers),
+            );
+            rejection.error
+        })?;
     let (options, authentication) = passkeys
         .webauthn
         .start_discoverable_authentication()
@@ -381,55 +390,28 @@ async fn start_login(
 
 async fn finish_login(
     State(state): State<AppState>,
+    PeerAddress(peer): PeerAddress,
     headers: HeaderMap,
     payload: Result<Json<FinishLogin>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    validate_same_origin(&headers)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
-    let passkeys = enabled(auth)?;
-    let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
-    let authentication = passkeys.take_login(&payload.flow_id)?;
-    let (handle, credential_id) = passkeys
-        .webauthn
-        .identify_discoverable_authentication(&payload.credential)
-        .map_err(|_| AppError::AuthenticationFailed)?;
-    let (username, credential) = auth
-        .inner
-        .store
-        .passkey_for_discoverable_login(handle.as_bytes(), credential_id)
-        .await?
-        .ok_or(AppError::AuthenticationFailed)?;
-    if auth
-        .inner
-        .users
-        .get(&username)
-        .is_none_or(|user| user.disabled)
-    {
-        return Err(AppError::AuthenticationFailed);
-    }
-    let result = passkeys
-        .webauthn
-        .finish_discoverable_authentication(
-            &payload.credential,
-            authentication,
-            &[DiscoverableKey::from(&credential)],
-        )
-        .map_err(|_| AppError::AuthenticationFailed)?;
-    if !auth
-        .inner
-        .store
-        .update_passkey_after_login(&username, result, auth.inner.clock.now())
-        .await?
-    {
-        return Err(AppError::AuthenticationFailed);
-    }
-    let session = auth
-        .issue_session(
-            &username,
-            None,
-            session_cookie(&headers).and_then(|cookie| auth.session_key(cookie)),
-        )
-        .await?;
+    let client = auth.client_address(peer, &headers);
+    let session = match verify_login(auth, &headers, payload).await {
+        Ok(session) => {
+            audit::sign_in_succeeded("passkey_login", &session.username, client);
+            session
+        }
+        Err(rejection) => {
+            audit::sign_in_rejected(
+                "passkey_login",
+                rejection.reason,
+                rejection.subject.as_deref(),
+                None,
+                client,
+            );
+            return Err(rejection.error);
+        }
+    };
     Ok(session_json(
         StatusCode::OK,
         auth.session_response(
@@ -446,9 +428,72 @@ async fn finish_login(
     ))
 }
 
+/// Completes a discoverable ceremony and issues a session, or names the
+/// stable audit reason it was refused for.
+async fn verify_login(
+    auth: &AuthService,
+    headers: &HeaderMap,
+    payload: Result<Json<FinishLogin>, JsonRejection>,
+) -> Result<NewSession, LoginRejection> {
+    let failed = |reason| LoginRejection::new(AppError::AuthenticationFailed, reason);
+    validate_same_origin(headers).map_err(|error| LoginRejection::new(error, "cross_origin"))?;
+    let passkeys =
+        enabled(auth).map_err(|error| LoginRejection::new(error, "method_unavailable"))?;
+    let Json(payload) = payload.map_err(|_| failed("malformed_request"))?;
+    let authentication = passkeys
+        .take_login(&payload.flow_id)
+        .map_err(|error| LoginRejection::new(error, "invalid_challenge"))?;
+    let (handle, credential_id) = passkeys
+        .webauthn
+        .identify_discoverable_authentication(&payload.credential)
+        .map_err(|_| failed("invalid_credential"))?;
+    let (username, credential) = auth
+        .inner
+        .store
+        .passkey_for_discoverable_login(handle.as_bytes(), credential_id)
+        .await?
+        .ok_or_else(|| failed("unknown_credential"))?;
+    let refuse = |reason| {
+        let mut rejection = failed(reason);
+        rejection.subject = Some(username.clone());
+        rejection
+    };
+    if auth
+        .inner
+        .users
+        .get(&username)
+        .is_none_or(|user| user.disabled)
+    {
+        return Err(refuse("disabled"));
+    }
+    let result = passkeys
+        .webauthn
+        .finish_discoverable_authentication(
+            &payload.credential,
+            authentication,
+            &[DiscoverableKey::from(&credential)],
+        )
+        .map_err(|_| refuse("invalid_credential"))?;
+    if !auth
+        .inner
+        .store
+        .update_passkey_after_login(&username, result, auth.inner.clock.now())
+        .await?
+    {
+        return Err(refuse("unknown_credential"));
+    }
+    Ok(auth
+        .issue_session(
+            &username,
+            None,
+            session_cookie(headers).and_then(|cookie| auth.session_key(cookie)),
+        )
+        .await?)
+}
+
 async fn rename_passkey(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     headers: HeaderMap,
     payload: Result<Json<RenamePasskey>, JsonRejection>,
 ) -> Result<Response, AppError> {
@@ -471,7 +516,7 @@ async fn rename_passkey(
 
 async fn remove_passkey(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let auth = state.auth().ok_or(AppError::Internal)?;

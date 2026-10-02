@@ -4,7 +4,7 @@ Crabinet authenticates configuration-defined users with Argon2id v19 passwords, 
 
 ## Password verification and memory
 
-`crabinet hash-password` generates `m=65536,t=3,p=1` hashes: one verifier allocates about 64 MiB. Configuration validation accepts a deliberately bounded range (`m=19456..262144`, `t=2..10`, `p=1..16`) and rejects unknown algorithms, malformed hashes, missing salt/output, and parameters outside it. An unknown or disabled username performs verification against a dummy Argon2id hash before returning the same `401` body used for an incorrect password. The dummy hash uses the most expensive parameters among the configured hashes, so response time does not reveal which accounts exist when an operator uses non-default parameters.
+`crabinet hash-password` generates `m=65536,t=3,p=1` hashes: one verifier allocates about 64 MiB. It refuses passwords longer than 4096 bytes, which sign-in would reject. Configuration validation accepts a deliberately bounded range (`m=19456..262144`, `t=2..10`, `p=1..16`) and rejects unknown algorithms, malformed hashes, missing salt/output, and parameters outside it. An unknown or disabled username performs verification against a dummy Argon2id hash before returning the same `401` body used for an incorrect password. The dummy hash uses the most expensive parameters among the configured hashes, so response time does not reveal which accounts exist when an operator uses non-default parameters.
 
 `server.auth_max_concurrent` is a semaphore limit, not a throughput target. Keep the default of one in memory-constrained pods. The upper memory bound attributable to password verification is approximately `auth_max_concurrent × largest configured m`, plus allocator and process overhead. Benchmark the statically linked release artifact under the pod's actual memory limit before increasing the value. A login first passes the per-source limiter, which does no Argon2 work, then takes its verifier slot before consulting the per-account limiter, and hands the slot to the Argon2 worker, so a client that disconnects mid-verification cannot free the slot while the computation still runs. A request that waits more than 10 seconds for a slot receives `429` with code `busy`.
 
@@ -53,3 +53,25 @@ Reverse proxies must preserve the original `Host`. By default the application do
 ## OpenID Connect transactions
 
 The OIDC start endpoint keeps no per-attempt server state. It sets a `__Host-crabinet_oidc_state` cookie (`Secure; HttpOnly; SameSite=Lax; Path=/`, five minutes) carrying the `state`, its expiry, and the key of any session being replaced, authenticated with an HMAC key derived from the session secret. The nonce and PKCE verifier are derived from the state with the same key. The callback accepts the transaction only when the cookie, its HMAC, the expiry, and the returned `state` all match, and records the state in a bounded replay set until it expires. Unauthenticated start requests therefore cannot exhaust server memory or block other users' sign-ins.
+
+### Binding an OIDC subject
+
+By default an OIDC sign-in maps to the user whose `email` equals the provider's verified email. A user may also set `oidc_subject` to the provider's `sub` claim, an opaque, case-sensitive account identifier of at most 255 ASCII characters. The ID token must then carry exactly that subject as well as the verified email; a matching email with another subject is refused like an unknown identity and audited with reason `subject_mismatch`. Users without `oidc_subject` keep the email-only behavior. An `oidc_subject` requires an `email` on the same user.
+
+The subject is the `sub` value in the ID token the provider issues for that account; Crabinet does not log it. Google's `sub` is a stable numeric account ID that does not change when the account's email address changes, and Google documents it as the identifier to key accounts on. Obtain it from the provider's administration tools or from an ID token issued to the user, then add it to the configuration and restart. Binding the subject means a verified email address that the provider later reassigns to another account can no longer sign in as this user.
+
+## Audit events
+
+Security events are written to the structured log with `audit = true`, an `operation`, an `outcome`, and for refusals a stable `reason`, in the same shape as the mutation events described in [mutations](mutations.md). They are emitted inside the request span, so each JSON line also carries the server-generated `request_id`. Sign-in events include `client_address`, the resolved address the login limiters use (see [the configuration guide](configuration.md#trusted-reverse-proxies)).
+
+| Operation | Outcome | Subject and reasons |
+| --- | --- | --- |
+| `password_login` | `success` or `rejected` | `subject` for a configured account. Reasons: `bad_credentials`, `disabled`, `method_unavailable` (password sign-in disabled or no hash), `rate_limited_account`, `rate_limited_source`, `busy`, `malformed_request`, `cross_origin`, `internal_error`. An attempted name that matches no account is logged only as `identifier`, a keyed HMAC digest of its trimmed, lowercased form under the session secret, so repeated attempts correlate without recording what was typed. |
+| `oidc_login` | `success` or `rejected` | Reasons: `invalid_transaction`, `provider_error`, `missing_code`, `token_exchange_failed`, `invalid_id_token`, `userinfo_failed`, `userinfo_subject_mismatch`, `unverified_email`, `unknown_identity` (with the email's keyed `identifier`), `disabled`, `subject_mismatch`, `internal_error`. |
+| `passkey_login` | `success` or `rejected` | Reasons: `malformed_request`, `cross_origin`, `method_unavailable`, `invalid_challenge`, `invalid_credential`, `unknown_credential`, `disabled`, `internal_error`. |
+| `passkey_register` | `success` | The registering `subject` and the new passkey ID. |
+| `logout` | `success` | The signed-out `subject` and `client_address`. |
+| `session` | `ended` | A stored session refused on use: `expired` (idle or absolute timeout) or `revoked` (user removed or disabled). |
+| Read route, for example `directory`, `download`, or `preview` | `rejected` | `no_grant`: the `subject` named a `share_id` it holds no grant for. The client still receives the ordinary non-disclosing `404`; a syntactically invalid share ID is not logged. |
+
+Passwords, password hashes, cookies, session identifiers, CSRF tokens, OIDC authorization codes and tokens, provider subjects, and file contents never appear in these events.

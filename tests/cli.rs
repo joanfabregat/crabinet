@@ -3,7 +3,7 @@
     reason = "integration tests build synthetic fixtures in temporary directories"
 )]
 
-use std::{fs, net::TcpListener, process::Command};
+use std::{fs, net::TcpListener, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 const HASH: &str = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";
 
@@ -13,6 +13,7 @@ fn write_config(version: u32, listen: &str) -> (tempfile::TempDir, std::path::Pa
     fs::create_dir(&root).unwrap();
     let secret = temp.path().join("session.key");
     fs::write(&secret, [5_u8; 32]).unwrap();
+    restrict(&secret, 0o600);
     let path = temp.path().join("config.toml");
     fs::write(
         &path,
@@ -38,7 +39,53 @@ permission = "read"
         ),
     )
     .unwrap();
+    restrict(&path, 0o600);
     (temp, path)
+}
+
+fn restrict(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+fn check_config(path: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_crabinet"))
+        .args(["check-config", "--config"])
+        .arg(path)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn check_config_rejects_a_secret_readable_by_other_users() {
+    let (temp, path) = write_config(1, "127.0.0.1:8080");
+    restrict(&temp.path().join("session.key"), 0o644);
+    let output = check_config(&path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("must not be readable or writable by group or other users")
+            && stderr.contains("chmod 600 session.key"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(&*temp.path().to_string_lossy()),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn check_config_warns_about_a_group_readable_configuration() {
+    let (_temp, path) = write_config(1, "127.0.0.1:8080");
+    restrict(&path, 0o640);
+    let output = check_config(&path);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("chmod 600 config.toml"), "{stdout}");
+    assert!(stdout.ends_with("configuration is valid\n"), "{stdout}");
 }
 
 #[test]

@@ -6,8 +6,9 @@ use std::sync::{
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderName, HeaderValue, Request},
+    http::{HeaderName, HeaderValue, Request, StatusCode, header},
     middleware,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
@@ -139,16 +140,36 @@ struct Health {
     status: &'static str,
 }
 
-async fn live() -> Json<Health> {
-    Json(Health { status: "ok" })
+/// Health answers are tiny JSON documents that must never be cached or
+/// sniffed, matching every other API response.
+fn health(status: StatusCode, value: &'static str) -> Response {
+    let mut response = (status, Json(Health { status: value })).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
-async fn ready(State(state): State<AppState>) -> Result<Json<Health>, error::AppError> {
+async fn live() -> Response {
+    health(StatusCode::OK, "ok")
+}
+
+async fn ready(State(state): State<AppState>) -> Result<Response, error::AppError> {
     if state.is_ready() {
-        Ok(Json(Health { status: "ready" }))
+        Ok(health(StatusCode::OK, "ready"))
     } else {
         Err(error::AppError::NotReady)
     }
+}
+
+/// The request ID is always generated here. A client-supplied `x-request-id`
+/// is discarded so log lines cannot be forged into another request's trail.
+async fn discard_client_request_id(mut request: Request<Body>) -> Request<Body> {
+    request.headers_mut().remove(&REQUEST_ID_HEADER);
+    request
 }
 
 pub fn router(state: AppState) -> Router {
@@ -205,6 +226,7 @@ pub fn router(state: AppState) -> Router {
             REQUEST_ID_HEADER.clone(),
             SequenceRequestId,
         ))
+        .layer(middleware::map_request(discard_client_request_id))
 }
 
 use axum::body::Body;
@@ -258,5 +280,39 @@ mod tests {
             .await
             .unwrap();
         assert!(response.headers().contains_key(&REQUEST_ID_HEADER));
+    }
+
+    #[tokio::test]
+    async fn client_request_ids_are_replaced() {
+        let response = router(AppState::new(true))
+            .oneshot(
+                Request::get("/health/live")
+                    .header(&REQUEST_ID_HEADER, "forged-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let id = response.headers()[&REQUEST_ID_HEADER].to_str().unwrap();
+        assert_ne!(id, "forged-id");
+        assert!(id.starts_with("req-"), "{id}");
+    }
+
+    #[tokio::test]
+    async fn health_responses_are_not_cached_or_sniffed() {
+        for (ready, path) in [
+            (true, "/health/live"),
+            (true, "/health/ready"),
+            (false, "/health/ready"),
+            (true, "/health/missing"),
+        ] {
+            let response = router(AppState::new(ready))
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let headers = response.headers();
+            assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{path}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store", "{path}");
+        }
     }
 }

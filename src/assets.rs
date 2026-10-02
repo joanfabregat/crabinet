@@ -30,7 +30,7 @@ const INDEX: &str = "index.html";
 
 pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
     if uri.path().starts_with("/api/") || uri.path().starts_with("/health/") {
-        return StatusCode::NOT_FOUND.into_response();
+        return bare_status(StatusCode::NOT_FOUND);
     }
 
     let requested = uri.path().trim_start_matches('/');
@@ -46,9 +46,9 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
         Some(file) => (path, file),
         None if !is_asset => match WebAssets::get(INDEX) {
             Some(file) => (INDEX, file),
-            None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            None => return bare_status(StatusCode::SERVICE_UNAVAILABLE),
         },
-        None => return StatusCode::NOT_FOUND.into_response(),
+        None => return bare_status(StatusCode::NOT_FOUND),
     };
 
     let mime = mime_guess::from_path(asset_path).first_or_octet_stream();
@@ -64,6 +64,18 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
         .unwrap_or_else(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal service error").into_response()
         })
+}
+
+/// An empty error answer that is neither cached nor content-sniffed.
+fn bare_status(status: StatusCode) -> Response {
+    let mut response = status.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 /// Only Vite's content-hashed `assets/*` output may be cached immutably.
@@ -126,5 +138,18 @@ mod tests {
             .await
             .unwrap();
         assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[tokio::test]
+    async fn missing_assets_are_not_cached_or_sniffed() {
+        for path in ["/assets/missing.js", "/health/missing", "/api/missing"] {
+            let response = serve(OriginalUri(path.parse().unwrap())).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+        }
     }
 }

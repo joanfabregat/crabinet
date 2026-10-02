@@ -3,7 +3,11 @@
     reason = "integration tests build synthetic fixtures in temporary directories"
 )]
 
-use std::{fs, os::unix::fs::symlink, path::Path};
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
+};
 
 use crabinet::config::Config;
 
@@ -41,6 +45,12 @@ permission = "write""#,
     (server, user, share)
 }
 
+/// Secrets must be owner-only, or every fixture would fail for that reason alone.
+fn write_secret(path: &Path, contents: [u8; 32]) {
+    fs::write(path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 fn render(template: &str, temp: &Path) -> String {
     let root = temp.join("share");
     let child = root.join("child");
@@ -50,7 +60,7 @@ fn render(template: &str, temp: &Path) -> String {
     let secret = temp.join("session.key");
     fs::create_dir_all(&child).unwrap();
     fs::write(&file, b"not a directory").unwrap();
-    fs::write(&secret, [9_u8; 32]).unwrap();
+    write_secret(&secret, [9_u8; 32]);
     symlink(&root, &link).unwrap();
     let (server, user, share) = fragments(&root, &secret);
     template
@@ -81,7 +91,7 @@ fn annotated_example_loads_after_deployment_paths_are_prepared() {
     fs::create_dir(&root).unwrap();
     fs::create_dir(temp.path().join("data")).unwrap();
     fs::create_dir(temp.path().join("secrets")).unwrap();
-    fs::write(temp.path().join("secrets/session.key"), [3_u8; 32]).unwrap();
+    write_secret(&temp.path().join("secrets/session.key"), [3_u8; 32]);
     let rendered = include_str!("../config.example.toml")
         .replace("/srv/crabinet/documents", root.to_str().unwrap());
     let path = temp.path().join("config.toml");
@@ -113,6 +123,8 @@ fn every_invalid_fixture_is_rejected() {
         include_str!("fixtures/config/invalid/trust-all-proxies.toml"),
         include_str!("fixtures/config/invalid/malformed-trusted-proxy.toml"),
         include_str!("fixtures/config/invalid/unknown-proxy-header.toml"),
+        include_str!("fixtures/config/invalid/share-id-leading-dot.toml"),
+        include_str!("fixtures/config/invalid/oidc-subject-without-email.toml"),
     ];
     for (index, template) in fixtures.into_iter().enumerate() {
         let temp = tempfile::tempdir().unwrap();
