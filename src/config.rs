@@ -296,12 +296,18 @@ pub struct Share {
 }
 
 impl Config {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
+    )]
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let requested_path = path.as_ref();
+        // nosemgrep: crabinet-ambient-filesystem-path
         let source = fs::canonicalize(requested_path).map_err(|source| ConfigError::Read {
             path: requested_path.to_path_buf(),
             source,
         })?;
+        // nosemgrep: crabinet-ambient-filesystem-path
         let text = fs::read_to_string(&source).map_err(|source_error| ConfigError::Read {
             path: source.clone(),
             source: source_error,
@@ -941,7 +947,12 @@ pub fn parse_size(value: &str) -> Result<u64, &'static str> {
         .ok_or("is too large to represent")
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
+)]
 fn reject_symlink_if_present(path: &Path, field: &str) -> Result<(), ConfigError> {
+    // nosemgrep: crabinet-ambient-filesystem-path
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(ConfigError::Validation(format!(
             "{field} must not be a symbolic link"
@@ -950,6 +961,10 @@ fn reject_symlink_if_present(path: &Path, field: &str) -> Result<(), ConfigError
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
+)]
 fn validate_database_path(path: &Path) -> Result<PathBuf, ConfigError> {
     reject_symlink_if_present(path, "server.database_path")?;
     let Some(parent) = path.parent() else {
@@ -957,6 +972,7 @@ fn validate_database_path(path: &Path) -> Result<PathBuf, ConfigError> {
             "server.database_path must have a parent directory".into(),
         ));
     };
+    // nosemgrep: crabinet-ambient-filesystem-path
     let parent = fs::canonicalize(parent).map_err(|_| {
         ConfigError::Validation(
             "parent directory of server.database_path is missing or unreadable".into(),
@@ -971,7 +987,9 @@ fn validate_database_path(path: &Path) -> Result<PathBuf, ConfigError> {
         ConfigError::Validation("server.database_path must name a SQLite file".into())
     })?;
     let resolved = parent.join(file_name);
+    // nosemgrep: crabinet-ambient-filesystem-path
     if path.exists() {
+        // nosemgrep: crabinet-ambient-filesystem-path
         let metadata = fs::metadata(&resolved)
             .map_err(|_| ConfigError::Validation("server.database_path is unreadable".into()))?;
         if !metadata.is_file() {
@@ -979,6 +997,7 @@ fn validate_database_path(path: &Path) -> Result<PathBuf, ConfigError> {
                 "server.database_path is not a regular file".into(),
             ));
         }
+        // nosemgrep: crabinet-ambient-filesystem-path
         fs::canonicalize(&resolved).map_err(|_| {
             ConfigError::Validation("server.database_path cannot be canonicalized".into())
         })
@@ -996,12 +1015,17 @@ fn read_session_secret(path: &Path) -> Result<(PathBuf, Vec<u8>), ConfigError> {
     )
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
+)]
 fn read_secret_file(
     path: &Path,
     field: &str,
     minimum: usize,
     maximum: usize,
 ) -> Result<(PathBuf, Vec<u8>), ConfigError> {
+    // nosemgrep: crabinet-ambient-filesystem-path
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| ConfigError::Validation(format!("{field} is missing or unreadable")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -1019,6 +1043,7 @@ fn read_secret_file(
             )));
         }
     }
+    // nosemgrep: crabinet-ambient-filesystem-path
     let secret = fs::read(path)
         .map_err(|_| ConfigError::Validation(format!("{field} is missing or unreadable")))?;
     if !(minimum..=maximum).contains(&secret.len()) {
@@ -1026,6 +1051,7 @@ fn read_secret_file(
             "{field} must contain {minimum} to {maximum} bytes"
         )));
     }
+    // nosemgrep: crabinet-ambient-filesystem-path
     let canonical = fs::canonicalize(path)
         .map_err(|_| ConfigError::Validation(format!("{field} cannot be canonicalized")))?;
     Ok((canonical, secret))
@@ -1048,12 +1074,17 @@ fn validate_https_url(value: &str, field: &str) -> Result<url::Url, ConfigError>
     Ok(parsed)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
+)]
 fn validate_share_root(id: &str, configured: &Path) -> Result<PathBuf, ConfigError> {
     if !configured.is_absolute() {
         return Err(ConfigError::Validation(format!(
             "root for share {id:?} must be an absolute path"
         )));
     }
+    // nosemgrep: crabinet-ambient-filesystem-path
     let metadata = fs::symlink_metadata(configured).map_err(|_| {
         ConfigError::Validation(format!(
             "root for share {id:?} is missing or cannot be inspected"
@@ -1069,6 +1100,7 @@ fn validate_share_root(id: &str, configured: &Path) -> Result<PathBuf, ConfigErr
             "root for share {id:?} is not a directory"
         )));
     }
+    // nosemgrep: crabinet-ambient-filesystem-path
     let canonical = fs::canonicalize(configured).map_err(|_| {
         ConfigError::Validation(format!("root for share {id:?} cannot be canonicalized"))
     })?;
@@ -1125,6 +1157,10 @@ fn reject_sensitive_paths_inside_shares(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "unit tests build synthetic fixtures in temporary directories"
+)]
 mod tests {
     use std::os::unix::fs::symlink;
 

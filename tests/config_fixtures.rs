@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "integration tests build synthetic fixtures in temporary directories"
+)]
+
 use std::{fs, os::unix::fs::symlink, path::Path};
 
 use crabinet::config::Config;

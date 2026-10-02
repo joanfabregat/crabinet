@@ -1,0 +1,151 @@
+rules:
+  # Threat-model invariants 1 and 2: every request-time filesystem operation
+  # runs relative to a pre-opened share capability in src/filesystem.rs, so
+  # ambient path-based APIs belong nowhere else outside test code. Startup
+  # configuration and secret loading are annotated call by call.
+  - id: crabinet-ambient-filesystem-path
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Path-based filesystem API outside src/filesystem.rs. Request-time
+      filesystem access must go through a capability opened by ShareFs
+      (threat-model invariants 1 and 2). If this is startup-only operator
+      configuration, annotate the call with a reasoned `nosemgrep`.
+    metadata:
+      category: security
+      references:
+        - docs/threat-model.md
+        - docs/filesystem-security.md
+    paths:
+      exclude:
+        - /src/filesystem.rs
+        - /src/filesystem/
+        - /tests/
+        - /fuzz/
+        - /.semgrep/
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: std::fs::$FN(...)
+                  - pattern: fs::$FN(...)
+                  - pattern: tokio::fs::$FN(...)
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(canonicalize|copy|create_dir|create_dir_all|exists|hard_link|metadata|read|read_dir|read_link|read_to_string|remove_dir|remove_dir_all|remove_file|rename|set_permissions|soft_link|symlink|symlink_metadata|try_exists|write)$
+          - patterns:
+              - pattern-either:
+                  - pattern: File::$FN(...)
+                  - pattern: fs::File::$FN(...)
+                  - pattern: std::fs::File::$FN(...)
+                  - pattern: tokio::fs::File::$FN(...)
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(open|create|create_new|options)$
+          - pattern: OpenOptions::new()
+          - pattern: fs::OpenOptions::new()
+          - pattern: std::fs::OpenOptions::new()
+          - pattern: tokio::fs::OpenOptions::new()
+          - pattern: std::os::unix::fs::symlink(...)
+          - pattern: symlink(...)
+          # cap-std's escape hatch back to ambient paths.
+          - pattern: ambient_authority()
+          - pattern: cap_std::ambient_authority()
+          - patterns:
+              - pattern: $PATH.$FN()
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(canonicalize|exists|read_dir|read_link|symlink_metadata|try_exists)$
+      # Unit tests live in `#[cfg(test)] mod tests`. Semgrep does not match
+      # the attribute reliably, so the module name is the test boundary;
+      # Clippy's disallowed-methods mirror checks the attribute itself.
+      - pattern-not-inside: |
+          mod tests { ... }
+
+  # Threat-model invariant 3 and CONTRIBUTING: every share access derives from
+  # the authenticated user's grant. In the share API modules, a handler that
+  # extracts a path parameter must also take the AuthenticatedIdentity
+  # extractor, which rejects requests the auth middleware did not admit.
+  # Handlers without a Path extractor, or ones that receive the identity in
+  # another form, are outside what this rule can see.
+  - id: crabinet-share-handler-without-identity
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Share API handler without the AuthenticatedIdentity extractor. Take
+      `identity: AuthenticatedIdentity` and authorize the share through the
+      user's grant (threat-model invariant 3).
+    metadata:
+      category: security
+      references:
+        - docs/threat-model.md
+        - docs/filesystem-security.md
+    paths:
+      include:
+        - /src/browse.rs
+        - /src/preview.rs
+        - /src/mutations.rs
+    patterns:
+      - pattern: |
+          async fn $HANDLER(..., Path($PARAMETERS): Path<$TYPE>, ...) -> $RETURN { ... }
+      - pattern-not: |
+          async fn $HANDLER(..., $IDENTITY: AuthenticatedIdentity, ...) -> $RETURN { ... }
+      - pattern-not-inside: |
+          mod tests { ... }
+
+  # Threat-model invariant 12: untrusted content renders as inert text and
+  # Markdown is rebuilt from a parsed document, never through HTML sinks.
+  - id: crabinet-frontend-html-sink
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      HTML or script sink in the frontend. Untrusted content must render as
+      inert text or through the safe Markdown allowlist (threat-model
+      invariant 12); a new sink needs a threat-model update and review.
+    metadata:
+      category: security
+      references:
+        - docs/threat-model.md
+        - docs/previews.md
+    paths:
+      include:
+        - /web/src/
+    pattern-either:
+      - pattern: $EL.innerHTML = $VALUE
+      - pattern: $EL.outerHTML = $VALUE
+      - pattern: $EL.innerHTML += $VALUE
+      - pattern: $EL.outerHTML += $VALUE
+      - pattern: $EL.insertAdjacentHTML(...)
+      - pattern: $EL.srcdoc = $VALUE
+      - pattern: $EL.setAttribute("srcdoc", ...)
+      - pattern: <$TAG dangerouslySetInnerHTML={$VALUE} />
+      - pattern: <$TAG dangerouslySetInnerHTML={$VALUE}>$...CHILDREN</$TAG>
+      - pattern: <$TAG srcdoc={$VALUE} />
+      - pattern: <$TAG srcdoc={$VALUE}>$...CHILDREN</$TAG>
+      - pattern: <$TAG srcDoc={$VALUE} />
+      - pattern: <$TAG srcDoc={$VALUE}>$...CHILDREN</$TAG>
+      - pattern: "{dangerouslySetInnerHTML: $VALUE}"
+      - pattern: document.write(...)
+      - pattern: document.writeln(...)
+      - pattern: window.open(...)
+      - pattern: open(...)
+      - pattern: new Function(...)
+      - pattern: Function(...)
+      - pattern: eval(...)
+      # String-evaluating timers. A function argument is always fine.
+      - pattern: setTimeout("...", ...)
+      - pattern: setInterval("...", ...)
+      - pattern: $GLOBAL.setTimeout("...", ...)
+      - pattern: $GLOBAL.setInterval("...", ...)
+      - pattern: setTimeout(`...`, ...)
+      - pattern: setInterval(`...`, ...)
+      - pattern: $GLOBAL.setTimeout(`...`, ...)
+      - pattern: $GLOBAL.setInterval(`...`, ...)
+      - pattern: setTimeout("..." + $CODE, ...)
+      - pattern: setInterval("..." + $CODE, ...)
+      - pattern: $GLOBAL.setTimeout("..." + $CODE, ...)
+      - pattern: $GLOBAL.setInterval("..." + $CODE, ...)
+      - pattern: setTimeout($CODE + "...", ...)
+      - pattern: setInterval($CODE + "...", ...)
+      - pattern: $GLOBAL.setTimeout($CODE + "...", ...)
+      - pattern: $GLOBAL.setInterval($CODE + "...", ...)

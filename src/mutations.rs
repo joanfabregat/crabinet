@@ -1127,6 +1127,10 @@ fn inert_json(status: StatusCode, value: impl Serialize) -> Response {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "unit tests build synthetic fixtures in temporary directories"
+)]
 mod tests {
     use std::fs;
 
