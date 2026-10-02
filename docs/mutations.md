@@ -13,7 +13,7 @@ Paths are canonical virtual paths relative to one configured share. Absolute pat
 | `PUT /shares/{share}/text?path=file.txt` | UTF-8 request body plus `If-Match` | Replaces a regular file if its metadata validator is current. |
 | `POST /shares/{share}/move` | JSON `{ "source": "a", "destination": "b" }` plus `If-Match` | Renames a file or directory inside one share without replacing the destination. |
 | `DELETE /shares/{share}/entry?path=a` | `If-Match` | Moves a file or directory, including a nonempty directory, to the share's Trash and returns a `trashId`. |
-| `GET /shares/{share}/trash` | None | Lists published Trash items for users with access to the share. |
+| `GET /shares/{share}/trash` | None | Lists published Trash items for users with access to the share. A listing reads at most 10,000 entries and 8 KiB per sidecar, and shares the directory-listing limit of 16 concurrent scans; further requests receive `429` with code `busy`. |
 | `POST /shares/{share}/trash/{id}/restore` | JSON `{}` or `{ "destination": "other/path" }` | Restores without overwriting. An absent original parent or occupied destination leaves the item in Trash. |
 | `DELETE /shares/{share}/trash/{id}` | None | Marks an item for permanent purge and starts bounded cleanup. |
 | `POST /shares/{share}/uploads?path=folder` | `multipart/form-data`, file parts only | Streams files to the share's private staging directory and returns `207` with one outcome per file. |

@@ -59,6 +59,13 @@ const EVENT_STREAM_RETRY: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_BUFFERED_READS: usize = 4;
 /// Concurrent directory scans, each of up to `max_directory_entries` stats.
 const MAX_CONCURRENT_LISTINGS: usize = 16;
+/// Concurrent streaming downloads across the process. Each holds an open
+/// file descriptor until its response body completes or is dropped.
+const MAX_CONCURRENT_DOWNLOADS: usize = 64;
+/// Concurrent streaming downloads per authenticated subject: enough for a few
+/// parallel downloads plus a media player's overlapping range requests, while
+/// one user cannot hold every process slot.
+const MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT: usize = 8;
 
 /// Runs synchronous filesystem work on Tokio's blocking pool so slow disks
 /// or network filesystems never stall the async worker threads.
@@ -182,6 +189,7 @@ pub struct BrowseState {
     policy: GlobalPolicy,
     cursor_key: [u8; 32],
     event_gate: SubjectGate,
+    download_gate: SubjectGate,
     buffered_read_gate: Arc<Semaphore>,
     listing_gate: Arc<Semaphore>,
 }
@@ -288,6 +296,10 @@ impl BrowseState {
             policy,
             cursor_key,
             event_gate: SubjectGate::new(MAX_EVENT_CONNECTIONS, MAX_EVENT_CONNECTIONS_PER_SUBJECT),
+            download_gate: SubjectGate::new(
+                MAX_CONCURRENT_DOWNLOADS,
+                MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT,
+            ),
             buffered_read_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_BUFFERED_READS)),
             listing_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_LISTINGS)),
         })
@@ -300,6 +312,10 @@ impl BrowseState {
             policy: GlobalPolicy::default(),
             cursor_key: [0; 32],
             event_gate: SubjectGate::new(MAX_EVENT_CONNECTIONS, MAX_EVENT_CONNECTIONS_PER_SUBJECT),
+            download_gate: SubjectGate::new(
+                MAX_CONCURRENT_DOWNLOADS,
+                MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT,
+            ),
             buffered_read_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_BUFFERED_READS)),
             listing_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_LISTINGS)),
         }
@@ -336,7 +352,16 @@ impl BrowseState {
             .map_err(|_| AppError::Busy)
     }
 
-    fn acquire_listing(&self) -> Result<OwnedSemaphorePermit, AppError> {
+    /// Admits one streaming download. The lease must travel with the response
+    /// body so the slot is released only when the stream ends or is dropped.
+    fn acquire_download(&self, identity: &AuthenticatedIdentity) -> Result<SubjectLease, AppError> {
+        self.download_gate
+            .try_acquire(identity.subject())
+            .ok_or(AppError::Busy)
+    }
+
+    /// Admits one directory or trash scan.
+    pub(crate) fn acquire_listing(&self) -> Result<OwnedSemaphorePermit, AppError> {
         self.listing_gate
             .clone()
             .try_acquire_owned()
@@ -749,6 +774,9 @@ async fn download(
     let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
     let share_id = authorized.share_id().clone();
     let path = VirtualPath::parse(&query.path).map_err(map_fs_error)?;
+    // Taken before the file is opened so a rejected request never holds a
+    // descriptor; the lease moves into the body stream below.
+    let lease = browse.acquire_download(&identity)?;
     let open_path = path.clone();
     let opened = run_blocking(move || authorized.view().open_file(&open_path))
         .await?
@@ -805,7 +833,14 @@ async fn download(
             .map_err(|_| AppError::Internal)?;
     }
     let stream =
-        ReaderStream::with_capacity(file.take(response_len), browse.limits.stream_chunk_bytes);
+        ReaderStream::with_capacity(file.take(response_len), browse.limits.stream_chunk_bytes).map(
+            move |chunk| {
+                // The stream owns the lease, so the download slot is released
+                // with the file handle when the body completes or is dropped.
+                let _lease = &lease;
+                chunk
+            },
+        );
     let mut response = Response::builder()
         .status(status)
         .body(Body::from_stream(stream))
@@ -1938,6 +1973,89 @@ mod tests {
         assert_eq!(open_descriptors_for(&path), 0);
     }
 
+    async fn download_a_txt(app: &Router, identity: &AuthenticatedIdentity) -> Response {
+        send(
+            app,
+            Some(identity),
+            Request::get("/api/v1/shares/documents/download?path=a.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn assert_download_busy(app: &Router, identity: &AuthenticatedIdentity) {
+        let busy = download_a_txt(app, identity).await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(busy.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(json(busy).await["error"]["code"], "busy");
+    }
+
+    #[tokio::test]
+    async fn unread_download_bodies_hold_a_per_subject_slot_until_released() {
+        let fixture = fixture(BrowseLimits::default());
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT {
+            let response = download_a_txt(&fixture.app, &fixture.identity).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        // The handler has returned for every held response; only the unread
+        // bodies keep the slots.
+        assert_download_busy(&fixture.app, &fixture.identity).await;
+
+        // Another subject is not affected by this subject's limit.
+        let other = AuthenticatedIdentity::new("user-2", vec![fixture.grant.clone()]);
+        let response = download_a_txt(&fixture.app, &other).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+
+        // Dropping an unread body releases its slot.
+        drop(held.pop());
+        let response = download_a_txt(&fixture.app, &fixture.identity).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_download_busy(&fixture.app, &fixture.identity).await;
+
+        // Reading a body to completion releases its slot too.
+        assert_eq!(
+            to_bytes(response.into_body(), 64).await.unwrap().as_ref(),
+            b"abcdef"
+        );
+        let response = download_a_txt(&fixture.app, &fixture.identity).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop((held, response));
+    }
+
+    #[tokio::test]
+    async fn download_slots_are_bounded_across_the_process() {
+        let fixture = fixture(BrowseLimits::default());
+        let subjects = MAX_CONCURRENT_DOWNLOADS.div_ceil(MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT);
+        let mut held = Vec::new();
+        for subject in 0..subjects {
+            let identity = AuthenticatedIdentity::new(
+                format!("holder-{subject}"),
+                vec![fixture.grant.clone()],
+            );
+            for _ in 0..MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT {
+                if held.len() == MAX_CONCURRENT_DOWNLOADS {
+                    break;
+                }
+                let response = download_a_txt(&fixture.app, &identity).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                held.push(response);
+            }
+        }
+        // A fresh subject under its own limit is still refused by the
+        // process-wide limit.
+        let fresh = AuthenticatedIdentity::new("fresh", vec![fixture.grant.clone()]);
+        assert_download_busy(&fixture.app, &fresh).await;
+
+        drop(held.pop());
+        let response = download_a_txt(&fixture.app, &fresh).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        drop((held, response));
+    }
+
     #[cfg(target_os = "linux")]
     fn open_descriptors_for(path: &std::path::Path) -> usize {
         fs::read_dir("/proc/self/fd")
@@ -2257,6 +2375,59 @@ mod tests {
         )
         .await;
         assert_eq!(second.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trash_listing_is_concurrency_bounded() {
+        let root = TempDir::new().expect("temporary share");
+        let id = ShareId::new("documents").expect("share id");
+        let share = ConfiguredShare::new(
+            "Documents",
+            ShareFs::open(id.clone(), root.path()).expect("open share"),
+        )
+        .expect("configured share");
+        let browse = BrowseState::new(
+            vec![share],
+            BrowseLimits::default(),
+            GlobalPolicy::default(),
+            [0x5a; 32],
+        )
+        .expect("browse state");
+        let listings = Arc::clone(browse.listing_gate());
+        let app = app::router(AppState::new(true).with_browse(browse));
+        // Read-only users can list the trash, so the scan must be bounded
+        // without relying on the write grant.
+        let identity = AuthenticatedIdentity::new(
+            "user-1",
+            vec![ShareGrant {
+                share_id: id,
+                access: AccessLevel::ReadOnly,
+            }],
+        );
+        let uri = "/api/v1/shares/documents/trash";
+
+        let held_listings = Arc::clone(&listings)
+            .acquire_many_owned(MAX_CONCURRENT_LISTINGS as u32)
+            .await
+            .expect("listing permits");
+        let busy = send(
+            &app,
+            Some(&identity),
+            Request::get(uri).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(json(busy).await["error"]["code"], "busy");
+
+        drop(held_listings);
+        let accepted = send(
+            &app,
+            Some(&identity),
+            Request::get(uri).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(listings.available_permits(), MAX_CONCURRENT_LISTINGS);
     }
 
     #[tokio::test]

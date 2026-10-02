@@ -603,7 +603,15 @@ async fn list_trash_items(
 ) -> Result<Response, AppError> {
     let share_id = parse_share_id(&raw_share_id)?;
     let authorized = state.browse().authorize_owned(&identity, &share_id)?;
-    let entries = run_blocking(move || authorized.view().list_trash(10_000)).await?;
+    // A trash listing reads up to 10,000 bounded sidecars, so it shares the
+    // directory-listing gate. The permit moves into the blocking task so a
+    // disconnected client cannot free the slot while the scan still runs.
+    let permit = state.browse().acquire_listing()?;
+    let entries = run_blocking(move || {
+        let _permit = permit;
+        authorized.view().list_trash(10_000)
+    })
+    .await?;
     let entries = entries.map_err(map_mutation_fs_error)?;
     Ok(inert_json(
         StatusCode::OK,
