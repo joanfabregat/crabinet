@@ -18,7 +18,7 @@ All endpoints are under `/api/v1` and require authentication middleware to inser
 
 `GET /api/v1/shares/{shareId}/directory?path=&limit=100&cursor=` lists the share root when `path` is absent or empty. A nonempty path uses the validated slash-separated virtual path grammar documented in `filesystem-security.md`.
 
-Entries are sorted deterministically with directories first and then by normalized name. `limit` is nonzero and cannot exceed the configured page maximum. The service also caps the total number of entries it will inspect, preventing an attacker-controlled directory from causing unbounded allocation merely because deterministic sorting is required. A directory above that cap currently returns `413` (`too_large`). At most 16 listings are scanned concurrently across the process; further requests receive `429` with code `busy` and `Retry-After`. An entry removed between reading the directory and inspecting it is omitted rather than failing the listing.
+Entries are sorted deterministically with directories first and then by normalized name. `limit` is nonzero and cannot exceed the configured page maximum. The service also caps the total number of entries it will inspect, preventing an attacker-controlled directory from causing unbounded allocation merely because deterministic sorting is required. A directory above that cap currently returns `413` (`too_large`). At most 16 listings are scanned concurrently across the process and 8 per authenticated user, counting Trash listings; further requests receive `429` with code `busy` and `Retry-After`. An entry removed between reading the directory and inspecting it is omitted rather than failing the listing.
 
 ```json
 {
@@ -58,11 +58,13 @@ The cursor contains no host path. Its HMAC binds the authenticated subject, effe
 
 Directory metadata omits `size`. The ETag is also returned in the response header and changes after an atomic entry replacement without exposing inode, device, owner, or ambient path information.
 
+Metadata lookups, image preview opens, and the pre-commit lookup of a move or move-to-Trash share one gate for blocking filesystem work that no narrower limit bounds: at most 64 run concurrently across the process and 16 per authenticated user, so a slow disk or network filesystem cannot let them occupy the runtime's blocking thread pool. Further requests receive `429` with code `busy` and `Retry-After`. Session lookups and sign-in are not counted against this gate.
+
 ## Inert UTF-8 text
 
 `GET /api/v1/shares/{shareId}/text?path=relative/path` returns a configured-size-capped file as a JSON string. Invalid UTF-8 returns `415`, and a file above the text cap returns `413`. HTML, SVG, Markdown, and code are data inside JSON at this boundary and are never emitted as an executable document.
 
-The response includes `size`, `mimeType`, and a content-derived `etag`, as well as `X-Content-Type-Options: nosniff` and `Cache-Control: no-store, private`. Text reads and previews share a process-wide limit of four concurrent requests that buffer a whole file; further requests receive `429` with code `busy` and `Retry-After`.
+The response includes `size`, `mimeType`, and a content-derived `etag`, as well as `X-Content-Type-Options: nosniff` and `Cache-Control: no-store, private`. Text reads and previews share a limit of four concurrent requests that buffer a whole file across the process and two per authenticated user; further requests receive `429` with code `busy` and `Retry-After`.
 
 ## Streaming download
 

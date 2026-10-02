@@ -17,12 +17,12 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncReadExt as _, sync::OwnedSemaphorePermit};
+use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
 
 use crate::{
     app::AppState,
-    browse::{AuthenticatedIdentity, run_blocking},
+    browse::{AuthenticatedIdentity, SubjectLease, run_blocking},
     error::AppError,
     filesystem::{AuthorizedShare, FsErrorCode, ShareId, VirtualPath},
 };
@@ -326,8 +326,14 @@ async fn preview_image(
     let path = VirtualPath::parse(raw_path).map_err(|error| PreviewError::from(error.code()))?;
     let authorized = state.browse().authorize_owned(&identity, &share_id)?;
     let max_bytes = state.preview_policy().max_bytes();
-    let (file, image, size) =
-        run_blocking(move || open_image(&authorized.view(), &path, max_bytes)).await??;
+    // The lease bounds the blocking open and signature check; it moves into
+    // the closure so a cancelled request cannot release it early.
+    let lease = state.browse().acquire_blocking(&identity)?;
+    let (file, image, size) = run_blocking(move || {
+        let _lease = lease;
+        open_image(&authorized.view(), &path, max_bytes)
+    })
+    .await??;
     let stream = ReaderStream::with_capacity(
         tokio::fs::File::from_std(file).take(size),
         IMAGE_STREAM_CHUNK_BYTES,
@@ -370,14 +376,14 @@ async fn request_document(
     identity: &AuthenticatedIdentity,
     raw_share_id: &str,
     raw_path: Option<&str>,
-) -> Result<(PreviewDocument, OwnedSemaphorePermit), PreviewRequestError> {
+) -> Result<(PreviewDocument, SubjectLease), PreviewRequestError> {
     let share_id = ShareId::new(raw_share_id.to_owned()).map_err(|_| AppError::NotFound)?;
     let raw_path = raw_path.ok_or(PreviewError::InvalidPath)?;
     let path = VirtualPath::parse(raw_path).map_err(|error| PreviewError::from(error.code()))?;
     let authorized = state.browse().authorize_owned(identity, &share_id)?;
     // Returned to the caller, which holds it while building the response
     // so every buffered copy of the document stays within the bound.
-    let permit = state.browse().acquire_buffered_read()?;
+    let permit = state.browse().acquire_buffered_read(identity)?;
     let policy = state.preview_policy();
     // The permit travels with the blocking work, so a cancelled request does
     // not release it while the read is still running.

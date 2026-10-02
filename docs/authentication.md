@@ -35,7 +35,8 @@ When OIDC supplies a valid Google profile picture URL, Crabinet includes it in t
 
 - Session identifiers contain 256 random bits from the operating system CSPRNG and are sent only in the `__Host-crabinet_session` cookie with `Secure; HttpOnly; SameSite=Strict; Path=/` and no `Domain`. The `__Host-` prefix stops a sibling subdomain from planting or shadowing it.
 - SQLite stores only `HMAC-SHA-256(session secret, domain || session identifier)`, the username, and timestamps. Possession of the database alone does not reveal usable cookies.
-- A successful login atomically deletes any presented old session before inserting the new session. Logout deletes the session and expires the cookie. Replays then fail.
+- A successful login atomically deletes any presented old session before inserting the new session. Logout deletes the session and expires the cookie. Replays then fail. An open directory event stream re-checks its session every 15 seconds without extending it and ends once the session is gone or expired.
+- Session reads and sign-in validate the saved start folder with a directory lookup on the blocking thread pool, so a slow share filesystem cannot stall the async workers that serve authentication. Session lookups do not count against the request-path blocking-work limit, so sign-in and sign-out stay available while it is saturated.
 - Idle and absolute expirations are enforced server-side. Expired records are deleted on access and old rows are boundedly cleaned during login.
 - Successful login enforces configured per-user and global session caps (16 and 4096 by default) by deleting deterministic oldest rows. Persistent state therefore stays bounded even if a client suppresses its previous cookie.
 - Every authenticated request checks the user against the immutable in-memory configuration. Removed or disabled users therefore lose access after restart even if SQLite still contains a row.
