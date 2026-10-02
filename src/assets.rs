@@ -4,15 +4,27 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use rust_embed::RustEmbed;
 
-#[derive(RustEmbed)]
-#[folder = "web/dist/"]
-#[include = "*.html"]
-#[include = "assets/*"]
-#[include = "crabinet.png"]
-#[include = "google-g.png"]
-struct WebAssets;
+use embedded::WebAssets;
+
+// Release builds embed these files. Debug builds make rust-embed read them
+// from web/dist at runtime, behind its own canonicalized-prefix check. The
+// lint level must sit on a module because derive output does not inherit it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "debug-only rust-embed reads of the build's own web/dist"
+)]
+mod embedded {
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "web/dist/"]
+    #[include = "*.html"]
+    #[include = "assets/*"]
+    #[include = "crabinet.png"]
+    #[include = "google-g.png"]
+    pub(super) struct WebAssets;
+}
 
 const INDEX: &str = "index.html";
 

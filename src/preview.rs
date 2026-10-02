@@ -712,6 +712,10 @@ fn code_language(extension: &str) -> Option<&'static str> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "unit tests build synthetic fixtures in temporary directories"
+)]
 mod tests {
     use std::fs;
 

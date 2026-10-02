@@ -58,20 +58,20 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 
 | Threat | Primary controls | Verification |
 | --- | --- | --- |
-| Path traversal and encoding tricks | Typed relative paths, capability directories, component validation | Unit, property, and integration tests |
+| Path traversal and encoding tricks | Typed relative paths, capability directories, component validation | Unit, property, and integration tests; fuzzing; Semgrep and Clippy rules that keep ambient path APIs inside `src/filesystem.rs` |
 | Symlink/TOCTOU escape | No-follow directory-relative operations; reject links and special files | Race-oriented temporary-filesystem tests |
-| Broken access control | Central grant evaluator; authorization at every handler and filesystem operation | Exhaustive user/share/operation matrix |
+| Broken access control | Central grant evaluator; authorization at every handler and filesystem operation | Exhaustive user/share/operation matrix; weekly report-only mutation testing |
 | Password cracking | Argon2id with enforced parameters and salts; protected configuration | PHC policy tests and release benchmarks |
 | Login denial of service | Per-source limit checked before the shared Argon2 verifier, per-account-and-source limit, bounded concurrent Argon2 operations, client address taken from forwarding headers only for explicitly trusted proxies (right-to-left, falling back to the TCP peer) | Concurrency, username-flood, shared-proxy lockout, and header-spoofing tests |
 | Session theft/fixation | Random opaque IDs, hashed server records, rotation, expiry, secure cookies | HTTP integration tests |
 | Passkey account confusion or replay | Discoverable credential and user-handle mapping, origin and relying-party checks, user verification, single-use expiring challenges | WebAuthn unit and router tests |
 | CSRF | CSRF token plus Origin/Referer validation and SameSite cookies | Cross-origin request tests |
-| Stored XSS/active HTML | Inert rendering, sanitizer, CSP sandbox, iframe sandbox | Real-browser hostile fixtures |
+| Stored XSS/active HTML | Inert rendering, sanitizer, CSP sandbox, iframe sandbox | Real-browser hostile fixtures; Semgrep and ESLint rules that reject HTML and script sinks; CodeQL |
 | Upload exhaustion | Streaming, request/file/count/quota limits, private per-share staging, bounded non-recursive recovery, cleanup, bounded concurrency | Multipart failure, staging recovery, and resource tests |
 | Connection exhaustion (slow or idle clients) | Configurable HTTP/1.1 header-read timeout covering new and idle keep-alive connections, configurable process-wide connection cap | TCP-level server tests |
 | Header injection/content sniffing | Validated header values, safe disposition encoding, `nosniff` | Response-header tests |
-| Dependency or workflow compromise | Lockfiles, dependency review, Semgrep, Trivy, pinned Actions, minimal permissions, attestations | Pull-request, weekly, and release CI |
-| Overbroad host access | Explicit mounts, non-root image, read-only rootfs, dropped capabilities | Container smoke tests and operator documentation |
+| Dependency or workflow compromise | Lockfiles, dependency review, Semgrep, Trivy, CodeQL, pinned Actions, minimal permissions, actionlint and zizmor, per-architecture image attestations | Pull-request, weekly, and release CI; the release fails unless the index and each architecture image verify |
+| Overbroad host access | Explicit mounts, non-root image, read-only rootfs, dropped capabilities | Pull-request and pre-publication release smoke tests run the image with a read-only root, all capabilities dropped, no-new-privileges, and UID 65532, then check readiness, an authenticated listing, the non-root process, and that the image binary matches the release archive; Trivy image and Containerfile scans; operator documentation |
 
 ## Deferred risks and non-goals
 
@@ -90,6 +90,6 @@ The pull-request gate runs `cargo test --locked --all-targets --all-features`. I
 
 For a scheduled or manual extended run, use `PROPTEST_CASES=4096 cargo test --locked --release --all-targets --all-features`. The higher property-case count and release-mode race interleavings are deliberately separate from the fast pull-request gate. Regressions must be reduced to synthetic fixtures; test output and saved cases must not contain passwords, cookies, session identifiers, host paths, or user file contents.
 
-Six `cargo-fuzz` targets live under `fuzz/`: `config_toml`, `phc_policy`, `virtual_path`, `multipart`, `markdown_classification`, and `content_disposition`. Run each target from the repository root, for example `cargo fuzz run virtual_path -- -max_total_time=300`, and run the full target list in the weekly extended security job. The multipart target drives the actual mutation router against a unique synthetic temporary share; the parser/classifier targets call the same production functions behind the opt-in `fuzzing` feature. Corpora and crash artifacts must remain synthetic and must not be committed if they contain machine paths or environment-derived values.
+Six `cargo-fuzz` targets live under `fuzz/`: `config_toml`, `phc_policy`, `virtual_path`, `multipart`, `markdown_classification`, and `content_disposition`. Run each target from the repository root, for example `cargo fuzz run virtual_path -- -max_total_time=300`, and run the full target list in the weekly extended security job. Pull requests run every target for 20 seconds with the same pinned nightly and check the fuzz lockfile for advisories. The multipart target drives the actual mutation router against a unique synthetic temporary share; the parser/classifier targets call the same production functions behind the opt-in `fuzzing` feature. Corpora and crash artifacts must remain synthetic and must not be committed if they contain machine paths or environment-derived values.
 
 Run the ignored Argon2 sizing benchmark with `cargo test --locked --release benchmark_default_argon2_verification_profile -- --ignored --nocapture` inside the deployment cgroup. For each release candidate, independently record cgroup `memory.peak` for idle, one login, a maximum page listing, upload, download, and preview. Reset the cgroup between scenarios. The supported low-memory starting point remains `auth_max_concurrent = 1`; the container limit must cover idle peak plus the largest accepted Argon2 memory parameter and at least 25% headroom. A non-login scenario fails the resource check if memory grows with full upload/download size instead of the documented stream/preview bound, or if peak memory regresses by more than 10% without an architecture note and updated deployment recommendation.

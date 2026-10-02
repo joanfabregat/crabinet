@@ -105,17 +105,31 @@ pub fn multipart(data: &[u8]) {
 struct FuzzRoot(PathBuf);
 
 impl FuzzRoot {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fuzz-only: creates a synthetic temporary share root"
+    )]
     fn new() -> Self {
         let sequence = FUZZ_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("index-fuzz-{}-{sequence:016x}", std::process::id()));
+        // Fuzz-only and never shipped. create_dir below fails if the name
+        // already exists, so a path planted in the shared temporary
+        // directory is never reused.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let temporary = std::env::temp_dir();
+        let path = temporary.join(format!("index-fuzz-{}-{sequence:016x}", std::process::id()));
+        // nosemgrep: crabinet-ambient-filesystem-path
         std::fs::create_dir(&path).expect("unique synthetic fuzz root");
         Self(path)
     }
 }
 
 impl Drop for FuzzRoot {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fuzz-only: removes the synthetic temporary share root"
+    )]
     fn drop(&mut self) {
+        // nosemgrep: crabinet-ambient-filesystem-path
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

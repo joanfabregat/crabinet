@@ -854,7 +854,12 @@ fn delete_default_preferences(
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: creates the operator-configured session database before serving requests"
+)]
 fn create_database_if_missing(path: &std::path::Path) -> Result<(), std::io::Error> {
+    // nosemgrep: crabinet-ambient-filesystem-path
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(unix)]
@@ -1600,6 +1605,10 @@ fn decode_nibble(value: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "unit tests build synthetic fixtures in temporary directories"
+)]
 mod tests {
     use std::{
         fs,

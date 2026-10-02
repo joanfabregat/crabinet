@@ -97,13 +97,21 @@ jobs:
         with:
           command: check
           arguments: --all-features
+      - name: Check fuzz harness advisories
+        id: fuzz-deps
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          command: check
+          command-arguments: advisories
       - name: Audit frontend dependencies
         id: npm
         continue-on-error: true
         working-directory: web
         run: npm audit --audit-level=moderate
       - name: Enforce weekly findings
-        if: steps.semgrep.outcome == 'failure' || steps.trivy.outcome == 'failure' || steps.rust.outcome == 'failure' || steps.npm.outcome == 'failure'
+        if: steps.semgrep.outcome == 'failure' || steps.trivy.outcome == 'failure' || steps.rust.outcome == 'failure' || steps.fuzz-deps.outcome == 'failure' || steps.npm.outcome == 'failure'
         run: exit 1
 
   released-image:
@@ -165,3 +173,77 @@ jobs:
       - name: Enforce image findings
         if: steps.trivy.outcome == 'failure'
         run: exit 1
+
+  # Report-only mutation testing of the authorization and filesystem
+  # boundaries. Surviving mutants point at missing assertions; they do not
+  # fail the workflow. Shards keep each runner under the job time limit.
+  mutants:
+    name: Mutation testing (shard ${{ matrix.shard }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      RUST_VERSION: 1.90.0
+      CARGO_MUTANTS_VERSION: 27.1.0
+      SHARD_COUNT: 4
+      # All mutants in auth.rs and the capability filesystem module, plus the
+      # identity extractor, grant lookup, authorization, and non-disclosing
+      # error mapping functions in browse.rs.
+      MUTANT_FILTER: >-
+        ^src/(auth\.rs|filesystem\.rs|filesystem/)|^src/browse\.rs:.*\b(grant_for|from_request_parts|authorize|authorize_owned|authorized_owned|non_disclosing_fs_error|map_fs_error)\b
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "${RUST_VERSION}" --profile minimal
+      - name: Install pinned cargo-mutants
+        run: cargo +"${RUST_VERSION}" install cargo-mutants --version "${CARGO_MUTANTS_VERSION}" --locked
+      - name: Mutate authorization and filesystem code
+        continue-on-error: true
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: >-
+          cargo +"${RUST_VERSION}" mutants
+          --all-features
+          --shard "${SHARD}/${SHARD_COUNT}"
+          --file src/auth.rs
+          --file src/filesystem.rs
+          --file 'src/filesystem/**'
+          --file src/browse.rs
+          --re "${MUTANT_FILTER}"
+          --output mutants-report
+      - name: Summarize surviving mutants
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          out=mutants-report/mutants.out
+          {
+            echo "### Mutation testing, shard ${SHARD}/${SHARD_COUNT}"
+            for outcome in caught missed timeout unviable; do
+              count=0
+              if [[ -f "${out}/${outcome}.txt" ]]; then
+                count=$(wc -l < "${out}/${outcome}.txt")
+              fi
+              echo "- ${outcome}: ${count}"
+            done
+            if [[ -s "${out}/missed.txt" ]]; then
+              echo
+              echo '```'
+              cat "${out}/missed.txt"
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-report/mutants.out
+          if-no-files-found: warn
+          retention-days: 30

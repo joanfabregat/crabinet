@@ -598,6 +598,10 @@ async fn disconnect(State(state): State<AppState>) -> Result<Response, AppError>
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "unit tests build synthetic fixtures in temporary directories"
+)]
 mod tests {
     use super::*;
     use crate::{auth::AuthService, config::Config};

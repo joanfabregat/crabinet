@@ -94,16 +94,21 @@ jobs:
             exit 1
           fi
           echo "commit=${tag_commit}" >> "${GITHUB_OUTPUT}"
+      # Only GitHub Actions check runs count, so another app cannot satisfy a
+      # required check by reporting a run with the same name.
       - name: Require successful CI on the tagged commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_sha=$(git rev-parse HEAD)
-          required=(Frontend Rust Clippy "Browser E2E" "Dependency policy" Semgrep Trivy)
+          required=(
+            "Workflow lint" Frontend Rust Clippy "Browser E2E" "Dependency policy" Semgrep Trivy
+            "Container image" "Fuzz smoke" "CodeQL (actions)" "CodeQL (javascript-typescript)"
+          )
           checks=$(gh api --paginate \
             -H "Accept: application/vnd.github+json" \
             "repos/${GITHUB_REPOSITORY}/commits/${release_sha}/check-runs?per_page=100" \
-            --jq '.check_runs[] | [.name, .conclusion] | @tsv')
+            --jq '.check_runs[] | select(.app.slug == "github-actions") | [.name, .conclusion] | @tsv')
           for name in "${required[@]}"; do
             if ! awk -F '\t' -v required="${name}" '$1 == required && $2 == "success" { found=1 } END { exit !found }' <<<"${checks}"; then
               echo "Required CI check did not succeed: ${name}" >&2
@@ -126,12 +131,12 @@ jobs:
         env:
           VERIFIED_COMMIT: ${{ needs.verify.outputs.commit }}
         run: test "$(git rev-parse HEAD)" = "${VERIFIED_COMMIT}"
+      # Release builds never restore a cache that another workflow wrote.
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          package-manager-cache: false
       - name: Build tested production assets
         working-directory: web
         run: |
@@ -272,8 +277,13 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        arch: [amd64, arm64]
-    runs-on: ubuntu-26.04
+        include:
+          # Each image runs natively for its smoke test.
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -344,6 +354,32 @@ jobs:
       - name: Enforce image scan
         if: steps.scan.outcome == 'failure'
         run: exit 1
+      - name: Install OCI tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends skopeo
+      - name: Load exact OCI archive for the smoke test
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: >-
+          skopeo copy
+          --override-os linux
+          --override-arch "${ARCH}"
+          "oci-archive:image-output/crabinet-${ARCH}.tar"
+          "docker-daemon:crabinet-smoke:${ARCH}"
+      # Invariant 14: the image packages the binary inside the attested
+      # release archive, byte for byte, and runs hardened.
+      - name: Smoke-test the release image against the release archive binary
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/release-archive"
+          tar -xzf "release/crabinet-${RELEASE_TAG}-linux-${ARCH}.tar.gz" \
+            -C "${RUNNER_TEMP}/release-archive" \
+            "crabinet-linux-${ARCH}/crabinet"
+          .github/scripts/container-smoke.sh \
+            "crabinet-smoke:${ARCH}" \
+            "${RUNNER_TEMP}/release-archive/crabinet-linux-${ARCH}/crabinet"
       - name: Generate image SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
@@ -421,8 +457,10 @@ jobs:
               --override-os linux \
               --override-arch "${arch}" \
               --dest-creds "${GITHUB_ACTOR}:${GH_TOKEN}" \
+              --digestfile "${RUNNER_TEMP}/digest-${arch}" \
               "oci-archive:images/crabinet-${arch}.tar" \
               "docker://${IMAGE}:${RELEASE_TAG}-${arch}"
+            echo "digest-${arch}=$(cat "${RUNNER_TEMP}/digest-${arch}")" >> "${GITHUB_OUTPUT}"
           done
           tags=("${IMAGE}:${RELEASE_TAG}")
           # Floating tags move only for the highest stable release, so
@@ -447,6 +485,50 @@ jobs:
           subject-name: ${{ steps.manifest.outputs.image }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
+      # skopeo copies only the platform image from each OCI archive, so
+      # BuildKit's in-index provenance does not reach the registry. Attest
+      # each architecture digest that a platform-specific pull resolves to.
+      - name: Attest published amd64 image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest-amd64 }}
+          push-to-registry: true
+      - name: Attest published arm64 image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.manifest.outputs.image }}
+          subject-digest: ${{ steps.manifest.outputs.digest-arm64 }}
+          push-to-registry: true
+      - name: Require provenance for the index and every architecture
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.manifest.outputs.image }}
+          INDEX_DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          # The published index must list exactly the digests attested here.
+          raw_index=$(docker buildx imagetools inspect "${IMAGE}@${INDEX_DIGEST}" --raw)
+          digests=("${INDEX_DIGEST}")
+          for arch in amd64 arm64; do
+            digest=$(jq -r --arg arch "${arch}" \
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' \
+              <<<"${raw_index}")
+            expected=$(cat "${RUNNER_TEMP}/digest-${arch}")
+            if [[ "${digest}" != "${expected}" ]]; then
+              echo "Index lists ${arch} as '${digest}', but ${expected} was pushed" >&2
+              exit 1
+            fi
+            digests+=("${digest}")
+          done
+          for digest in "${digests[@]}"; do
+            gh attestation verify "oci://${IMAGE}@${digest}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref "${GITHUB_REF}" \
+              --deny-self-hosted-runners \
+              >/dev/null
+            echo "Verified provenance for ${IMAGE}@${digest}"
+          done
       - name: Assemble checksums
         working-directory: publish
         run: |

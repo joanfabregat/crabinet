@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "integration tests build synthetic fixtures in temporary directories"
+)]
+
 use std::{fs, net::TcpListener, process::Command};
 
 const HASH: &str = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";

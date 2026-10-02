@@ -1282,6 +1282,10 @@ fn map_fs_error(error: FsError) -> AppError {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "unit tests build synthetic fixtures in temporary directories"
+)]
 mod tests {
     use std::fs;
 

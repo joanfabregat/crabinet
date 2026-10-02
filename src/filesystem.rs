@@ -5,6 +5,10 @@
 //! validated components from that already-open directory handle. Symlinks are
 //! never followed: intermediate directories use `open_dir_nofollow`, and final
 //! files use a no-follow open option before their opened handle is inspected.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the capability module is the one place that opens ambient share roots"
+)]
 
 use std::{
     fmt,
