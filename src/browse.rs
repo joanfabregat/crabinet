@@ -73,21 +73,21 @@ const MAX_CONCURRENT_LISTINGS: usize = 16;
 /// Directory and trash scans per authenticated subject.
 const MAX_CONCURRENT_LISTINGS_PER_SUBJECT: usize = 8;
 /// Request-path filesystem work that no dedicated gate already bounds:
-/// metadata lookups, image preview opens, and the pre-commit stat of a move
-/// or delete. Each holds a Tokio blocking-pool thread (512 by default) while
+/// metadata lookups and the pre-commit stat of a move or delete. Each holds a Tokio blocking-pool thread (512 by default) while
 /// a slow disk or network filesystem answers, so this cap keeps such requests
 /// from occupying the pool. Session lookups are deliberately not counted, so
 /// signing in and out stays available while it is saturated.
 const MAX_CONCURRENT_BLOCKING_REQUESTS: usize = 64;
 /// Ungated blocking requests per authenticated subject.
 const MAX_CONCURRENT_BLOCKING_REQUESTS_PER_SUBJECT: usize = 16;
-/// Concurrent streaming downloads across the process. Each holds an open
-/// file descriptor until its response body completes or is dropped.
+/// Concurrent streaming downloads across the process, counting streamed
+/// image previews. Each holds an open file descriptor until its response
+/// body completes or is dropped.
 const MAX_CONCURRENT_DOWNLOADS: usize = 64;
 /// Concurrent streaming downloads per authenticated subject: enough for a few
 /// parallel downloads plus a media player's overlapping range requests, while
 /// one user cannot hold every process slot.
-const MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT: usize = 8;
+pub(crate) const MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT: usize = 8;
 
 /// Runs synchronous filesystem work on Tokio's blocking pool so slow disks
 /// or network filesystems never stall the async worker threads.
@@ -403,7 +403,10 @@ impl BrowseState {
 
     /// Admits one streaming download. The lease must travel with the response
     /// body so the slot is released only when the stream ends or is dropped.
-    fn acquire_download(&self, identity: &AuthenticatedIdentity) -> Result<SubjectLease, AppError> {
+    pub(crate) fn acquire_download(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<SubjectLease, AppError> {
         self.download_gate
             .try_acquire(identity.subject())
             .ok_or(AppError::Busy)
@@ -2688,34 +2691,24 @@ mod tests {
         let (_root, state, app, grant) = gated_fixture();
         let alice = AuthenticatedIdentity::new("alice", vec![grant.clone()]);
         let bob = AuthenticatedIdentity::new("bob", vec![grant]);
-        let uris = [
-            "/api/v1/shares/documents/metadata?path=a.txt",
-            "/api/v1/shares/documents/preview/image?path=a.txt",
-        ];
+        let uris = ["/api/v1/shares/documents/metadata?path=a.txt"];
 
         // Process-wide: every slot held refuses every subject.
         let held = Arc::clone(state.browse().blocking_gate())
             .acquire_many_owned(MAX_CONCURRENT_BLOCKING_REQUESTS as u32)
             .await
             .expect("blocking permits");
-        for uri in uris {
-            let busy = send(
-                &app,
-                Some(&alice),
-                Request::get(uri).body(Body::empty()).unwrap(),
-            )
-            .await;
-            assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS, "{uri}");
-            assert!(busy.headers().contains_key(header::RETRY_AFTER));
-            assert_eq!(json(busy).await["error"]["code"], "busy");
-        }
+        let busy = send(
+            &app,
+            Some(&alice),
+            Request::get(uris[0]).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(busy.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(json(busy).await["error"]["code"], "busy");
         drop(held);
         assert_eq!(get_status(&app, &alice, uris[0]).await, StatusCode::OK);
-        // A text file is not an image, but it is no longer refused as busy.
-        assert_ne!(
-            get_status(&app, &alice, uris[1]).await,
-            StatusCode::TOO_MANY_REQUESTS
-        );
         assert_eq!(
             state.browse().blocking_gate().available_permits(),
             MAX_CONCURRENT_BLOCKING_REQUESTS

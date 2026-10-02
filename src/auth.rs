@@ -498,6 +498,30 @@ impl AuthService {
         }
     }
 
+    /// The limiter source of a sign-in request: the client address resolved
+    /// through the configured trusted proxies, grouped by
+    /// [`rate_limit_source`]. `None` when the transport peer is unknown.
+    fn sign_in_source(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Option<IpAddr> {
+        peer.map(|peer| rate_limit_source(self.inner.trusted_proxies.client_address(peer, headers)))
+    }
+
+    /// Counts one sign-in attempt against its source's per-minute budget.
+    /// Password logins and passkey sign-in starts share this one budget per
+    /// source, so neither can be used to bypass the other's limit.
+    fn allow_sign_in_source(&self, source: Option<IpAddr>) -> Result<(), AppError> {
+        if self
+            .inner
+            .source_rate_limit
+            .lock()
+            .map_err(|_| AppError::Internal)?
+            .allow(source, self.inner.clock.now())
+        {
+            Ok(())
+        } else {
+            Err(AppError::TooManyRequests)
+        }
+    }
+
     async fn login(
         &self,
         username: &str,
@@ -525,15 +549,7 @@ impl AuthService {
         // The per-source cap is counted across all usernames and costs no
         // Argon2 work, so one source cycling usernames is refused here instead
         // of queueing for the shared verifier ahead of everyone else.
-        if !self
-            .inner
-            .source_rate_limit
-            .lock()
-            .map_err(|_| AppError::Internal)?
-            .allow(source, self.inner.clock.now())
-        {
-            return Err(AppError::TooManyRequests);
-        }
+        self.allow_sign_in_source(source)?;
         // The permit is taken before the per-account limiter is consulted, so
         // new (account, source) keys can only be created at the bounded
         // verification rate. It is moved into the blocking task below:
@@ -1411,8 +1427,7 @@ async fn login(
     validate_same_origin(&headers)?;
     let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
-    let source = peer
-        .map(|peer| rate_limit_source(auth.inner.trusted_proxies.client_address(peer, &headers)));
+    let source = auth.sign_in_source(peer, &headers);
     let session = auth
         .login(
             &payload.username,
@@ -3456,6 +3471,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A passkey sign-in start relayed by the trusted proxy at 192.0.2.10.
+    fn proxied_passkey_start(client: &str) -> Request<Body> {
+        let mut request = post("/api/v1/auth/passkeys/login/start", "{}");
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&format!("203.0.113.250, {client}")).unwrap(),
+        );
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 10], 4711))));
+        request
+    }
+
+    async fn flow_id(response: Response) -> String {
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        value["flowId"].as_str().expect("flow ID").to_owned()
+    }
+
+    #[tokio::test]
+    async fn passkey_sign_in_starts_share_the_per_source_budget() {
+        let mut auth = test_auth_with_source_limit(1, 5, 3);
+        trust_test_proxy(&mut auth);
+        Arc::get_mut(&mut auth.service.inner)
+            .expect("unshared test service")
+            .passkeys = Some(
+            passkeys::PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap())
+                .unwrap(),
+        );
+        let app = app_router(AppState::with_auth(true, auth.service.clone()));
+
+        // A genuine user behind the proxy starts a ceremony.
+        let genuine = app
+            .clone()
+            .oneshot(proxied_passkey_start("203.0.113.9"))
+            .await
+            .unwrap();
+        assert_eq!(genuine.status(), StatusCode::OK);
+        let genuine = flow_id(genuine).await;
+
+        // Another client spends its budget, then is refused without storing
+        // further ceremonies.
+        for _ in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(proxied_passkey_start("198.51.100.7"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        for _ in 0..50 {
+            let response = app
+                .clone()
+                .oneshot(proxied_passkey_start("198.51.100.7"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(error_code(response).await, "rate_limited");
+        }
+        let passkeys = auth.service.inner.passkeys.as_ref().expect("passkeys");
+        let pending = passkeys.pending_logins();
+        assert_eq!(pending.len(), 4);
+        assert!(pending.contains(&genuine));
+
+        // The budget is shared with password sign-in from the same source.
+        let response = app
+            .clone()
+            .oneshot(proxied_login("Alice", ALICE_PASSWORD, "198.51.100.7"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different client behind the same trusted proxy is unaffected.
+        let other = app
+            .clone()
+            .oneshot(proxied_passkey_start("203.0.113.20"))
+            .await
+            .unwrap();
+        assert_eq!(other.status(), StatusCode::OK);
     }
 
     #[test]

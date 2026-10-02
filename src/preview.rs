@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
@@ -326,18 +327,23 @@ async fn preview_image(
     let path = VirtualPath::parse(raw_path).map_err(|error| PreviewError::from(error.code()))?;
     let authorized = state.browse().authorize_owned(&identity, &share_id)?;
     let max_bytes = state.preview_policy().max_bytes();
-    // The lease bounds the blocking open and signature check; it moves into
-    // the closure so a cancelled request cannot release it early.
-    let lease = state.browse().acquire_blocking(&identity)?;
-    let (file, image, size) = run_blocking(move || {
-        let _lease = lease;
-        open_image(&authorized.view(), &path, max_bytes)
-    })
-    .await??;
+    // A streamed image holds an open file like a download, so it takes a
+    // download slot before the file is opened. The lease travels with the
+    // blocking open, so a cancelled request cannot release it early, and then
+    // with the body stream, so the slot is released only when the stream ends
+    // or is dropped.
+    let lease = state.browse().acquire_download(&identity)?;
+    let (opened, lease) =
+        run_blocking(move || (open_image(&authorized.view(), &path, max_bytes), lease)).await?;
+    let (file, image, size) = opened?;
     let stream = ReaderStream::with_capacity(
         tokio::fs::File::from_std(file).take(size),
         IMAGE_STREAM_CHUNK_BYTES,
-    );
+    )
+    .map(move |chunk| {
+        let _lease = &lease;
+        chunk
+    });
     Ok(image_response(
         Body::from_stream(stream),
         image.mime_type,
@@ -956,6 +962,73 @@ mod tests {
         assert!(csp.contains("navigate-to 'none'"));
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), hostile.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn unread_image_bodies_hold_a_download_slot_until_released() {
+        use crate::browse::MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT;
+
+        let fixture = api_fixture(4096);
+        let image = |identity: &AuthenticatedIdentity| {
+            let identity = identity.clone();
+            let app = fixture.app.clone();
+            async move {
+                send(
+                    &app,
+                    Some(&identity),
+                    Request::get("/api/v1/shares/documents/preview/image?path=pixel.png")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+            }
+        };
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT {
+            let response = image(&fixture.identity).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        // The handler has returned for every held response; only the unread
+        // bodies keep the slots, which downloads share.
+        let busy = image(&fixture.identity).await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response_json(busy).await["error"]["code"], "busy");
+        let download = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/download?path=pixel.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(download.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Another subject is not affected by this subject's limit.
+        let other = AuthenticatedIdentity::new(
+            "user-2",
+            vec![ShareGrant {
+                share_id: ShareId::new("documents").unwrap(),
+                access: AccessLevel::ReadOnly,
+            }],
+        );
+        assert_eq!(image(&other).await.status(), StatusCode::OK);
+
+        // Dropping an unread body releases its slot.
+        drop(held.pop());
+        let response = image(&fixture.identity).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            image(&fixture.identity).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Reading a body to completion releases its slot too.
+        assert_eq!(
+            to_bytes(response.into_body(), 4096).await.unwrap().len(),
+            24
+        );
+        assert_eq!(image(&fixture.identity).await.status(), StatusCode::OK);
+        drop(held);
     }
 
     #[tokio::test]
