@@ -261,7 +261,9 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
 }) => {
   const externalRequests: string[] = [];
   context.on("response", (response) => {
-    if (response.url().startsWith("https://attacker.invalid")) {
+    // Parse instead of matching a prefix, so the check is on the exact host
+    // and covers every scheme and port the hostile fixtures could reach.
+    if (new URL(response.url()).hostname === "attacker.invalid") {
       externalRequests.push(response.url());
     }
   });
