@@ -1101,6 +1101,21 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
     Ok(recoverable.len())
 }
 
+/// Adds the bytes beneath `directory` to `bytes` for quota accounting.
+///
+/// Unlike listing, the scan must not fail on entries Crabinet cannot serve, or
+/// a single pre-existing symlink or special file would block every write to
+/// the share. Such entries are never followed or opened:
+///
+/// - Directories are descended only through a no-follow handle.
+/// - Regular files count their size, including hard-linked files, whose bytes
+///   are charged conservatively even if they are also stored elsewhere.
+/// - Symlinks, FIFOs, sockets, and devices count zero bytes.
+/// - Non-UTF-8 names are classified like any other entry; their raw name is
+///   only passed back to the no-follow directory open.
+///
+/// Every visited entry, counted or not, consumes the entry budget so the
+/// traversal stays bounded.
 fn measure_directory(
     directory: &Dir,
     entries: &mut usize,
@@ -1120,28 +1135,22 @@ fn measure_directory(
             return Err(FsError::new(FsErrorCode::TooLarge));
         }
         let entry = entry.map_err(map_io)?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| FsError::new(FsErrorCode::UnsupportedEntry))?;
-        if is_own_internal_name(&name) {
+        let name = entry.file_name();
+        // Internal names are ASCII, so a non-UTF-8 name is never one of them.
+        if name.to_str().is_some_and(is_own_internal_name) {
             continue;
         }
+        // Directory entry metadata does not follow symlinks.
         let metadata = entry.metadata().map_err(map_io)?;
-        let kind = classify_metadata(&metadata)?;
-        assert_no_external_alias(&metadata, kind)?;
-        match kind {
-            EntryKind::Directory => {
-                let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
-                measure_directory(&child, entries, max_entries, bytes, max_bytes, depth + 1)?;
-            }
-            EntryKind::File => {
-                *bytes = bytes
-                    .checked_add(metadata.len())
-                    .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-                if *bytes > max_bytes {
-                    return Err(FsError::new(FsErrorCode::TooLarge));
-                }
+        if metadata.is_dir() {
+            let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
+            measure_directory(&child, entries, max_entries, bytes, max_bytes, depth + 1)?;
+        } else if metadata.is_file() {
+            *bytes = bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
+            if *bytes > max_bytes {
+                return Err(FsError::new(FsErrorCode::TooLarge));
             }
         }
     }
@@ -1860,6 +1869,61 @@ mod tests {
                 .code(),
             FsErrorCode::TooLarge
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn usage_skips_unsupported_entries_without_following_them() {
+        use std::{
+            ffi::OsStr,
+            os::unix::{ffi::OsStrExt as _, fs::symlink, net::UnixListener},
+        };
+
+        let (temporary, share, _read, write) = fixture();
+        let root = temporary.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("large"), vec![0_u8; 4096]).expect("large outside file");
+        fs::write(outside.path().join("aliased"), b"0123456789").expect("aliased outside file");
+        symlink(outside.path().join("large"), root.join("file-link")).expect("file symlink");
+        symlink(outside.path(), root.join("directory-link")).expect("directory symlink");
+        fs::hard_link(outside.path().join("aliased"), root.join("alias")).expect("hard link");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            root.join("fifo").as_path(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("fifo");
+        let _socket = UnixListener::bind(root.join("socket")).expect("socket");
+        let raw_directory = root.join(OsStr::from_bytes(b"raw-\xff"));
+        fs::create_dir(&raw_directory).expect("non-UTF-8 directory");
+        fs::write(raw_directory.join("inner"), b"ab").expect("file in non-UTF-8 directory");
+        fs::write(root.join(OsStr::from_bytes(b"raw-\xfe")), b"abc").expect("non-UTF-8 file");
+
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        // 11 fixture bytes, the 10-byte hard link counted conservatively, and
+        // 5 bytes under non-UTF-8 names. Links and special files count zero,
+        // and the 4096-byte symlink target is never reached.
+        assert_eq!(authorized.usage_bounded(64, 1 << 20).expect("usage"), 26);
+        // Skipped entries still consume the entry budget: eleven share entries
+        // plus the private internal directory.
+        assert_eq!(authorized.usage_bounded(12, 1 << 20).expect("usage"), 26);
+        assert_eq!(
+            authorized
+                .usage_bounded(11, 1 << 20)
+                .expect_err("entry limit")
+                .code(),
+            FsErrorCode::TooLarge
+        );
+        let listing = authorized
+            .list(&VirtualPath::root())
+            .expect("listing still omits unsupported entries");
+        let mut names: Vec<_> = listing.iter().map(|entry| entry.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["hello.txt", "nested"]);
     }
 
     #[test]
