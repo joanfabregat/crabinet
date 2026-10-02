@@ -5,6 +5,7 @@ import {
   directoryUrl,
   parentPath,
   previewRouteUrl,
+  renderedHtmlViewUrl,
   routeFromUrl,
   trashUrl,
 } from "./navigation";
@@ -102,6 +103,27 @@ describe("browser navigation", () => {
       shareId: "docs",
       path: "projects/README.md",
       previewMode: "full",
+    });
+  });
+
+  it("addresses the full-window rendered HTML viewer by the file path", () => {
+    const href = renderedHtmlViewUrl("my docs", "site/index page.html");
+    expect(href).toBe("/my%20docs/site/index%20page.html?view=rendered");
+    expect(href).not.toContain("/api/");
+    expect(at(href)).toEqual({
+      shareId: "my docs",
+      path: "site/index page.html",
+      view: "rendered",
+    });
+  });
+
+  it("opens the share instead of a rendered viewer without a valid file", () => {
+    expect(renderedHtmlViewUrl("docs", "")).toBe("/docs");
+    expect(renderedHtmlViewUrl("docs", "../secret.html")).toBe("/docs");
+    expect(at("/docs?view=rendered")).toEqual({ shareId: "docs", path: "" });
+    expect(at("/docs/a%2Fb.html?view=rendered")).toEqual({
+      shareId: "docs",
+      path: "",
     });
   });
 

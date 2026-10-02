@@ -29,6 +29,9 @@ cp -R "$script_dir/fixtures/read-only" "$state_dir/read-only"
 mv \
   "$state_dir/read-only/hostile-html.fixture" \
   "$state_dir/read-only/hostile.html"
+mv \
+  "$state_dir/read-only/navigation-html.fixture" \
+  "$state_dir/read-only/navigation.html"
 cp -R "$script_dir/fixtures/writable" "$state_dir/writable"
 printf '%s' 'crabinet-e2e-only-session-secret-000000000000000000000000' >"$state_dir/session.key"
 chmod 600 "$state_dir/session.key"

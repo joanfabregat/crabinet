@@ -314,12 +314,19 @@ describe("secure file previews", () => {
     const renderedNewTab = within(panel).getByRole("link", {
       name: "Open rendered HTML in new tab",
     });
+    // The new tab opens Crabinet's own viewer, never the rendered endpoint
+    // as a top-level document that could navigate itself.
     expect(renderedNewTab).toHaveAttribute(
       "href",
-      "/api/v1/shares/docs/preview/html/rendered?path=demo.html&v=0-0",
+      "/docs/demo.html?view=rendered",
     );
     expect(renderedNewTab).toHaveAttribute("target", "_blank");
     expect(renderedNewTab).toHaveAttribute("rel", "noopener noreferrer");
+    expect(
+      Array.from(document.querySelectorAll("a[href]")).filter((link) =>
+        link.getAttribute("href")?.includes("/preview/html/rendered"),
+      ),
+    ).toEqual([]);
     fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
     expect(frame).toHaveAttribute(
       "src",
@@ -342,6 +349,115 @@ describe("secure file previews", () => {
     expect(
       within(panel).getByRole("link", { name: "Download demo.html" }),
     ).not.toHaveAttribute("title");
+  });
+
+  it("shows rendered HTML full-window only inside the empty-sandbox iframe", async () => {
+    const preview = vi.fn(async () =>
+      previewDocument('<a href="https://example.com/">away</a>', {
+        kind: "html_source",
+        language: "html",
+      }),
+    );
+    const directory = vi.fn(async () => files);
+    const api = fakeApi({ preview, directory });
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "site/demo.html",
+      view: "rendered",
+    });
+
+    render(<App api={api} navigation={navigation} />);
+
+    const title = await screen.findByRole("heading", {
+      name: "demo.html",
+      level: 1,
+    });
+    await waitFor(() => expect(title).toHaveFocus());
+    expect(screen.getByText("in site")).toBeInTheDocument();
+    const frame = await screen.findByTitle(
+      "Sandboxed HTML preview for demo.html",
+    );
+    expect(frame.tagName).toBe("IFRAME");
+    expect(frame).toHaveAttribute("sandbox", "");
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(frame).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/html/rendered?path=site%2Fdemo.html",
+    );
+    expect(preview).toHaveBeenCalledWith(
+      "docs",
+      "site/demo.html",
+      expect.any(AbortSignal),
+    );
+    // The viewer is not the file browser: no listing, tree, or file actions.
+    expect(directory).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
+    expect(
+      Array.from(document.querySelectorAll("a[href]")).filter((link) =>
+        link.getAttribute("href")?.startsWith("/api/"),
+      ),
+    ).toEqual([]);
+
+    const back = screen.getByRole("link", { name: "Back to folder" });
+    expect(back).toHaveAttribute("href", "/docs/site/demo.html");
+    expect(back).not.toHaveAttribute("target");
+    fireEvent.click(back);
+    expect(navigation.visits.at(-1)).toEqual({
+      shareId: "docs",
+      path: "site",
+      previewPath: "site/demo.html",
+    });
+    expect(
+      await screen.findByRole("complementary", { name: "demo.html" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not frame a file that is not HTML in the rendered viewer", async () => {
+    const api = fakeApi({
+      preview: vi.fn(async () => previewDocument("plain text")),
+    });
+    render(
+      <App
+        api={api}
+        navigation={
+          new MemoryNavigation({
+            shareId: "docs",
+            path: "notes.txt",
+            view: "rendered",
+          })
+        }
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This file is not HTML",
+    );
+    expect(document.querySelector("iframe")).toBeNull();
+  });
+
+  it("returns to sign-in when the rendered viewer's session has expired", async () => {
+    const api = fakeApi({
+      preview: vi.fn(async () => {
+        throw new ApiError("unauthorized", "expired", { status: 401 });
+      }),
+    });
+    render(
+      <App
+        api={api}
+        navigation={
+          new MemoryNavigation({
+            shareId: "docs",
+            path: "demo.html",
+            view: "rendered",
+          })
+        }
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Sign in to Crabinet" }),
+    ).toBeInTheDocument();
+    expect(document.querySelector("iframe")).toBeNull();
   });
 
   it("preserves deep links and restores focus to the opening file on close", async () => {

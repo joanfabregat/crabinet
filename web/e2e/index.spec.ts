@@ -333,10 +333,29 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
     page.waitForEvent("popup"),
     page.getByRole("link", { name: "Open rendered HTML in new tab" }).click(),
   ]);
-  await renderedPage.waitForLoadState("domcontentloaded");
-  await expect(renderedPage.locator("body")).toContainText("Sign out");
+  // The new tab is Crabinet's own viewer, framing the same sandboxed page.
+  await expect(renderedPage).toHaveURL(
+    /\/read-only\/hostile\.html\?view=rendered$/,
+  );
+  await expect(
+    renderedPage.getByRole("heading", { name: "hostile.html", level: 1 }),
+  ).toBeVisible();
+  const viewerFrame = renderedPage.getByTitle(
+    "Sandboxed HTML preview for hostile.html",
+  );
+  await expect(viewerFrame).toHaveAttribute("sandbox", "");
+  await expect(viewerFrame).toHaveAttribute(
+    "src",
+    "/api/v1/shares/read-only/preview/html/rendered?path=hostile.html",
+  );
+  await expect(viewerFrame.contentFrame().locator("body")).toContainText(
+    "Sign out",
+  );
+  const hostileFrame = renderedPage.frame({
+    url: /\/preview\/html\/rendered\?path=hostile\.html$/,
+  });
   expect(
-    await renderedPage.evaluate(() =>
+    await hostileFrame?.evaluate(() =>
       Boolean(
         (window as Window & { __indexHostileHtml?: boolean })
           .__indexHostileHtml,
@@ -344,9 +363,19 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
     ),
   ).toBe(false);
   expect(await renderedPage.evaluate(() => window.opener)).toBeNull();
-  expect(renderedPage.url()).toContain(
+  expect(
+    await renderedPage.evaluate(() => localStorage.getItem("hostile")),
+  ).toBeNull();
+  expect(externalRequests).toEqual([]);
+
+  // The rendered endpoint itself refuses to become a top-level document.
+  const direct = await renderedPage.goto(
     "/api/v1/shares/read-only/preview/html/rendered?path=hostile.html",
   );
+  expect(direct?.status()).toBe(403);
+  expect(direct?.headers()["content-type"]).toBe("text/plain; charset=utf-8");
+  await expect(renderedPage.locator("body")).toContainText("sandboxed viewer");
+  expect(await renderedPage.locator("script, form, img, svg").count()).toBe(0);
   expect(externalRequests).toEqual([]);
   await renderedPage.close();
 
@@ -389,6 +418,66 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   expect(context.pages()).toHaveLength(2);
   expect(externalRequests).toEqual([]);
   expect(dialogs).toBe(0);
+});
+
+test("rendered HTML in a new tab cannot navigate that tab away", async ({
+  context,
+  page,
+}) => {
+  // Nothing may reach the external origin: record any attempt and fail it.
+  const externalRequests: string[] = [];
+  await context.route("https://example.com/**", async (route) => {
+    externalRequests.push(route.request().url());
+    await route.abort("blockedbyclient");
+  });
+
+  await openSignedIn(page, "/read-only/navigation.html");
+  await expect(
+    page.getByRole("heading", { name: "navigation.html", level: 2 }),
+  ).toBeVisible();
+  const [viewer] = await Promise.all([
+    page.waitForEvent("popup"),
+    page.getByRole("link", { name: "Open rendered HTML in new tab" }).click(),
+  ]);
+  const appOrigin = new URL(page.url()).origin;
+  const viewerUrl = `${appOrigin}/read-only/navigation.html?view=rendered`;
+  await expect(viewer).toHaveURL(viewerUrl);
+  expect(await viewer.evaluate(() => window.opener)).toBeNull();
+
+  const frame = viewer.getByTitle("Sandboxed HTML preview for navigation.html");
+  await expect(frame).toHaveAttribute("sandbox", "");
+  const content = frame.contentFrame();
+  await expect(
+    content.getByRole("heading", { name: "Leaving Crabinet" }),
+  ).toBeVisible();
+
+  // A target=_top link is refused by the iframe sandbox and leaves the page
+  // in place; a plain link may only try to move the frame, which the
+  // application CSP refuses, so it goes last.
+  await content.getByRole("link", { name: "Continue in this tab" }).click();
+  expect(viewer.url()).toBe(viewerUrl);
+  await content
+    .getByRole("link", { name: "Continue to the external site" })
+    .click();
+  expect(viewer.url()).toBe(viewerUrl);
+  // The page also asks for a refresh to the external origin after two
+  // seconds; wait past it.
+  await viewer.waitForTimeout(3_000);
+
+  expect(viewer.url()).toBe(viewerUrl);
+  expect(await viewer.evaluate(() => window.location.href)).toBe(viewerUrl);
+  await expect(
+    viewer.getByRole("heading", { name: "navigation.html", level: 1 }),
+  ).toBeVisible();
+  expect(externalRequests).toEqual([]);
+
+  // Back returns to the file in its folder.
+  await viewer.getByRole("link", { name: "Back to folder" }).click();
+  await expect(viewer).toHaveURL(`${appOrigin}/read-only/navigation.html`);
+  await expect(
+    viewer.getByRole("heading", { name: "navigation.html", level: 2 }),
+  ).toBeVisible();
+  expect(externalRequests).toEqual([]);
 });
 
 test("keyboard navigation, responsive layout, and primary views pass axe", async ({

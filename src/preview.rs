@@ -274,10 +274,45 @@ async fn preview_html_rendered(
     identity: AuthenticatedIdentity,
     Path(raw_share_id): Path<String>,
     Query(query): Query<PreviewQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, PreviewRequestError> {
+    if !rendered_destination_allowed(&headers) {
+        return Ok(frame_only_response());
+    }
     let (document, _permit) =
         request_document(&state, &identity, &raw_share_id, query.path.as_deref()).await?;
     html_rendered_response(document).map_err(Into::into)
+}
+
+/// Rendered HTML is served only to frames.
+///
+/// A CSP sandbox blocks scripts, forms, and popups but not a top-level
+/// document's own navigation, so a page opened directly in a tab could send
+/// the reader elsewhere with a link or a meta refresh. Inside the UI's
+/// empty-sandbox iframe it cannot. Browsers that report the request
+/// destination therefore receive the document only for an `iframe`; clients
+/// that omit `Sec-Fetch-Dest` keep the previous behavior under the same CSP.
+fn rendered_destination_allowed(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-dest")
+        .is_none_or(|destination| destination.as_bytes() == b"iframe")
+}
+
+/// The inert notice returned instead of rendered HTML outside a frame. It is
+/// decided before authorization, so it discloses nothing about the file.
+fn frame_only_response() -> Response {
+    let mut response = (
+        StatusCode::FORBIDDEN,
+        "Rendered HTML previews open only inside Crabinet's sandboxed viewer.\n",
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    apply_security_headers(headers);
+    response
 }
 
 async fn preview_image(
@@ -451,10 +486,11 @@ pub fn html_source_response(document: PreviewDocument) -> Result<Response, Previ
     Ok(response)
 }
 
-/// Returns uploaded HTML as a sandboxed document for either the UI's
-/// doubly-sandboxed iframe or a top-level preview tab. The response CSP forbids
-/// scripts, forms, navigation, same-origin access, network requests, plugins,
-/// and storage capabilities in both contexts.
+/// Returns uploaded HTML as a sandboxed document for the UI's doubly-sandboxed
+/// iframe. The response CSP forbids scripts, forms, same-origin access, network
+/// requests, plugins, and storage capabilities wherever the document loads; the
+/// route also refuses top-level loads from browsers that report one, because
+/// only the iframe sandbox stops the document navigating its own tab.
 pub fn html_rendered_response(document: PreviewDocument) -> Result<Response, PreviewError> {
     if document.kind != PreviewKind::HtmlSource {
         return Err(PreviewError::UnsupportedEntry);
@@ -1102,6 +1138,74 @@ mod tests {
             bytes.as_ref(),
             b"<script>fetch('https://attacker.invalid/')</script><form action=/api/v1/auth/logout>"
         );
+    }
+
+    #[tokio::test]
+    async fn rendered_route_serves_html_only_to_frames() {
+        let fixture = api_fixture(4096);
+        let uri = "/api/v1/shares/documents/preview/html/rendered?path=hostile.html";
+        let request = |destination: Option<&str>| {
+            let mut request = Request::get(uri);
+            if let Some(destination) = destination {
+                request = request.header("sec-fetch-dest", destination);
+            }
+            request.body(Body::empty()).unwrap()
+        };
+
+        // The UI's iframe, and clients that do not report a destination.
+        for destination in [Some("iframe"), None] {
+            let response = send(&fixture.app, Some(&fixture.identity), request(destination)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{destination:?}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "text/html; charset=utf-8"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .unwrap(),
+                PREVIEW_CSP
+            );
+        }
+
+        // A top-level tab, a script fetch, or any other embedding gets an
+        // inert notice instead of the uploaded document.
+        for destination in ["document", "empty", "frame", "object", "embed"] {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                request(Some(destination)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{destination}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "text/plain; charset=utf-8"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .unwrap(),
+                PREVIEW_CSP
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::X_CONTENT_TYPE_OPTIONS)
+                    .unwrap(),
+                "nosniff"
+            );
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            assert!(body.contains("sandboxed viewer"), "{body}");
+            assert!(!body.contains("<script"), "{body}");
+        }
+
+        // The destination check never stands in for authentication.
+        let unauthenticated = send(&fixture.app, None, request(Some("document"))).await;
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
