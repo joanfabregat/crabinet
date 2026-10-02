@@ -14,5 +14,6 @@ pub mod mutations;
 pub mod oidc;
 pub mod password;
 pub mod preview;
+pub mod server;
 
 pub const APP_NAME: &str = "crabinet";

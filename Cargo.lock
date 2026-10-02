@@ -462,6 +462,8 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hmac",
+ "hyper",
+ "hyper-util",
  "jsonwebtoken",
  "mime_guess",
  "openssl",

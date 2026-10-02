@@ -138,6 +138,14 @@ struct RawServerConfig {
     #[serde(default = "default_trash_retention_days")]
     #[schemars(range(min = 1, max = 3650))]
     trash_retention_days: u16,
+    /// Maximum simultaneously open client connections; new connections above it are closed.
+    #[serde(default = "default_max_connections")]
+    #[schemars(range(min = 1, max = 65_535))]
+    max_connections: usize,
+    /// Seconds to send a complete request head, also bounding keep-alive idle time.
+    #[serde(default = "default_header_read_timeout_seconds")]
+    #[schemars(range(min = 5, max = 3_600))]
+    header_read_timeout_seconds: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -265,6 +273,8 @@ pub struct ServerConfig {
     max_sessions_per_user: usize,
     max_sessions_total: usize,
     trash_retention_days: u16,
+    max_connections: usize,
+    header_read_timeout_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -377,6 +387,16 @@ impl Config {
         if !(1..=3650).contains(&raw.server.trash_retention_days) {
             return Err(ConfigError::Validation(
                 "server.trash_retention_days must be between 1 and 3650".into(),
+            ));
+        }
+        if !(1..=65_535).contains(&raw.server.max_connections) {
+            return Err(ConfigError::Validation(
+                "server.max_connections must be between 1 and 65535".into(),
+            ));
+        }
+        if !(5..=3_600).contains(&raw.server.header_read_timeout_seconds) {
+            return Err(ConfigError::Validation(
+                "server.header_read_timeout_seconds must be between 5 and 3600".into(),
             ));
         }
 
@@ -590,6 +610,8 @@ impl Config {
                 max_sessions_per_user: raw.server.max_sessions_per_user,
                 max_sessions_total: raw.server.max_sessions_total,
                 trash_retention_days: raw.server.trash_retention_days,
+                max_connections: raw.server.max_connections,
+                header_read_timeout_seconds: raw.server.header_read_timeout_seconds,
             },
             users,
             shares,
@@ -673,6 +695,14 @@ impl ServerConfig {
 
     pub fn trash_retention_days(&self) -> u16 {
         self.trash_retention_days
+    }
+
+    pub fn max_connections(&self) -> usize {
+        self.max_connections
+    }
+
+    pub fn header_read_timeout_seconds(&self) -> u64 {
+        self.header_read_timeout_seconds
     }
 }
 
@@ -761,6 +791,14 @@ const fn default_max_sessions_total() -> usize {
 
 const fn default_trash_retention_days() -> u16 {
     30
+}
+
+const fn default_max_connections() -> usize {
+    1_024
+}
+
+const fn default_header_read_timeout_seconds() -> u64 {
+    300
 }
 
 impl Share {
@@ -1205,6 +1243,8 @@ permission = "write"
         assert_eq!(config.server().max_sessions_per_user(), 16);
         assert_eq!(config.server().max_sessions_total(), 4_096);
         assert_eq!(config.server().trash_retention_days(), 30);
+        assert_eq!(config.server().max_connections(), 1_024);
+        assert_eq!(config.server().header_read_timeout_seconds(), 300);
         assert!(!config.users()[0].disabled());
         assert_eq!(config.shares()[0].id(), "files");
         assert_eq!(config.shares()[0].name(), "Files");
@@ -1230,6 +1270,50 @@ permission = "write"
         );
         let invalid = text.replace("trash_retention_days = 45", "trash_retention_days = 0");
         assert!(tree.load(&invalid).is_err());
+    }
+
+    #[test]
+    fn connection_limit_is_configurable_and_bounded() {
+        let tree = TestTree::new();
+        let text = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\nmax_connections = 64",
+        );
+        assert_eq!(tree.load(&text).unwrap().server().max_connections(), 64);
+        for invalid in ["max_connections = 0", "max_connections = 65536"] {
+            let invalid = text.replace("max_connections = 64", invalid);
+            assert!(tree.load(&invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn header_read_timeout_is_configurable_and_bounded() {
+        let tree = TestTree::new();
+        let text = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\nheader_read_timeout_seconds = 30",
+        );
+        assert_eq!(
+            tree.load(&text)
+                .unwrap()
+                .server()
+                .header_read_timeout_seconds(),
+            30
+        );
+        for valid in [5, 3_600] {
+            let valid = text.replace(
+                "header_read_timeout_seconds = 30",
+                &format!("header_read_timeout_seconds = {valid}"),
+            );
+            assert!(tree.load(&valid).is_ok(), "{valid}");
+        }
+        for invalid in [0, 4, 3_601] {
+            let invalid = text.replace(
+                "header_read_timeout_seconds = 30",
+                &format!("header_read_timeout_seconds = {invalid}"),
+            );
+            assert!(tree.load(&invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
