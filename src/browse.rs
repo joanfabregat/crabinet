@@ -226,6 +226,17 @@ pub(crate) struct SubjectGate {
     per_subject: usize,
 }
 
+/// Names the gates of [`BrowseState`] for tests that hold them directly.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowseGate {
+    Events,
+    Downloads,
+    BufferedReads,
+    Listings,
+    Blocking,
+}
+
 pub(crate) struct SubjectLease {
     _process: OwnedSemaphorePermit,
     subject: Arc<str>,
@@ -436,6 +447,18 @@ impl BrowseState {
     #[cfg(test)]
     pub(crate) fn blocking_gate(&self) -> &Arc<Semaphore> {
         self.blocking_gate.process_semaphore()
+    }
+
+    /// Each gate this state owns, for the route-level resource registry.
+    #[cfg(test)]
+    pub(crate) fn subject_gate(&self, gate: BrowseGate) -> &SubjectGate {
+        match gate {
+            BrowseGate::Events => &self.event_gate,
+            BrowseGate::Downloads => &self.download_gate,
+            BrowseGate::BufferedReads => &self.buffered_read_gate,
+            BrowseGate::Listings => &self.listing_gate,
+            BrowseGate::Blocking => &self.blocking_gate,
+        }
     }
 
     pub fn authorize<'state>(

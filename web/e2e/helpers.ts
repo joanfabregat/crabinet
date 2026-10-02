@@ -80,14 +80,22 @@ export async function chooseFiles(input: Locator, files: BrowserFile[]) {
   );
 }
 
-/** The folder tree, opening its drawer first on screens too narrow for it. */
+/**
+ * The folder tree, opening its drawer first on screens too narrow for it.
+ *
+ * Callers reach the tree after a navigation, and every navigation closes the
+ * drawer, but only in an effect after the new route renders: the URL can
+ * already match while the previous page's drawer is still open. Reading
+ * `aria-expanded` at that moment would skip the click and leave the tree to
+ * close underneath the caller, so wait for the drawer to settle closed, then
+ * open it.
+ */
 export async function openFolders(page: Page): Promise<Locator> {
   const toggle = page.getByRole("button", { name: "Folders" });
-  if (
-    (await toggle.isVisible()) &&
-    (await toggle.getAttribute("aria-expanded")) !== "true"
-  ) {
+  if (await toggle.isVisible()) {
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
   }
   const tree = page.getByLabel("Shared folders", { exact: true });
   await expect(tree).toBeVisible();

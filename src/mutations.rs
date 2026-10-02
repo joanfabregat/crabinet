@@ -161,6 +161,14 @@ struct Quota {
     scan_entries: usize,
 }
 
+/// Names the gates of [`MutationState`] for tests that hold them directly.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MutationGate {
+    Uploads,
+    TextSaves,
+}
+
 impl MutationState {
     pub fn new(limits: MutationLimits) -> Result<Self, MutationStateError> {
         if limits.max_request_bytes == 0
@@ -258,6 +266,15 @@ impl MutationState {
         self.trash_empty_batch_entries = entries;
         self.trash_empty_budget = budget;
         self
+    }
+
+    /// Each gate this state owns, for the route-level resource registry.
+    #[cfg(test)]
+    pub(crate) fn subject_gate(&self, gate: MutationGate) -> &SubjectGate {
+        match gate {
+            MutationGate::Uploads => &self.upload_gate,
+            MutationGate::TextSaves => &self.text_save_gate,
+        }
     }
 
     pub async fn commit_lock(&self, share_id: &ShareId) -> OwnedMutexGuard<()> {

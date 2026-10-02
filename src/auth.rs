@@ -4230,4 +4230,282 @@ mod tests {
             );
         }
     }
+
+    /// The headers a same-origin browser request carries.
+    fn same_origin(mut request: Request<Body>) -> Request<Body> {
+        let headers = request.headers_mut();
+        headers.insert(header::HOST, HeaderValue::from_static("files.example.test"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://files.example.test"),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        request
+    }
+
+    /// Every path below `root` with its file contents, sorted.
+    fn share_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).expect("share directory") {
+                let entry = entry.expect("share entry");
+                let path = entry.path();
+                let relative = path.strip_prefix(root).expect("below root").to_path_buf();
+                if entry.file_type().expect("entry type").is_dir() {
+                    found.push((relative, None));
+                    pending.push(path);
+                } else {
+                    found.push((relative, Some(fs::read(&path).expect("share file"))));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Route enumeration over the assembled router with real sessions and
+    /// CSRF middleware. Every route in the authoritative inventory, which
+    /// `app::tests` keeps equal to the router source, is checked against its
+    /// classification: a protected route refuses a request without a
+    /// session, a share route answers an ungranted share exactly like a
+    /// missing one, and a state change refuses a missing CSRF token and
+    /// cross-origin or cross-site requests.
+    #[tokio::test]
+    async fn every_route_enforces_its_session_share_and_state_change_boundary() {
+        use crate::app::tests::{Access, Proof, ROUTES, sample_request};
+
+        let mut test = test_auth(1, 1_000);
+        Arc::get_mut(&mut test.service.inner).unwrap().passkeys = Some(
+            passkeys::PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap())
+                .unwrap(),
+        );
+        let documents = TempDir::new().expect("documents root");
+        let private = TempDir::new().expect("private root");
+        fs::write(documents.path().join("a.txt"), b"alice").expect("Alice fixture");
+        fs::write(private.path().join("a.txt"), b"bob").expect("Bob fixture");
+        let app = protected_app(test.service.clone(), documents.path(), private.path());
+        let (cookie, csrf) = login_as(&app, "Alice", ALICE_PASSWORD).await;
+        let documents_before = share_snapshot(documents.path());
+        let private_before = share_snapshot(private.path());
+        let status = |request: Request<Body>| {
+            let app = app.clone();
+            async move {
+                app.oneshot(request)
+                    .await
+                    .expect("router response")
+                    .status()
+            }
+        };
+
+        for route in ROUTES {
+            let label = format!("{} {}", route.method, route.path);
+            if route.access != Access::Public {
+                let anonymous = same_origin(sample_request(route, "documents"));
+                assert_eq!(
+                    status(anonymous).await,
+                    StatusCode::UNAUTHORIZED,
+                    "{label} without a session"
+                );
+            }
+
+            if route.access == Access::Share {
+                // Alice holds no grant for Bob's share, and no share is
+                // called `missing`; the answers must not tell them apart.
+                let mut answers = Vec::new();
+                for share in ["private", "missing"] {
+                    let request = with_session(
+                        same_origin(sample_request(route, share)),
+                        &cookie,
+                        Some(&csrf),
+                    );
+                    let response = app.clone().oneshot(request).await.expect("response");
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::NOT_FOUND,
+                        "{label} on {share}"
+                    );
+                    let body = to_bytes(response.into_body(), 16_384).await.expect("body");
+                    answers.push(body);
+                }
+                assert_eq!(answers[0], answers[1], "{label}");
+                let json: serde_json::Value =
+                    serde_json::from_slice(&answers[0]).expect("JSON error");
+                assert_eq!(json["error"]["code"], "not_found", "{label}");
+            }
+
+            let refusals: Vec<(&str, Request<Body>)> = match route.proof {
+                Proof::Safe => Vec::new(),
+                Proof::SameOrigin => {
+                    let mut cross_origin = same_origin(sample_request(route, "documents"));
+                    cross_origin.headers_mut().insert(
+                        header::ORIGIN,
+                        HeaderValue::from_static("https://attacker.example"),
+                    );
+                    let mut cross_site = same_origin(sample_request(route, "documents"));
+                    cross_site
+                        .headers_mut()
+                        .insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+                    vec![("cross-origin", cross_origin), ("cross-site", cross_site)]
+                }
+                Proof::Csrf => {
+                    let session = |csrf: Option<&str>| {
+                        with_session(
+                            same_origin(sample_request(route, "documents")),
+                            &cookie,
+                            csrf,
+                        )
+                    };
+                    let mut cross_origin = session(Some(&csrf));
+                    cross_origin.headers_mut().insert(
+                        header::ORIGIN,
+                        HeaderValue::from_static("https://attacker.example"),
+                    );
+                    let mut cross_site = session(Some(&csrf));
+                    cross_site
+                        .headers_mut()
+                        .insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+                    let mut no_origin = session(Some(&csrf));
+                    no_origin.headers_mut().remove(header::ORIGIN);
+                    vec![
+                        ("missing CSRF token", session(None)),
+                        ("wrong CSRF token", session(Some("00"))),
+                        ("cross-origin", cross_origin),
+                        ("cross-site", cross_site),
+                        ("no Origin or Referer", no_origin),
+                    ]
+                }
+            };
+            for (attack, request) in refusals {
+                assert_eq!(
+                    status(request).await,
+                    StatusCode::FORBIDDEN,
+                    "{label}: {attack}"
+                );
+            }
+        }
+
+        // Nothing refused above changed a share or ended the session.
+        assert_eq!(share_snapshot(documents.path()), documents_before);
+        assert_eq!(share_snapshot(private.path()), private_before);
+        let session = with_session(
+            Request::get("/api/v1/session").body(Body::empty()).unwrap(),
+            &cookie,
+            None,
+        );
+        assert_eq!(status(session).await, StatusCode::OK);
+    }
+
+    /// Invariant 13 across a whole file flow: uploading, reading, previewing,
+    /// downloading, and saving a file whose contents carry a distinctive
+    /// marker logs the operations but never the contents, the session
+    /// cookie, or the CSRF token.
+    #[tokio::test]
+    async fn file_contents_and_session_secrets_never_reach_the_logs() {
+        const UPLOADED: &str = "c0ntents-0f-the-upl0aded-file-7e51";
+        const SAVED: &str = "c0ntents-0f-the-saved-file-2b94";
+        const BOUNDARY: &str = "redaction-boundary";
+        let auth = test_auth(1, 20);
+        let documents = TempDir::new().expect("documents root");
+        let private = TempDir::new().expect("private root");
+        let app = protected_app(auth.service, documents.path(), private.path());
+        let logs = crate::audit::capture::start();
+        let (cookie, csrf) = login_as(&app, "Alice", ALICE_PASSWORD).await;
+        let send = |request: Request<Body>| {
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.expect("router response");
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body = to_bytes(response.into_body(), 1_048_576)
+                    .await
+                    .expect("response body");
+                (status, headers, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+
+        let mut multipart = String::new();
+        for (name, contents) in [
+            ("notes.txt", UPLOADED.to_owned()),
+            ("page.html", format!("<p>{UPLOADED}</p>")),
+        ] {
+            multipart.push_str(&format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"files\"; \
+                 filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n\
+                 {contents}\r\n"
+            ));
+        }
+        multipart.push_str(&format!("--{BOUNDARY}--\r\n"));
+        let mut upload = with_session(
+            same_origin(
+                Request::post("/api/v1/shares/documents/uploads")
+                    .body(Body::from(multipart))
+                    .unwrap(),
+            ),
+            &cookie,
+            Some(&csrf),
+        );
+        upload.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&format!("multipart/form-data; boundary={BOUNDARY}")).unwrap(),
+        );
+        let (status, _, body) = send(upload).await;
+        assert!(status.is_success(), "{status}: {body}");
+
+        let read = |uri: &str| {
+            with_session(
+                Request::get(format!("/api/v1/shares/documents/{uri}"))
+                    .body(Body::empty())
+                    .unwrap(),
+                &cookie,
+                None,
+            )
+        };
+        // The marker leaves the server in every response that carries file
+        // bytes, so each handler had the contents in hand.
+        for uri in [
+            "text?path=notes.txt",
+            "download?path=notes.txt",
+            "preview?path=notes.txt",
+            "preview/html?path=page.html",
+            "preview/html/rendered?path=page.html",
+        ] {
+            let (status, _, body) = send(read(uri)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(body.contains(UPLOADED), "{uri}: {body}");
+        }
+
+        let (_, headers, _) = send(read("metadata?path=notes.txt")).await;
+        let mut save = with_session(
+            same_origin(
+                Request::put("/api/v1/shares/documents/text?path=notes.txt")
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(Body::from(SAVED))
+                    .unwrap(),
+            ),
+            &cookie,
+            Some(&csrf),
+        );
+        save.headers_mut()
+            .insert(header::IF_MATCH, headers[header::ETAG].clone());
+        let (status, _, body) = send(save).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, _, body) = send(read("text?path=notes.txt")).await;
+        assert!(body.contains(SAVED), "{body}");
+
+        let captured = logs.take();
+        for operation in ["operation=\"upload\"", "operation=\"save_text\""] {
+            assert!(
+                captured.contains(operation),
+                "missing {operation}: {captured}"
+            );
+        }
+        let token = cookie.split_once('=').unwrap().1;
+        for secret in [UPLOADED, SAVED, token, csrf.as_str()] {
+            assert!(
+                !captured.contains(secret),
+                "log contains file contents or a session secret: {captured}"
+            );
+        }
+    }
 }
