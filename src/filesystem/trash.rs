@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
-    AuthorizedShare, EntryKind, EntryMetadata, FsError, FsErrorCode, FsResult, ShareFs,
-    VirtualPath, assert_no_external_alias, classify_metadata, ensure_same_device, map_io,
+    AuthorizedShare, DIRECTORY_QUOTA_BYTES, EntryKind, EntryMetadata, FsError, FsErrorCode,
+    FsResult, MAX_PATH_DEPTH, ShareFs, UsageError, UsageScan, VirtualPath,
+    assert_no_external_alias, classify_metadata, ensure_same_device, ensure_subtree_within, map_io,
     measure_directory, metadata_in_parent_raw, random_internal_name, secure_file_options,
     sync_after_commit, sync_directory,
 };
@@ -21,8 +22,55 @@ use super::{
 const CONTAINER: &str = ".crabinet";
 const TRASH: &str = "trash";
 const MAX_SIDECAR_BYTES: u64 = 8192;
-const MAX_DEPTH: usize = 256;
 const SIDECAR_SCHEMA_VERSION: u8 = 1;
+/// A Trash payload sits one level below the share root when restored there,
+/// so walks inside a payload start at this virtual depth.
+const PAYLOAD_DEPTH: usize = 1;
+
+/// Where a Trash listing page ends: the last item's deletion time and ID in
+/// listing order (newest first, then by ID).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrashPosition {
+    pub deleted_at: String,
+    pub id: String,
+}
+
+/// One page of a Trash listing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrashPage {
+    pub items: Vec<TrashEntry>,
+    /// Whether further items follow the last one in `items`.
+    pub has_more: bool,
+    /// Items left out because their sidecar or payload was unreadable,
+    /// inconsistent, or removed while the listing ran.
+    pub skipped: usize,
+}
+
+/// The result of one bounded Trash collection batch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrashGcBatch {
+    /// Items whose payload and sidecar are now gone.
+    pub purged: usize,
+    /// Whether this batch reached the end of the Trash directory, so the
+    /// current sweep is complete.
+    pub finished: bool,
+}
+
+fn listing_order(left: &TrashEntry, right: &TrashEntry) -> std::cmp::Ordering {
+    right
+        .deleted_at
+        .cmp(&left.deleted_at)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+/// Whether `entry` comes strictly after `position` in listing order.
+fn is_after(entry: &TrashEntry, position: &TrashPosition) -> bool {
+    position
+        .deleted_at
+        .cmp(&entry.deleted_at)
+        .then_with(|| entry.id.cmp(&position.id))
+        == std::cmp::Ordering::Greater
+}
 
 /// A published Trash item. Time fields are UTC RFC 3339 strings.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,7 +108,7 @@ impl Sidecar {
     fn entry(&self) -> FsResult<TrashEntry> {
         Ok(TrashEntry {
             id: self.id.clone(),
-            original_path: VirtualPath::parse(&self.original_path)?,
+            original_path: VirtualPath::parse_stored(&self.original_path)?,
             kind: match self.kind.as_str() {
                 "file" => EntryKind::File,
                 "directory" => EntryKind::Directory,
@@ -231,6 +279,67 @@ fn payload_metadata(trash: &Dir, id: &str) -> FsResult<EntryMetadata> {
     metadata_in_parent_raw(trash, id)
 }
 
+/// Reads one sidecar for a listing. `None` means the item is skipped and
+/// counted; `Some(None)` means it is not published (pending or purging).
+fn listable_item(trash: &Dir, id: &str) -> Option<Option<TrashEntry>> {
+    let sidecar = match read_sidecar(trash, id) {
+        Ok(sidecar) => sidecar,
+        // Restored or purged between reading the directory and the sidecar.
+        Err(error) if error.code() == FsErrorCode::NotFound => return None,
+        Err(_) => {
+            tracing::warn!(
+                trash_id = id,
+                "skipping a Trash item whose sidecar is unreadable"
+            );
+            return None;
+        }
+    };
+    if sidecar.state != State::Live {
+        return Some(None);
+    }
+    let Ok(entry) = sidecar.entry() else {
+        tracing::warn!(
+            trash_id = id,
+            "skipping a Trash item whose sidecar is unreadable"
+        );
+        return None;
+    };
+    // A cursor carries the deletion time, so only well-formed times are listed.
+    if OffsetDateTime::parse(&entry.deleted_at, &Rfc3339).is_err() {
+        tracing::warn!(
+            trash_id = id,
+            "skipping a Trash item with an invalid deletion time"
+        );
+        return None;
+    }
+    match payload_metadata(trash, id) {
+        Ok(payload) if payload.kind == entry.kind => Some(Some(entry)),
+        Ok(_) => {
+            tracing::warn!(
+                trash_id = id,
+                "skipping a Trash item whose payload kind does not match its sidecar"
+            );
+            None
+        }
+        Err(error) if error.code() == FsErrorCode::NotFound => {
+            // Either a restore is between moving the payload and removing
+            // the sidecar, or the payload is gone.
+            tracing::warn!(
+                trash_id = id,
+                "skipping a Trash item whose payload is missing"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                trash_id = id,
+                "skipping a Trash item whose payload is unreadable"
+            );
+            None
+        }
+    }
+}
+
 fn format_time(time: SystemTime) -> FsResult<String> {
     let seconds = time
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -271,6 +380,17 @@ impl AuthorizedShare<'_> {
             .trash
             .as_ref()
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
+        // A tree already nested deeper than the limit could be trashed but
+        // never measured, restored or purged, so it is refused before
+        // anything changes, with the same bounded walk a deeper move uses.
+        if current.kind == EntryKind::Directory {
+            let directory = self.share.open_directory(&path.0)?;
+            ensure_subtree_within(
+                &directory,
+                MAX_PATH_DEPTH.saturating_sub(path.depth()),
+                &mut 0,
+            )?;
+        }
         let (parent, name) = self.share.open_parent(path)?;
         ensure_same_device(trash, &parent)?;
         let now = SystemTime::now();
@@ -345,43 +465,74 @@ impl AuthorizedShare<'_> {
         Err(FsError::new(FsErrorCode::Unavailable))
     }
 
+    /// Lists every published item, newest first. Unreadable items are skipped.
     pub fn list_trash(&self, max_entries: usize) -> FsResult<Vec<TrashEntry>> {
+        self.list_trash_page(max_entries, None, usize::MAX)
+            .map(|page| page.items)
+    }
+
+    /// Lists up to `limit` published items after `after`, newest first.
+    ///
+    /// Every page reads at most `max_entries` Trash directory entries, but
+    /// keeps only about twice `limit` items in memory. An item whose sidecar
+    /// is corrupt or from an unknown schema, whose payload is missing or of
+    /// the wrong kind, or that a concurrent restore or purge removed, is
+    /// skipped and counted rather than failing the listing; a warning names
+    /// only its opaque ID.
+    pub fn list_trash_page(
+        &self,
+        max_entries: usize,
+        after: Option<&TrashPosition>,
+        limit: usize,
+    ) -> FsResult<TrashPage> {
         let Some(trash) = &self.share.trash else {
-            return Ok(Vec::new());
+            return Ok(TrashPage {
+                items: Vec::new(),
+                has_more: false,
+                skipped: 0,
+            });
         };
-        let mut entries = Vec::new();
-        let mut scanned = 0;
+        let keep = limit.saturating_add(1);
+        let compact_at = keep.saturating_mul(2).max(64);
+        let mut items = Vec::with_capacity(keep.min(256));
+        let mut scanned = 0_usize;
+        let mut skipped = 0_usize;
         for entry in trash.entries().map_err(map_io)? {
             scanned += 1;
             if scanned > max_entries {
                 return Err(FsError::new(FsErrorCode::TooLarge));
             }
-            let name = entry
-                .map_err(map_io)?
-                .file_name()
-                .into_string()
-                .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
-            let Some(id) = name.strip_suffix(".json") else {
+            // Internal names are ASCII; any other name is not an item.
+            let Ok(name) = entry.map_err(map_io)?.file_name().into_string() else {
                 continue;
             };
-            if !valid_id(id) {
+            let Some(id) = name.strip_suffix(".json").filter(|id| valid_id(id)) else {
+                continue;
+            };
+            let Some(item) = listable_item(trash, id) else {
+                skipped += 1;
+                continue;
+            };
+            let Some(item) = item else {
+                continue;
+            };
+            if after.is_some_and(|position| !is_after(&item, position)) {
                 continue;
             }
-            let sidecar = read_sidecar(trash, id)?;
-            if sidecar.state == State::Live {
-                let payload = payload_metadata(trash, id)?;
-                if payload.kind != sidecar.entry()?.kind {
-                    return Err(FsError::new(FsErrorCode::Unavailable));
-                }
-                entries.push(sidecar.entry()?);
+            items.push(item);
+            if items.len() >= compact_at {
+                items.sort_by(listing_order);
+                items.truncate(keep);
             }
         }
-        entries.sort_by(|a, b| {
-            b.deleted_at
-                .cmp(&a.deleted_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(entries)
+        items.sort_by(listing_order);
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        Ok(TrashPage {
+            items,
+            has_more,
+            skipped,
+        })
     }
 
     pub fn restore_trash(
@@ -410,6 +561,15 @@ impl AuthorizedShare<'_> {
         let before = payload_metadata(trash, id)?;
         if before.kind != entry.kind {
             return Err(FsError::new(FsErrorCode::Unavailable));
+        }
+        // An original location recorded before the depth limit may be too
+        // deep, and a restored directory's entries must stay within it too.
+        if target.depth() > MAX_PATH_DEPTH {
+            return Err(FsError::new(FsErrorCode::TooDeep));
+        }
+        if entry.kind == EntryKind::Directory {
+            let payload = trash.open_dir_nofollow(id).map_err(map_io)?;
+            ensure_subtree_within(&payload, MAX_PATH_DEPTH - target.depth(), &mut 0)?;
         }
         let (parent, name) = self.share.open_parent(&target)?;
         ensure_same_device(trash, &parent)?;
@@ -457,6 +617,135 @@ impl AuthorizedShare<'_> {
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
         purge(trash, id, max_entries)
     }
+
+    /// Runs one bounded batch of emptying the whole Trash: picks up to
+    /// `max_entries` items and removes at most that many payload entries.
+    /// Published and already purging items are removed; items still being
+    /// moved in are left alone. An item that cannot be read or removed is
+    /// logged by its opaque ID, counted in [`TrashEmptyBatch::failed`] and
+    /// passed over for the rest of `sweep`, so one bad item cannot stall
+    /// the others.
+    ///
+    /// Each batch reads the Trash directory from its start rather than
+    /// resuming at a saved position: some filesystems reorganize a
+    /// directory, and invalidate saved positions, as entries are removed.
+    /// Removed items are gone, so every batch still makes progress, and
+    /// [`TrashEmptyBatch::finished`] means a complete read found nothing
+    /// left to remove.
+    pub fn empty_trash_batch(
+        &self,
+        sweep: &mut TrashSweep,
+        max_entries: usize,
+    ) -> FsResult<TrashEmptyBatch> {
+        let max_entries = max_entries.max(1);
+        self.require_write()?;
+        let trash = self
+            .share
+            .trash
+            .as_ref()
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
+        let mut candidates = Vec::new();
+        let mut reached_end = true;
+        let mut scanned = 0_usize;
+        for entry in trash.entries().map_err(map_io)? {
+            if candidates.len() >= max_entries {
+                reached_end = false;
+                break;
+            }
+            scanned += 1;
+            if scanned > MAX_EMPTY_SCAN_ENTRIES {
+                return Err(FsError::new(FsErrorCode::TooLarge));
+            }
+            // Internal names are ASCII; any other name is not an item.
+            let Ok(name) = entry.map_err(map_io)?.file_name().into_string() else {
+                continue;
+            };
+            if let Some(id) = name.strip_suffix(".json").filter(|id| valid_id(id))
+                && !sweep.passed_over.contains(id)
+            {
+                candidates.push(id.to_owned());
+            }
+        }
+        let mut batch = TrashEmptyBatch::default();
+        let mut removed = 0;
+        let mut handled_all = true;
+        for id in candidates {
+            if removed >= max_entries {
+                handled_all = false;
+                break;
+            }
+            let sidecar = match read_sidecar(trash, &id) {
+                Ok(sidecar) => sidecar,
+                Err(error) if error.code() == FsErrorCode::NotFound => continue,
+                Err(_) => {
+                    tracing::warn!(
+                        trash_id = id.as_str(),
+                        "emptying Trash skipped an item whose sidecar is unreadable"
+                    );
+                    batch.failed += 1;
+                    sweep.passed_over.insert(id);
+                    continue;
+                }
+            };
+            if sidecar.state == State::Pending {
+                sweep.passed_over.insert(id);
+                continue;
+            }
+            match purge(trash, &id, max_entries - removed) {
+                Ok(count) => {
+                    removed += count;
+                    if trash.exists(sidecar_name(&id)) {
+                        // A large item ran out of this batch's budget; the
+                        // next batch finds it again and continues.
+                        handled_all = false;
+                        break;
+                    }
+                    batch.purged += 1;
+                }
+                Err(error) => {
+                    if error.code() == FsErrorCode::TooDeep {
+                        tracing::error!(
+                            trash_id = id.as_str(),
+                            max_depth = MAX_PATH_DEPTH,
+                            "emptying Trash cannot remove an item nested deeper than the folder depth limit; an operator must remove it"
+                        );
+                    } else {
+                        tracing::warn!(
+                            trash_id = id.as_str(),
+                            "emptying Trash could not remove an item"
+                        );
+                    }
+                    batch.failed += 1;
+                    sweep.passed_over.insert(id);
+                }
+            }
+        }
+        batch.finished = reached_end && handled_all;
+        Ok(batch)
+    }
+}
+
+/// Trash directory entries one Empty Trash batch may read before it gives
+/// up; it matches the bound on other subtree walks.
+const MAX_EMPTY_SCAN_ENTRIES: usize = 1_000_000;
+
+/// The state of one Empty Trash request across its batches.
+#[derive(Debug, Default)]
+pub struct TrashSweep {
+    /// Items left in Trash for the rest of the request: unreadable,
+    /// unremovable, or still being moved in.
+    passed_over: std::collections::HashSet<String>,
+}
+
+/// The result of one bounded Empty Trash batch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrashEmptyBatch {
+    /// Items whose payload and sidecar are now gone.
+    pub purged: usize,
+    /// Items that could not be read or removed and were passed over.
+    pub failed: usize,
+    /// Whether a complete read of Trash found nothing left to remove.
+    pub finished: bool,
 }
 
 fn purge(trash: &Dir, id: &str, max_entries: usize) -> FsResult<usize> {
@@ -485,7 +774,9 @@ fn purge(trash: &Dir, id: &str, max_entries: usize) -> FsResult<usize> {
             }
             EntryKind::Directory => {
                 let child = trash.open_dir_nofollow(id).map_err(map_io)?;
-                if !remove_tree(&child, &mut count, max_entries, 0)? || count >= max_entries {
+                if !remove_tree(&child, &mut count, max_entries, PAYLOAD_DEPTH)?
+                    || count >= max_entries
+                {
                     return Ok(count);
                 }
                 trash.remove_dir(id).map_err(map_io)?;
@@ -499,13 +790,17 @@ fn purge(trash: &Dir, id: &str, max_entries: usize) -> FsResult<usize> {
     Ok(count)
 }
 
+/// Removes the entries of `dir`, whose own virtual depth is `depth`, without
+/// following links. An entry below [`MAX_PATH_DEPTH`] stops the removal with
+/// [`FsErrorCode::TooDeep`] so recursion stays bounded; an operator must
+/// remove such a tree.
 fn remove_tree(dir: &Dir, count: &mut usize, max: usize, depth: usize) -> FsResult<bool> {
-    if depth > MAX_DEPTH {
-        return Err(FsError::new(FsErrorCode::TooLarge));
-    }
     for entry in dir.entries().map_err(map_io)? {
         if *count >= max {
             return Ok(false);
+        }
+        if depth >= MAX_PATH_DEPTH {
+            return Err(FsError::new(FsErrorCode::TooDeep));
         }
         let entry = entry.map_err(map_io)?;
         let name = entry.file_name();
@@ -605,13 +900,22 @@ impl ShareFs {
         Ok(changed)
     }
 
-    /// Removes expired items using their stored deadline, with a bounded visit count.
-    pub fn gc_expired_trash(&self, now: SystemTime, max_entries: usize) -> FsResult<usize> {
+    /// Removes expired items using their stored deadline, reading at most
+    /// `max_entries` Trash directory names and removing at most that many
+    /// payload entries. Successive batches continue where the previous one
+    /// stopped; [`TrashGcBatch::finished`] reports the end of a sweep. An
+    /// item that cannot be read or removed is logged by its opaque ID and
+    /// left for a later sweep instead of stopping the batch.
+    pub fn gc_expired_trash(&self, now: SystemTime, max_entries: usize) -> FsResult<TrashGcBatch> {
+        let done = TrashGcBatch {
+            purged: 0,
+            finished: true,
+        };
         if self.staging.is_none() {
-            return Ok(0);
+            return Ok(done);
         }
         let Some(trash) = &self.trash else {
-            return Ok(0);
+            return Ok(done);
         };
         let now = OffsetDateTime::parse(&format_time(now)?, &Rfc3339)
             .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
@@ -620,6 +924,7 @@ impl ShareFs {
             .lock()
             .map_err(|_| FsError::new(FsErrorCode::Unavailable))?;
         let names = gc_batch(trash, &mut cookie, max_entries)?;
+        let finished = *cookie == 0;
         let mut removed = 0;
         let mut purged = 0;
         for name in names {
@@ -630,35 +935,55 @@ impl ShareFs {
                 continue;
             }
             let Some(id) = name.strip_suffix(".json").filter(|id| valid_id(id)) else {
-                return Err(FsError::new(FsErrorCode::Unavailable));
+                tracing::warn!(
+                    "Trash holds an entry that is not a Trash item; it is left in place"
+                );
+                continue;
             };
-            let sidecar = read_sidecar(trash, id)?;
+            let sidecar = match read_sidecar(trash, id) {
+                Ok(sidecar) => sidecar,
+                Err(error) if error.code() == FsErrorCode::NotFound => continue,
+                Err(_) => {
+                    tracing::warn!(
+                        trash_id = id,
+                        "Trash cleanup skipped an item whose sidecar is unreadable"
+                    );
+                    continue;
+                }
+            };
             let expired = OffsetDateTime::parse(&sidecar.expires_at, &Rfc3339)
-                .map_err(|_| FsError::new(FsErrorCode::Unavailable))?
-                <= now;
+                .is_ok_and(|expires| expires <= now);
             if sidecar.state == State::Purging || (sidecar.state == State::Live && expired) {
-                removed += purge(trash, id, max_entries - removed)?;
+                match purge(trash, id, max_entries - removed) {
+                    Ok(count) => removed += count,
+                    Err(error) if error.code() == FsErrorCode::TooDeep => {
+                        tracing::error!(
+                            trash_id = id,
+                            max_depth = MAX_PATH_DEPTH,
+                            "Trash cleanup cannot remove an item nested deeper than the folder depth limit; an operator must remove it"
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            trash_id = id,
+                            "Trash cleanup could not remove an item; it will be retried"
+                        );
+                        continue;
+                    }
+                }
                 if !trash.exists(sidecar_name(id)) {
                     purged += 1;
                 }
             }
         }
-        Ok(purged)
+        Ok(TrashGcBatch { purged, finished })
     }
 }
 
-pub(super) fn measure_trash(
-    trash: &Dir,
-    entries: &mut usize,
-    max_entries: usize,
-    bytes: &mut u64,
-    max_bytes: u64,
-) -> FsResult<()> {
+pub(super) fn measure_trash(trash: &Dir, scan: &mut UsageScan) -> Result<(), UsageError> {
     for entry in trash.entries().map_err(map_io)? {
-        *entries += 1;
-        if *entries > max_entries {
-            return Err(FsError::new(FsErrorCode::TooLarge));
-        }
+        scan.visit()?;
         let entry = entry.map_err(map_io)?;
         let name = entry
             .file_name()
@@ -671,17 +996,11 @@ pub(super) fn measure_trash(
         let kind = classify_metadata(&meta)?;
         assert_no_external_alias(&meta, kind)?;
         match kind {
-            EntryKind::File => {
-                *bytes = bytes
-                    .checked_add(meta.len())
-                    .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-                if *bytes > max_bytes {
-                    return Err(FsError::new(FsErrorCode::TooLarge));
-                }
-            }
+            EntryKind::File => scan.charge(meta.len())?,
             EntryKind::Directory => {
+                scan.charge(DIRECTORY_QUOTA_BYTES)?;
                 let child = trash.open_dir_nofollow(&name).map_err(map_io)?;
-                measure_directory(&child, entries, max_entries, bytes, max_bytes, 0)?;
+                measure_directory(&child, scan, PAYLOAD_DEPTH)?;
             }
         }
     }
@@ -723,7 +1042,10 @@ mod tests {
         assert_eq!(item.kind, EntryKind::Directory);
         assert!(item.expires_at.ends_with('Z'));
         assert!(!temp.path().join("photos").exists());
-        assert_eq!(view.usage_bounded(100, 100).unwrap(), 7);
+        assert_eq!(
+            view.usage_bounded(100, 1 << 20).unwrap(),
+            7 + DIRECTORY_QUOTA_BYTES
+        );
         assert_eq!(view.list_trash(100).unwrap(), vec![item.clone()]);
         assert_eq!(view.restore_trash(&item.id, None).unwrap(), path);
         assert_eq!(
@@ -731,7 +1053,10 @@ mod tests {
             b"picture"
         );
         assert!(view.list_trash(100).unwrap().is_empty());
-        assert_eq!(view.usage_bounded(100, 100).unwrap(), 7);
+        assert_eq!(
+            view.usage_bounded(100, 1 << 20).unwrap(),
+            7 + DIRECTORY_QUOTA_BYTES
+        );
     }
 
     #[test]
@@ -849,7 +1174,13 @@ mod tests {
             .authorize(Some(&grant), GlobalPolicy::default())
             .unwrap();
         assert_eq!(view.list_trash(100).unwrap().len(), 1);
-        assert_eq!(share.gc_expired_trash(SystemTime::now(), 100).unwrap(), 1);
+        assert_eq!(
+            share
+                .gc_expired_trash(SystemTime::now(), 100)
+                .unwrap()
+                .purged,
+            1
+        );
         assert!(view.list_trash(100).unwrap().is_empty());
         assert!(!temp.path().join(CONTAINER).join(TRASH).join(id).exists());
     }
@@ -911,5 +1242,312 @@ mod tests {
                 .join(&item.id)
                 .exists()
         );
+    }
+
+    fn trash_file(view: &AuthorizedShare<'_>, temp: &TempDir, name: &str) -> TrashEntry {
+        fs::write(temp.path().join(name), name.as_bytes()).unwrap();
+        let path = VirtualPath::parse(name).unwrap();
+        view.move_to_trash(&path, view.metadata(&path).unwrap(), "user-1", 30)
+            .unwrap()
+    }
+
+    fn trash_path(temp: &TempDir, name: &str) -> std::path::PathBuf {
+        temp.path().join(CONTAINER).join(TRASH).join(name)
+    }
+
+    fn deep_path(levels: usize) -> String {
+        (0..levels)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    #[test]
+    fn listing_skips_corrupt_orphaned_and_mismatched_items() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        let corrupt = trash_file(&view, &temp, "corrupt.txt");
+        let orphaned = trash_file(&view, &temp, "orphaned.txt");
+        let mismatched = trash_file(&view, &temp, "mismatched.txt");
+        let healthy = trash_file(&view, &temp, "healthy.txt");
+        fs::write(trash_path(&temp, &sidecar_name(&corrupt.id)), b"{not json").unwrap();
+        fs::remove_file(trash_path(&temp, &orphaned.id)).unwrap();
+        fs::remove_file(trash_path(&temp, &mismatched.id)).unwrap();
+        fs::create_dir(trash_path(&temp, &mismatched.id)).unwrap();
+
+        let page = view.list_trash_page(100, None, 100).unwrap();
+        assert_eq!(page.items, vec![healthy]);
+        assert_eq!(page.skipped, 3);
+        assert!(!page.has_more);
+        // Skipped items stay in place for an operator or a later purge.
+        assert!(trash_path(&temp, &sidecar_name(&corrupt.id)).exists());
+    }
+
+    #[test]
+    fn listing_pages_in_a_stable_order_that_survives_concurrent_changes() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        for index in 0..5 {
+            trash_file(&view, &temp, &format!("file-{index}.txt"));
+        }
+        let everything = view.list_trash(100).unwrap();
+        assert_eq!(everything.len(), 5);
+
+        let first = view.list_trash_page(100, None, 2).unwrap();
+        assert_eq!(first.items, everything[..2]);
+        assert!(first.has_more);
+        let position = |entry: &TrashEntry| TrashPosition {
+            deleted_at: entry.deleted_at.clone(),
+            id: entry.id.clone(),
+        };
+        // An item on a later page is restored meanwhile; paging continues.
+        view.restore_trash(&everything[3].id, None).unwrap();
+        let second = view
+            .list_trash_page(100, Some(&position(&first.items[1])), 2)
+            .unwrap();
+        assert_eq!(
+            second.items,
+            vec![everything[2].clone(), everything[4].clone()]
+        );
+        assert!(!second.has_more);
+        let end = view
+            .list_trash_page(100, Some(&position(&second.items[1])), 2)
+            .unwrap();
+        assert!(end.items.is_empty());
+        assert!(!end.has_more);
+        // The entry bound still applies to each page.
+        assert_eq!(
+            view.list_trash_page(3, None, 2).unwrap_err().code(),
+            FsErrorCode::TooLarge
+        );
+    }
+
+    #[test]
+    fn restore_rejects_a_subtree_that_would_exceed_the_depth_limit() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        fs::create_dir_all(temp.path().join("folder/a")).unwrap();
+        fs::write(temp.path().join("folder/a/b.txt"), b"b").unwrap();
+        let path = VirtualPath::parse("folder").unwrap();
+        let item = view
+            .move_to_trash(&path, view.metadata(&path).unwrap(), "user-1", 30)
+            .unwrap();
+        // `folder` at depth 63 would put b.txt at depth 65.
+        fs::create_dir_all(temp.path().join(deep_path(MAX_PATH_DEPTH - 2))).unwrap();
+        let too_deep =
+            VirtualPath::parse(&format!("{}/folder", deep_path(MAX_PATH_DEPTH - 2))).unwrap();
+        assert_eq!(
+            view.restore_trash(&item.id, Some(&too_deep))
+                .unwrap_err()
+                .code(),
+            FsErrorCode::TooDeep
+        );
+        assert!(trash_path(&temp, &item.id).join("a/b.txt").exists());
+        assert_eq!(view.list_trash(100).unwrap(), vec![item.clone()]);
+        let fits =
+            VirtualPath::parse(&format!("{}/folder", deep_path(MAX_PATH_DEPTH - 3))).unwrap();
+        view.restore_trash(&item.id, Some(&fits)).unwrap();
+        assert!(
+            temp.path()
+                .join(deep_path(MAX_PATH_DEPTH - 3))
+                .join("folder/a/b.txt")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn an_item_recorded_deeper_than_the_limit_stays_listed_but_cannot_return_there() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        let item = trash_file(&view, &temp, "deep.txt");
+        let trash = share.trash.as_ref().unwrap();
+        let mut sidecar = read_sidecar(trash, &item.id).unwrap();
+        sidecar.original_path = format!("{}/deep.txt", deep_path(MAX_PATH_DEPTH + 5));
+        write_sidecar(trash, &sidecar, true).unwrap();
+        let listed = view.list_trash(100).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].original_path.depth(), MAX_PATH_DEPTH + 6);
+        assert_eq!(
+            view.restore_trash(&item.id, None).unwrap_err().code(),
+            FsErrorCode::TooDeep
+        );
+        let elsewhere = VirtualPath::parse("restored.txt").unwrap();
+        view.restore_trash(&item.id, Some(&elsewhere)).unwrap();
+        assert_eq!(
+            fs::read(temp.path().join("restored.txt")).unwrap(),
+            b"deep.txt"
+        );
+    }
+
+    #[test]
+    fn trashing_a_tree_deeper_than_the_limit_is_refused_without_changes() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        // `fits` holds entries down to exactly the limit; `deep`, created out
+        // of band, holds one more level.
+        fs::create_dir_all(temp.path().join("fits").join(deep_path(MAX_PATH_DEPTH - 1))).unwrap();
+        fs::create_dir_all(temp.path().join("deep").join(deep_path(MAX_PATH_DEPTH))).unwrap();
+        let deep = VirtualPath::parse("deep").unwrap();
+        assert_eq!(
+            view.move_to_trash(&deep, view.metadata(&deep).unwrap(), "user-1", 30)
+                .unwrap_err()
+                .code(),
+            FsErrorCode::TooDeep
+        );
+        assert!(
+            temp.path()
+                .join("deep")
+                .join(deep_path(MAX_PATH_DEPTH))
+                .exists()
+        );
+        let fits = VirtualPath::parse("fits").unwrap();
+        let item = view
+            .move_to_trash(&fits, view.metadata(&fits).unwrap(), "user-1", 30)
+            .unwrap();
+        // Only the accepted item reached Trash: its payload and sidecar.
+        assert_eq!(view.list_trash(100).unwrap(), vec![item]);
+        assert_eq!(
+            fs::read_dir(temp.path().join(".crabinet/trash"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_payload_deeper_than_the_limit_fails_measurement_and_purge_distinctly() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        fs::create_dir(temp.path().join("deep")).unwrap();
+        let path = VirtualPath::parse("deep").unwrap();
+        let item = view
+            .move_to_trash(&path, view.metadata(&path).unwrap(), "user-1", 30)
+            .unwrap();
+        // Grown out of band inside Trash, as an older version allowed.
+        fs::create_dir_all(trash_path(&temp, &item.id).join(deep_path(MAX_PATH_DEPTH + 5)))
+            .unwrap();
+        assert_eq!(
+            view.usage_bounded(10_000, u64::MAX),
+            Err(UsageError::TooDeep)
+        );
+        assert_eq!(
+            view.purge_trash(&item.id, 10_000).unwrap_err().code(),
+            FsErrorCode::TooDeep
+        );
+        // Collection logs the item and carries on with the rest of Trash.
+        let after_retention = SystemTime::now() + Duration::from_secs(31 * 86400);
+        let batch = share.gc_expired_trash(after_retention, 100).unwrap();
+        assert_eq!(batch.purged, 0);
+        assert!(batch.finished);
+        // Emptying Trash passes over it too, and reports it as failed.
+        let batch = view
+            .empty_trash_batch(&mut TrashSweep::default(), 10_000)
+            .unwrap();
+        assert_eq!(
+            batch,
+            TrashEmptyBatch {
+                purged: 0,
+                failed: 1,
+                finished: true,
+            }
+        );
+    }
+
+    #[test]
+    fn emptying_trash_continues_large_items_and_many_names_across_batches() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        fs::create_dir(temp.path().join("folder")).unwrap();
+        for index in 0..12 {
+            fs::write(temp.path().join(format!("folder/{index}.txt")), b"x").unwrap();
+        }
+        let folder = VirtualPath::parse("folder").unwrap();
+        view.move_to_trash(&folder, view.metadata(&folder).unwrap(), "user-1", 30)
+            .unwrap();
+        for index in 0..9 {
+            trash_file(&view, &temp, &format!("file-{index}.txt"));
+        }
+        let mut sweep = TrashSweep::default();
+        let mut purged = 0;
+        let mut batches = 0;
+        loop {
+            let batch = view.empty_trash_batch(&mut sweep, 4).unwrap();
+            assert_eq!(batch.failed, 0);
+            purged += batch.purged;
+            batches += 1;
+            if batch.finished {
+                break;
+            }
+            assert!(batches < 100, "the pass never finished");
+        }
+        // Removing at most four entries per batch, the 13-entry folder alone
+        // needs four batches.
+        assert!(batches > 3, "only {batches} batches");
+        assert_eq!(purged, 10);
+        assert_eq!(view.list_trash(100).unwrap(), Vec::new());
+        assert_eq!(
+            fs::read_dir(temp.path().join(".crabinet/trash"))
+                .unwrap()
+                .count(),
+            0
+        );
+        // A read-only view cannot empty Trash.
+        let read_only = ShareGrant {
+            access: AccessLevel::ReadOnly,
+            ..grant
+        };
+        let view = share
+            .authorize(Some(&read_only), GlobalPolicy::default())
+            .unwrap();
+        assert_eq!(
+            view.empty_trash_batch(&mut TrashSweep::default(), 4)
+                .unwrap_err()
+                .code(),
+            FsErrorCode::AccessDenied
+        );
+    }
+
+    #[test]
+    fn gc_reports_when_a_sweep_finishes() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        for index in 0..4 {
+            trash_file(&view, &temp, &format!("file-{index}.txt"));
+        }
+        let after_retention = SystemTime::now() + Duration::from_secs(31 * 86400);
+        // Two names cannot cover eight, so the first batch leaves the sweep
+        // open. Entries renamed during a sweep can be reached only by the
+        // next one, depending on the filesystem's directory order.
+        let first = share.gc_expired_trash(after_retention, 2).unwrap();
+        assert!(!first.finished);
+        let mut purged = first.purged;
+        let mut finished = false;
+        for _ in 0..40 {
+            let batch = share.gc_expired_trash(after_retention, 2).unwrap();
+            purged += batch.purged;
+            finished |= batch.finished;
+            if purged == 4 && finished {
+                break;
+            }
+        }
+        assert_eq!(purged, 4);
+        assert!(finished);
+        assert!(view.list_trash(100).unwrap().is_empty());
     }
 }

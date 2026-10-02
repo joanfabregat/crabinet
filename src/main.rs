@@ -11,7 +11,10 @@ use crabinet::{
     browse::{BrowseLimits, BrowseState, ConfiguredShare},
     config::Config,
     filesystem::{GlobalPolicy, ShareFs, ShareId},
-    mutations::MutationState,
+    mutations::{
+        MutationState, TRASH_GC_BATCH_ENTRIES, TRASH_GC_INTERVAL, TRASH_GC_SHARE_BUDGET,
+        collect_expired_trash,
+    },
     oidc::OidcService,
     password::hash_confirmed,
     preview::PreviewPolicy,
@@ -132,34 +135,17 @@ async fn main() -> Result<()> {
 }
 
 async fn trash_gc_loop(state: AppState) {
-    let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+    let mut interval = tokio::time::interval(TRASH_GC_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        for (share_id, filesystem) in state.browse().trash_gc_targets() {
-            let commit = state.mutations().commit_lock(&share_id).await;
-            let result = tokio::task::spawn_blocking(move || {
-                let _commit = commit;
-                filesystem.gc_expired_trash(SystemTime::now(), 1_000)
-            })
-            .await;
-            match result {
-                Ok(Ok(removed)) if removed > 0 => {
-                    tracing::info!(
-                        share_id = share_id.as_str(),
-                        removed,
-                        "expired trash items purged"
-                    );
-                }
-                Ok(Err(_)) | Err(_) => {
-                    tracing::warn!(
-                        share_id = share_id.as_str(),
-                        "trash cleanup failed; will retry later"
-                    );
-                }
-                Ok(Ok(_)) => {}
-            }
-        }
+        collect_expired_trash(
+            &state,
+            SystemTime::now(),
+            TRASH_GC_BATCH_ENTRIES,
+            TRASH_GC_SHARE_BUDGET,
+        )
+        .await;
     }
 }
 

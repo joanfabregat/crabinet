@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum AppError {
     #[error("authentication required")]
     Unauthorized,
@@ -27,6 +27,12 @@ pub enum AppError {
     Conflict,
     #[error("request exceeds a configured limit")]
     TooLarge,
+    #[error("path exceeds the maximum folder depth")]
+    PathTooDeep,
+    #[error("share has too many entries to measure its quota")]
+    ShareTooLargeToMeasure,
+    #[error("share has entries nested too deeply to measure its quota")]
+    ShareTooDeepToMeasure,
     #[error("service is busy")]
     Busy,
     #[error("resource is not valid UTF-8 text")]
@@ -90,6 +96,24 @@ impl AppError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "too_large",
                 "Request exceeds a configured limit",
+            ),
+            Self::PathTooDeep => (
+                StatusCode::BAD_REQUEST,
+                "path_too_deep",
+                "Folders can be nested at most 64 levels deep",
+            ),
+            // The share's state, not the request, prevents the write until
+            // an operator intervenes, so these are server-side statuses that
+            // clients do not retry automatically.
+            Self::ShareTooLargeToMeasure => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "share_too_large_to_measure",
+                "The shared folder has too many items to check its quota",
+            ),
+            Self::ShareTooDeepToMeasure => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "share_too_deep_to_measure",
+                "The shared folder has folders nested too deeply to check its quota",
             ),
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,

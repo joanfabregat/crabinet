@@ -152,6 +152,35 @@ test.describe("writable share operations", () => {
       hasText: "From Working files ·",
     });
     await expect(deletedFolder).toBeVisible();
+    // Everything fits on the first page, so there is nothing more to load.
+    await expect(page.getByRole("button", { name: /^Load more/ })).toHaveCount(
+      0,
+    );
+    // The Trash API pages with an opaque cursor and rejects an altered one.
+    const firstPage = await page.request.get(
+      "/api/v1/shares/writable/trash?limit=1",
+    );
+    expect(firstPage.status()).toBe(200);
+    const first = (await firstPage.json()) as {
+      items: { id: string }[];
+      nextCursor?: string;
+    };
+    expect(first.items).toHaveLength(1);
+    if (first.nextCursor) {
+      const next = await page.request.get(
+        `/api/v1/shares/writable/trash?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`,
+      );
+      expect(next.status()).toBe(200);
+      const nextItems = ((await next.json()) as { items: { id: string }[] })
+        .items;
+      expect(nextItems.map((item) => item.id)).not.toContain(
+        first.items[0]!.id,
+      );
+    }
+    const forged = await page.request.get(
+      "/api/v1/shares/writable/trash?limit=1&cursor=AQ",
+    );
+    expect(forged.status()).toBe(409);
     await deletedFolder.getByRole("button", { name: "Restore" }).click();
     await expect(deletedFolder).toHaveCount(0);
     await page.goto("/writable");
@@ -274,6 +303,62 @@ test.describe("writable share operations", () => {
     await expect(
       directoryListing(page).getByRole("link", { name }),
     ).toHaveCount(0);
+  });
+
+  test("empties a share's whole Trash, beyond the page shown", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/writable", "writer");
+    const token = await csrfToken(page);
+    // More items than one Trash page holds.
+    const created = await page.evaluate(async (csrf) => {
+      const share = "/api/v1/shares/writable";
+      for (let index = 0; index < 105; index += 1) {
+        const path = `empty-trash-${index}.txt`;
+        const create = await fetch(`${share}/files`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+          body: JSON.stringify({ path }),
+        });
+        if (!create.ok) return `create ${path}: ${create.status}`;
+        const query = `path=${encodeURIComponent(path)}`;
+        const metadata = (await (
+          await fetch(`${share}/metadata?${query}`)
+        ).json()) as { etag: string };
+        const trash = await fetch(`${share}/entry?${query}`, {
+          method: "DELETE",
+          headers: { "X-CSRF-Token": csrf, "If-Match": metadata.etag },
+        });
+        if (!trash.ok) return `delete ${path}: ${trash.status}`;
+      }
+      return "ok";
+    }, token);
+    expect(created).toBe("ok");
+
+    await page.goto("/trash");
+    await expect(
+      page.getByRole("button", { name: "Load more from Working files" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Empty Trash" }).click();
+    const dialog = page.getByRole("dialog", { name: "Empty Trash?" });
+    await expect(dialog).toContainText(/Permanently delete all \d+\+ items/);
+    await dialog
+      .getByRole("button", { name: "Empty Trash", exact: true })
+      .click();
+    await expect(
+      page.getByText(/Permanently deleted \d+ items\./),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Trash is empty." }),
+    ).toBeVisible();
+    const listing = await page.request.get("/api/v1/shares/writable/trash");
+    expect(((await listing.json()) as { items: unknown[] }).items).toEqual([]);
+
+    // Without a CSRF token the server refuses to empty Trash.
+    const forged = await page.request.post(
+      "/api/v1/shares/writable/trash/empty",
+    );
+    expect(forged.status()).toBe(403);
   });
 
   test("uploads by native drop and file picker with partial limits, conflict, and explicit replacement", async ({

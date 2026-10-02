@@ -28,10 +28,21 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 mod trash;
-pub use trash::TrashEntry;
+pub use trash::{TrashEmptyBatch, TrashEntry, TrashGcBatch, TrashPage, TrashPosition, TrashSweep};
 
 const MAX_COMPONENT_BYTES: usize = 255;
 const MAX_VIRTUAL_PATH_BYTES: usize = 4096;
+/// The most components a virtual path may have. Request paths deeper than
+/// this are invalid, and every recursive walk (quota measurement, Trash
+/// measurement and removal, and the subtree check before a move or restore)
+/// stops at this depth instead of descending further.
+pub const MAX_PATH_DEPTH: usize = 64;
+/// Quota charge for each directory, the typical ext4 block size, so creating
+/// empty directories cannot exhaust inodes and blocks without being counted.
+pub const DIRECTORY_QUOTA_BYTES: u64 = 4096;
+/// Entries a move or restore inspects while checking that a directory's
+/// subtree stays within [`MAX_PATH_DEPTH`].
+const MAX_SUBTREE_CHECK_ENTRIES: usize = 1_000_000;
 const MAX_SHARE_ID_BYTES: usize = 64;
 const INTERNAL_DIRECTORY: &str = ".crabinet";
 const INTERNAL_STAGING_DIRECTORY: &str = "staging";
@@ -56,6 +67,8 @@ pub enum FsErrorCode {
     InvalidPath,
     NotFound,
     TooLarge,
+    /// An entry would be, or already is, nested deeper than [`MAX_PATH_DEPTH`].
+    TooDeep,
     UnsupportedEntry,
     Unavailable,
 }
@@ -86,6 +99,7 @@ impl fmt::Display for FsError {
             FsErrorCode::InvalidPath => "invalid virtual path",
             FsErrorCode::NotFound => "entry not found",
             FsErrorCode::TooLarge => "entry exceeds the configured limit",
+            FsErrorCode::TooDeep => "entry exceeds the maximum folder depth",
             FsErrorCode::UnsupportedEntry => "unsupported filesystem entry",
             FsErrorCode::Unavailable => "filesystem operation unavailable",
         };
@@ -94,6 +108,57 @@ impl fmt::Display for FsError {
 }
 
 impl std::error::Error for FsError {}
+
+/// Why a bounded quota measurement stopped without a usage figure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UsageError {
+    /// Usage passed the caller's byte bound, so the quota is exceeded.
+    LimitExceeded,
+    /// The share holds more entries than one measurement may visit.
+    TooManyEntries,
+    /// An entry is nested deeper than [`MAX_PATH_DEPTH`], so the scan stops
+    /// rather than descend further.
+    TooDeep,
+    Fs(FsError),
+}
+
+impl From<FsError> for UsageError {
+    fn from(error: FsError) -> Self {
+        Self::Fs(error)
+    }
+}
+
+/// Running totals and bounds for one quota measurement.
+struct UsageScan {
+    entries: usize,
+    max_entries: usize,
+    bytes: u64,
+    max_bytes: u64,
+}
+
+impl UsageScan {
+    fn visit(&mut self) -> Result<(), UsageError> {
+        self.entries = self
+            .entries
+            .checked_add(1)
+            .ok_or(UsageError::TooManyEntries)?;
+        if self.entries > self.max_entries {
+            return Err(UsageError::TooManyEntries);
+        }
+        Ok(())
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<(), UsageError> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or(UsageError::LimitExceeded)?;
+        if self.bytes > self.max_bytes {
+            return Err(UsageError::LimitExceeded);
+        }
+        Ok(())
+    }
+}
 
 /// Stable configuration identifier for a mounted share.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
@@ -197,8 +262,25 @@ impl VirtualPath {
         Self(Vec::new())
     }
 
+    /// Parses a path named by a request. More than [`MAX_PATH_DEPTH`]
+    /// components is a grammar error, like an over-long path.
     pub fn parse(value: &str) -> FsResult<Self> {
-        if value.is_empty() || value.len() > MAX_VIRTUAL_PATH_BYTES {
+        Self::parse_with_depth(value, MAX_PATH_DEPTH)
+    }
+
+    /// Parses a path Crabinet stored itself, such as a Trash item's original
+    /// location. An item deleted before the depth limit existed may be deeper
+    /// than [`MAX_PATH_DEPTH`]; it stays listable and purgeable, and restoring
+    /// it to that location fails with [`FsErrorCode::TooDeep`].
+    pub(crate) fn parse_stored(value: &str) -> FsResult<Self> {
+        Self::parse_with_depth(value, usize::MAX)
+    }
+
+    fn parse_with_depth(value: &str, max_depth: usize) -> FsResult<Self> {
+        if value.is_empty()
+            || value.len() > MAX_VIRTUAL_PATH_BYTES
+            || value.bytes().filter(|byte| *byte == b'/').count() >= max_depth
+        {
             return Err(FsError::new(FsErrorCode::InvalidPath));
         }
         let components = value
@@ -211,6 +293,12 @@ impl VirtualPath {
     #[must_use]
     pub fn is_root(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// The number of components; the share root has depth zero.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        self.0.len()
     }
 
     pub fn components(&self) -> impl ExactSizeIterator<Item = &EntryName> {
@@ -848,6 +936,17 @@ impl AuthorizedShare<'_> {
         if current.kind == EntryKind::Directory && destination.starts_with(source) {
             return Err(FsError::new(FsErrorCode::InvalidPath));
         }
+        // Moving a directory deeper must not push any of its entries below
+        // the depth limit. A move to the same or a shallower depth cannot,
+        // and stays a constant-time rename.
+        if current.kind == EntryKind::Directory && destination.depth() > source.depth() {
+            let directory = self.share.open_directory(&source.0)?;
+            ensure_subtree_within(
+                &directory,
+                MAX_PATH_DEPTH.saturating_sub(destination.depth()),
+                &mut 0,
+            )?;
+        }
         let (source_parent, source_name) = self.share.open_parent(source)?;
         let (destination_parent, destination_name) = self.share.open_parent(destination)?;
         rustix::fs::renameat_with(
@@ -953,21 +1052,26 @@ impl AuthorizedShare<'_> {
         Ok(())
     }
 
-    pub fn usage_bounded(&self, max_entries: usize, max_bytes: u64) -> FsResult<u64> {
-        let mut entries = 0_usize;
-        let mut bytes = 0_u64;
-        measure_directory(
-            &self.share.root,
-            &mut entries,
+    /// Measures the share's quota usage, including Trash, visiting at most
+    /// `max_entries` entries and stopping once usage passes `max_bytes`.
+    /// Every directory is charged [`DIRECTORY_QUOTA_BYTES`].
+    pub fn usage_bounded(&self, max_entries: usize, max_bytes: u64) -> Result<u64, UsageError> {
+        let mut scan = UsageScan {
+            entries: 0,
             max_entries,
-            &mut bytes,
+            bytes: 0,
             max_bytes,
-            0,
-        )?;
+        };
+        measure_directory(&self.share.root, &mut scan, 0)?;
         if let Some(trash) = &self.share.trash {
-            trash::measure_trash(trash, &mut entries, max_entries, &mut bytes, max_bytes)?;
+            trash::measure_trash(trash, &mut scan)?;
         }
-        Ok(bytes)
+        Ok(scan.bytes)
+    }
+
+    #[must_use]
+    pub fn share_id(&self) -> &ShareId {
+        self.share.id()
     }
 
     fn open_regular_file(&self, path: &VirtualPath, write: bool) -> FsResult<File> {
@@ -1139,44 +1243,63 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
 ///   only passed back to the no-follow directory open.
 ///
 /// Every visited entry, counted or not, consumes the entry budget so the
-/// traversal stays bounded.
+/// traversal stays bounded. Each directory is charged
+/// [`DIRECTORY_QUOTA_BYTES`]. `depth` is the virtual depth of `directory`
+/// itself; an entry below [`MAX_PATH_DEPTH`] stops the scan with
+/// [`UsageError::TooDeep`] instead of descending further.
 fn measure_directory(
     directory: &Dir,
-    entries: &mut usize,
-    max_entries: usize,
-    bytes: &mut u64,
-    max_bytes: u64,
+    scan: &mut UsageScan,
     depth: usize,
-) -> FsResult<()> {
-    if depth > 256 {
-        return Err(FsError::new(FsErrorCode::TooLarge));
-    }
+) -> Result<(), UsageError> {
     for entry in directory.entries().map_err(map_io)? {
-        *entries = entries
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-        if *entries > max_entries {
-            return Err(FsError::new(FsErrorCode::TooLarge));
-        }
+        scan.visit()?;
         let entry = entry.map_err(map_io)?;
         let name = entry.file_name();
         // Internal names are ASCII, so a non-UTF-8 name is never one of them.
         if name.to_str().is_some_and(is_own_internal_name) {
             continue;
         }
+        if depth >= MAX_PATH_DEPTH {
+            return Err(UsageError::TooDeep);
+        }
         // Directory entry metadata does not follow symlinks.
         let metadata = entry.metadata().map_err(map_io)?;
         if metadata.is_dir() {
+            scan.charge(DIRECTORY_QUOTA_BYTES)?;
             let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
-            measure_directory(&child, entries, max_entries, bytes, max_bytes, depth + 1)?;
+            measure_directory(&child, scan, depth + 1)?;
         } else if metadata.is_file() {
-            *bytes = bytes
-                .checked_add(metadata.len())
-                .ok_or_else(|| FsError::new(FsErrorCode::TooLarge))?;
-            if *bytes > max_bytes {
-                return Err(FsError::new(FsErrorCode::TooLarge));
-            }
+            scan.charge(metadata.len())?;
         }
+    }
+    Ok(())
+}
+
+/// Fails with [`FsErrorCode::TooDeep`] if any entry lies more than
+/// `allowance` levels below `directory`. Only directories within the
+/// allowance are opened, never through a link, so the walk is bounded by both
+/// depth and [`MAX_SUBTREE_CHECK_ENTRIES`].
+fn ensure_subtree_within(directory: &Dir, allowance: usize, visited: &mut usize) -> FsResult<()> {
+    for entry in directory.entries().map_err(map_io)? {
+        *visited += 1;
+        if *visited > MAX_SUBTREE_CHECK_ENTRIES {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
+        let entry = entry.map_err(map_io)?;
+        if allowance == 0 {
+            return Err(FsError::new(FsErrorCode::TooDeep));
+        }
+        // The directory entry type never follows a symlink.
+        if !entry.file_type().map_err(map_io)?.is_dir() {
+            continue;
+        }
+        let child = match directory.open_dir_nofollow(entry.file_name()) {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(map_io(error)),
+        };
+        ensure_subtree_within(&child, allowance - 1, visited)?;
     }
     Ok(())
 }
@@ -1885,13 +2008,132 @@ mod tests {
                 .code(),
             FsErrorCode::InvalidPath
         );
-        assert_eq!(authorized.usage_bounded(10, 1024).expect("usage"), 11);
+        // 11 file bytes plus one directory.
+        let usage = 11 + DIRECTORY_QUOTA_BYTES;
+        assert_eq!(authorized.usage_bounded(10, usage).expect("usage"), usage);
+        assert_eq!(
+            authorized.usage_bounded(10, usage - 1),
+            Err(UsageError::LimitExceeded)
+        );
+        assert_eq!(
+            authorized.usage_bounded(1, 1 << 20),
+            Err(UsageError::TooManyEntries)
+        );
+    }
+
+    /// Builds `levels` nested directories below `root` with one file at the
+    /// bottom, returning the deepest directory.
+    fn nested_tree(root: &Path, levels: usize) -> std::path::PathBuf {
+        let mut path = root.to_path_buf();
+        for level in 0..levels {
+            path.push(format!("d{level}"));
+        }
+        fs::create_dir_all(&path).expect("nested tree");
+        fs::write(path.join("leaf.txt"), b"x").expect("leaf file");
+        path
+    }
+
+    fn depth_path(levels: usize) -> String {
+        (0..levels)
+            .map(|level| format!("d{level}"))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    #[test]
+    fn path_depth_is_capped_at_parse() {
+        for depth in [1, MAX_PATH_DEPTH - 1, MAX_PATH_DEPTH] {
+            let path = VirtualPath::parse(&depth_path(depth)).expect("within the depth limit");
+            assert_eq!(path.depth(), depth);
+        }
+        assert_eq!(
+            VirtualPath::parse(&depth_path(MAX_PATH_DEPTH + 1))
+                .expect_err("too deep")
+                .code(),
+            FsErrorCode::InvalidPath
+        );
+        // Stored Trash locations keep their recorded depth.
+        assert_eq!(
+            VirtualPath::parse_stored(&depth_path(MAX_PATH_DEPTH + 6))
+                .expect("stored path")
+                .depth(),
+            MAX_PATH_DEPTH + 6
+        );
+    }
+
+    #[test]
+    fn usage_charges_directories_and_stops_at_the_depth_limit() {
+        let temporary = TempDir::new().expect("temporary directory");
+        // A file at exactly the depth limit is measurable.
+        nested_tree(temporary.path(), MAX_PATH_DEPTH - 1);
+        let id = ShareId::new("documents").expect("valid share id");
+        let share = ShareFs::open(id.clone(), temporary.path()).expect("open share");
+        let write = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadWrite,
+        };
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let directories = (MAX_PATH_DEPTH - 1) as u64;
+        assert_eq!(
+            authorized.usage_bounded(1_000, u64::MAX).expect("usage"),
+            1 + directories * DIRECTORY_QUOTA_BYTES
+        );
+        // A directory at the limit is measurable while it is empty, but an
+        // entry below the limit stops the scan with a distinct error.
+        let bottom = temporary.path().join(depth_path(MAX_PATH_DEPTH - 1));
+        fs::create_dir(bottom.join("deeper")).expect("deeper directory");
+        assert_eq!(
+            authorized.usage_bounded(1_000, u64::MAX).expect("usage"),
+            1 + (directories + 1) * DIRECTORY_QUOTA_BYTES
+        );
+        fs::write(bottom.join("deeper/below.txt"), b"x").expect("file below the limit");
+        assert_eq!(
+            authorized.usage_bounded(1_000, u64::MAX),
+            Err(UsageError::TooDeep)
+        );
+    }
+
+    #[test]
+    fn moving_a_directory_deeper_than_the_limit_is_rejected_without_changes() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        // `subtree` holds two more levels: subtree/a/b.txt.
+        fs::create_dir_all(temporary.path().join("subtree/a")).expect("subtree");
+        fs::write(temporary.path().join("subtree/a/b.txt"), b"b").expect("subtree file");
+        nested_tree(temporary.path(), MAX_PATH_DEPTH - 3);
+        let source = VirtualPath::parse("subtree").expect("path");
+        let expected = authorized.metadata(&source).expect("metadata");
+
+        // Moving it so `subtree` sits at depth 63 would put b.txt at 65.
+        let too_deep = VirtualPath::parse(&format!("{}/subtree", depth_path(MAX_PATH_DEPTH - 2)))
+            .expect("destination within the limit");
+        fs::create_dir(temporary.path().join(depth_path(MAX_PATH_DEPTH - 2)))
+            .expect("destination parent");
         assert_eq!(
             authorized
-                .usage_bounded(1, 1024)
-                .expect_err("entry limit")
+                .move_entry(&source, &too_deep, expected)
+                .expect_err("subtree too deep")
                 .code(),
-            FsErrorCode::TooLarge
+            FsErrorCode::TooDeep
+        );
+        assert!(temporary.path().join("subtree/a/b.txt").exists());
+
+        // At depth 62, b.txt lands exactly at the limit.
+        let fits = VirtualPath::parse(&format!("{}/subtree", depth_path(MAX_PATH_DEPTH - 3)))
+            .expect("destination");
+        authorized
+            .move_entry(&source, &fits, expected)
+            .expect("subtree fits");
+        assert!(
+            temporary
+                .path()
+                .join(depth_path(MAX_PATH_DEPTH - 3))
+                .join("subtree/a/b.txt")
+                .exists()
         );
     }
 
@@ -1929,18 +2171,17 @@ mod tests {
             .authorize(Some(&write), GlobalPolicy::default())
             .expect("write access");
         // 11 fixture bytes, the 10-byte hard link counted conservatively, and
-        // 5 bytes under non-UTF-8 names. Links and special files count zero,
-        // and the 4096-byte symlink target is never reached.
-        assert_eq!(authorized.usage_bounded(64, 1 << 20).expect("usage"), 26);
+        // 5 bytes under non-UTF-8 names, plus two directories. Links and
+        // special files count zero, and the 4096-byte symlink target is never
+        // reached.
+        let usage = 26 + 2 * DIRECTORY_QUOTA_BYTES;
+        assert_eq!(authorized.usage_bounded(64, 1 << 20).expect("usage"), usage);
         // Skipped entries still consume the entry budget: eleven share entries
         // plus the private internal directory.
-        assert_eq!(authorized.usage_bounded(12, 1 << 20).expect("usage"), 26);
+        assert_eq!(authorized.usage_bounded(12, 1 << 20).expect("usage"), usage);
         assert_eq!(
-            authorized
-                .usage_bounded(11, 1 << 20)
-                .expect_err("entry limit")
-                .code(),
-            FsErrorCode::TooLarge
+            authorized.usage_bounded(11, 1 << 20),
+            Err(UsageError::TooManyEntries)
         );
         let listing = authorized
             .list(&VirtualPath::root())

@@ -1045,6 +1045,11 @@ export function UploadQueue({
           status: "failed",
           message: "The shared folder quota was exceeded.",
         });
+      } else if (outcome && shareStateMessages[outcome]) {
+        update(job.id, {
+          status: "failed",
+          message: shareStateMessages[outcome],
+        });
       } else {
         update(job.id, { status: "failed", message: "The upload failed." });
       }
@@ -1298,8 +1303,26 @@ function parentPath(path: string): string {
   return separator < 0 ? "" : path.slice(0, separator);
 }
 
+/**
+ * Messages for server error codes and upload outcomes that name a state of
+ * the shared folder or path depth rather than a failure of this request.
+ */
+export const shareStateMessages: Readonly<Record<string, string>> = {
+  path_too_deep: "Folders can be nested at most 64 levels deep.",
+  share_too_large_to_measure:
+    "The shared folder has too many items to check its quota. Ask an administrator.",
+  share_too_deep_to_measure:
+    "The shared folder has folders nested too deeply to check its quota. Ask an administrator.",
+};
+
+function shareStateMessage(cause: ApiError): string | undefined {
+  return cause.code ? shareStateMessages[cause.code] : undefined;
+}
+
 function operationError(cause: unknown): string {
   if (cause instanceof ApiError) {
+    const stateMessage = shareStateMessage(cause);
+    if (stateMessage) return stateMessage;
     if (cause.kind === "forbidden")
       return "Your write access changed. Reload the page or contact an administrator.";
     if (cause.kind === "conflict")
@@ -1315,6 +1338,8 @@ function operationError(cause: unknown): string {
 
 function uploadError(cause: unknown): string {
   if (cause instanceof ApiError) {
+    const stateMessage = shareStateMessage(cause);
+    if (stateMessage) return stateMessage;
     if (cause.kind === "forbidden") return "Your write access changed.";
     if (cause.kind === "conflict" || cause.status === 412)
       return "The existing file changed after it was checked. Retry to review it again.";

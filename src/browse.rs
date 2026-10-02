@@ -459,6 +459,12 @@ impl BrowseState {
             .ok_or(AppError::TooManyRequests)
     }
 
+    /// The HMAC key for opaque cursors. Other cursor formats must frame a
+    /// distinct domain label first so they never verify as directory cursors.
+    pub(crate) fn cursor_key(&self) -> &[u8; 32] {
+        &self.cursor_key
+    }
+
     /// Builds the same opaque validator returned by the metadata/read APIs.
     /// Mutation handlers use it for `If-Match` without learning host paths.
     #[must_use]
@@ -1375,6 +1381,7 @@ fn non_disclosing_fs_error(error: FsError) -> AppError {
         FsErrorCode::TooLarge => AppError::TooLarge,
         FsErrorCode::Unavailable => AppError::Internal,
         FsErrorCode::InvalidPath => AppError::InvalidRequest,
+        FsErrorCode::TooDeep => AppError::PathTooDeep,
         FsErrorCode::AccessDenied
         | FsErrorCode::Conflict
         | FsErrorCode::CrossDevice
