@@ -111,8 +111,12 @@ impl FuzzRoot {
     )]
     fn new() -> Self {
         let sequence = FUZZ_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("index-fuzz-{}-{sequence:016x}", std::process::id()));
+        // Fuzz-only and never shipped. create_dir below fails if the name
+        // already exists, so a path planted in the shared temporary
+        // directory is never reused.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let temporary = std::env::temp_dir();
+        let path = temporary.join(format!("index-fuzz-{}-{sequence:016x}", std::process::id()));
         // nosemgrep: crabinet-ambient-filesystem-path
         std::fs::create_dir(&path).expect("unique synthetic fuzz root");
         Self(path)

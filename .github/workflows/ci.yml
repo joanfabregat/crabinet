@@ -279,6 +279,7 @@ jobs:
           --config p/secrets
           --config p/r2c-security-audit
           --config p/typescript
+          --config p/rust
           --exclude .semgrep
           --error --sarif --output semgrep.sarif .
       - name: Upload Semgrep SARIF
