@@ -33,7 +33,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     app::AppState,
-    browse::{AuthenticatedIdentity, BrowseState},
+    browse::{AuthenticatedIdentity, BrowseState, run_blocking},
     client_address::TrustedProxies,
     config::{Config, Permission},
     error::AppError,
@@ -498,6 +498,30 @@ impl AuthService {
         }
     }
 
+    /// The limiter source of a sign-in request: the client address resolved
+    /// through the configured trusted proxies, grouped by
+    /// [`rate_limit_source`]. `None` when the transport peer is unknown.
+    fn sign_in_source(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Option<IpAddr> {
+        peer.map(|peer| rate_limit_source(self.inner.trusted_proxies.client_address(peer, headers)))
+    }
+
+    /// Counts one sign-in attempt against its source's per-minute budget.
+    /// Password logins and passkey sign-in starts share this one budget per
+    /// source, so neither can be used to bypass the other's limit.
+    fn allow_sign_in_source(&self, source: Option<IpAddr>) -> Result<(), AppError> {
+        if self
+            .inner
+            .source_rate_limit
+            .lock()
+            .map_err(|_| AppError::Internal)?
+            .allow(source, self.inner.clock.now())
+        {
+            Ok(())
+        } else {
+            Err(AppError::TooManyRequests)
+        }
+    }
+
     async fn login(
         &self,
         username: &str,
@@ -525,15 +549,7 @@ impl AuthService {
         // The per-source cap is counted across all usernames and costs no
         // Argon2 work, so one source cycling usernames is refused here instead
         // of queueing for the shared verifier ahead of everyone else.
-        if !self
-            .inner
-            .source_rate_limit
-            .lock()
-            .map_err(|_| AppError::Internal)?
-            .allow(source, self.inner.clock.now())
-        {
-            return Err(AppError::TooManyRequests);
-        }
+        self.allow_sign_in_source(source)?;
         // The permit is taken before the per-account limiter is consulted, so
         // new (account, source) keys can only be created at the bounded
         // verification rate. It is moved into the blocking task below:
@@ -656,6 +672,31 @@ impl AuthService {
     }
 
     async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthenticatedSession, AppError> {
+        let (key, raw_token, session, now) = self.validate_session(headers).await?;
+        self.inner.store.touch(key, now).await?;
+        Ok(AuthenticatedSession {
+            principal: AuthenticatedPrincipal {
+                username: Arc::from(session.username),
+            },
+            session_token: raw_token,
+            created_at: session.created_at,
+            picture_url: session.picture_url,
+        })
+    }
+
+    /// Reports whether the presented session is still valid without
+    /// extending it. Long-lived responses, such as directory event streams,
+    /// use it to end once their session is signed out, expired, or revoked.
+    pub(crate) async fn session_is_active(&self, headers: &HeaderMap) -> bool {
+        self.validate_session(headers).await.is_ok()
+    }
+
+    /// Looks up the presented session and deletes it if it has expired or its
+    /// user is no longer active.
+    async fn validate_session(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(Vec<u8>, [u8; TOKEN_BYTES], StoredSession, i64), AppError> {
         let cookie = session_cookie(headers).ok_or(AppError::Unauthorized)?;
         let raw_token = decode_token(cookie).ok_or(AppError::Unauthorized)?;
         let key = self.digest(b"session\0", &raw_token);
@@ -675,15 +716,7 @@ impl AuthService {
             self.inner.store.delete(key).await?;
             return Err(AppError::Unauthorized);
         }
-        self.inner.store.touch(key, now).await?;
-        Ok(AuthenticatedSession {
-            principal: AuthenticatedPrincipal {
-                username: Arc::from(session.username),
-            },
-            session_token: raw_token,
-            created_at: session.created_at,
-            picture_url: session.picture_url,
-        })
+        Ok((key, raw_token, session, now))
     }
 
     async fn logout(&self, headers: &HeaderMap) -> Result<(), AppError> {
@@ -767,8 +800,12 @@ impl AuthService {
         picture_url: Option<String>,
     ) -> Result<SessionResponse, AppError> {
         let default_folder = self.inner.store.default_folder(username).await?;
-        let default_folder =
-            default_folder.filter(|folder| self.valid_default_folder(browse, username, folder));
+        let default_folder = match default_folder {
+            Some(folder) if self.valid_default_folder(browse, username, &folder).await? => {
+                Some(folder)
+            }
+            _ => None,
+        };
         let preferences = self.inner.store.display_preferences(username).await?;
         let picture_url = picture_url.or_else(|| {
             self.inner
@@ -793,30 +830,40 @@ impl AuthService {
         })
     }
 
-    fn valid_default_folder(
+    /// Checks that a saved default folder is still an authorized directory.
+    /// The directory lookup runs on the blocking pool: this is on every
+    /// session read and sign-in, and a slow filesystem must not stall the
+    /// async workers that serve them.
+    async fn valid_default_folder(
         &self,
         browse: &BrowseState,
         username: &str,
         folder: &DefaultFolder,
-    ) -> bool {
+    ) -> Result<bool, AppError> {
         let Ok(share_id) = ShareId::new(folder.share_id.clone()) else {
-            return false;
+            return Ok(false);
         };
         let path = if folder.path.is_empty() {
             VirtualPath::root()
         } else if let Ok(path) = VirtualPath::parse(&folder.path) {
             path
         } else {
-            return false;
+            return Ok(false);
         };
         let identity = self.browse_identity(username);
-        let Ok(authorized) = browse.authorize(&identity, &share_id) else {
-            return false;
+        let Ok(authorized) = browse.authorize_owned(&identity, &share_id) else {
+            return Ok(false);
         };
-        path.is_root()
-            || authorized
+        if path.is_root() {
+            return Ok(true);
+        }
+        run_blocking(move || {
+            authorized
+                .view()
                 .metadata(&path)
                 .is_ok_and(|metadata| metadata.kind == EntryKind::Directory)
+        })
+        .await
     }
 }
 
@@ -1331,7 +1378,9 @@ async fn update_preferences(
     }
     let Json(payload) = payload.map_err(|_| AppError::InvalidRequest)?;
     if let Some(folder) = payload.default_folder.as_ref()
-        && !auth.valid_default_folder(state.browse(), session.principal.username(), folder)
+        && !auth
+            .valid_default_folder(state.browse(), session.principal.username(), folder)
+            .await?
     {
         return Err(AppError::NotFound);
     }
@@ -1378,8 +1427,7 @@ async fn login(
     validate_same_origin(&headers)?;
     let Json(payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
     let auth = state.auth().ok_or(AppError::Internal)?;
-    let source = peer
-        .map(|peer| rate_limit_source(auth.inner.trusted_proxies.client_address(peer, &headers)));
+    let source = auth.sign_in_source(peer, &headers);
     let session = auth
         .login(
             &payload.username,
@@ -1935,6 +1983,61 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!read_only_documents.path().join("blocked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn event_streams_end_soon_after_their_session_is_signed_out() {
+        let auth = test_auth(1, 20);
+        let documents = TempDir::new().expect("documents root");
+        let private = TempDir::new().expect("private root");
+        let app = protected_app(auth.service, documents.path(), private.path());
+        let (cookie, csrf) = login_as(&app, "Alice", "a very long unicode password 🙂").await;
+        let events = || {
+            Request::get("/api/v1/shares/documents/events")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // While the session is valid, the stream stays open past several
+        // session checks.
+        let open = app.clone().oneshot(events()).await.unwrap();
+        assert_eq!(open.status(), StatusCode::OK);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                to_bytes(open.into_body(), 16_384)
+            )
+            .await
+            .is_err()
+        );
+
+        let stream = app.clone().oneshot(events()).await.unwrap();
+        assert_eq!(stream.status(), StatusCode::OK);
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/logout")
+                    .header(header::HOST, "files.example.test")
+                    .header(header::ORIGIN, "https://files.example.test")
+                    .header("sec-fetch-site", "same-origin")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &csrf)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        // The stream ends at its next session check, long before its
+        // 60-second lifetime.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            to_bytes(stream.into_body(), 16_384),
+        )
+        .await
+        .expect("signed-out stream ends")
+        .expect("stream body");
     }
 
     #[tokio::test]
@@ -3368,6 +3471,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A passkey sign-in start relayed by the trusted proxy at 192.0.2.10.
+    fn proxied_passkey_start(client: &str) -> Request<Body> {
+        let mut request = post("/api/v1/auth/passkeys/login/start", "{}");
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&format!("203.0.113.250, {client}")).unwrap(),
+        );
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 10], 4711))));
+        request
+    }
+
+    async fn flow_id(response: Response) -> String {
+        let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        value["flowId"].as_str().expect("flow ID").to_owned()
+    }
+
+    #[tokio::test]
+    async fn passkey_sign_in_starts_share_the_per_source_budget() {
+        let mut auth = test_auth_with_source_limit(1, 5, 3);
+        trust_test_proxy(&mut auth);
+        Arc::get_mut(&mut auth.service.inner)
+            .expect("unshared test service")
+            .passkeys = Some(
+            passkeys::PasskeyState::new(&url::Url::parse("https://files.example.test").unwrap())
+                .unwrap(),
+        );
+        let app = app_router(AppState::with_auth(true, auth.service.clone()));
+
+        // A genuine user behind the proxy starts a ceremony.
+        let genuine = app
+            .clone()
+            .oneshot(proxied_passkey_start("203.0.113.9"))
+            .await
+            .unwrap();
+        assert_eq!(genuine.status(), StatusCode::OK);
+        let genuine = flow_id(genuine).await;
+
+        // Another client spends its budget, then is refused without storing
+        // further ceremonies.
+        for _ in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(proxied_passkey_start("198.51.100.7"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        for _ in 0..50 {
+            let response = app
+                .clone()
+                .oneshot(proxied_passkey_start("198.51.100.7"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(error_code(response).await, "rate_limited");
+        }
+        let passkeys = auth.service.inner.passkeys.as_ref().expect("passkeys");
+        let pending = passkeys.pending_logins();
+        assert_eq!(pending.len(), 4);
+        assert!(pending.contains(&genuine));
+
+        // The budget is shared with password sign-in from the same source.
+        let response = app
+            .clone()
+            .oneshot(proxied_login("Alice", ALICE_PASSWORD, "198.51.100.7"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different client behind the same trusted proxy is unaffected.
+        let other = app
+            .clone()
+            .oneshot(proxied_passkey_start("203.0.113.20"))
+            .await
+            .unwrap();
+        assert_eq!(other.status(), StatusCode::OK);
     }
 
     #[test]

@@ -24,7 +24,11 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncWriteExt, sync::OwnedMutexGuard, time::timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::OwnedMutexGuard,
+    time::{Instant, timeout, timeout_at},
+};
 
 use crate::{
     app::AppState,
@@ -45,6 +49,22 @@ const QUOTA_SCAN_ENTRY_LIMIT: usize = 1_000_000;
 /// A multipart upload that delivers no new part or chunk for this long is
 /// aborted, releasing its upload slot and unpublished staging files.
 const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The slowest sustained rate an upload may average before its absolute
+/// deadline cuts it off: 64 KiB/s (about 0.5 Mbit/s). The deadline is the
+/// largest permitted request body at this rate, so any complete upload that
+/// averages at least this rate finishes, while a client trickling a byte
+/// before every idle timeout cannot hold an upload slot indefinitely.
+const UPLOAD_MIN_BYTES_PER_SECOND: u64 = 65_536;
+/// Lower bound on the upload deadline for small configured upload limits.
+const UPLOAD_DEADLINE_FLOOR: Duration = Duration::from_secs(600);
+/// Concurrent text saves, each buffering up to `max_text_bytes` (1 MiB) and
+/// creating a staging file. Separate from the upload gate so editing a file
+/// is not refused while the browser runs its parallel uploads.
+const MAX_CONCURRENT_TEXT_SAVES: usize = 4;
+const MAX_CONCURRENT_TEXT_SAVES_PER_SUBJECT: usize = 2;
+/// A text save must deliver its whole body within this time, matching the
+/// upload idle timeout; the body is at most `max_text_bytes`.
+const TEXT_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug)]
 pub struct MutationLimits {
@@ -88,6 +108,11 @@ pub struct MutationState {
     /// map is bounded by the configured share count.
     commit_locks: Mutex<HashMap<ShareId, Arc<tokio::sync::Mutex<()>>>>,
     upload_idle_timeout: Duration,
+    /// Absolute time limit for receiving one upload request's body, derived
+    /// from the configured request size by [`upload_deadline`].
+    upload_deadline: Duration,
+    text_save_gate: SubjectGate,
+    text_body_timeout: Duration,
 }
 
 impl MutationState {
@@ -111,6 +136,12 @@ impl MutationState {
             ),
             commit_locks: Mutex::new(HashMap::new()),
             upload_idle_timeout: UPLOAD_IDLE_TIMEOUT,
+            upload_deadline: upload_deadline(limits.max_request_bytes),
+            text_save_gate: SubjectGate::new(
+                MAX_CONCURRENT_TEXT_SAVES,
+                MAX_CONCURRENT_TEXT_SAVES_PER_SUBJECT,
+            ),
+            text_body_timeout: TEXT_BODY_TIMEOUT,
         })
     }
 
@@ -145,6 +176,18 @@ impl MutationState {
     #[cfg(test)]
     fn with_upload_idle_timeout(mut self, idle: Duration) -> Self {
         self.upload_idle_timeout = idle;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_upload_deadline(mut self, deadline: Duration) -> Self {
+        self.upload_deadline = deadline;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_text_body_timeout(mut self, limit: Duration) -> Self {
+        self.text_body_timeout = limit;
         self
     }
 
@@ -448,10 +491,21 @@ async fn save_text_inner(
 ) -> MutationResult<Response> {
     let raw_path = query.path.as_deref().ok_or(AppError::InvalidRequest)?;
     let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, raw_path)?;
+    // Admitted before the body is read, so a refused save buffers nothing and
+    // creates no staging file. The lease is held until the save completes.
+    let _lease = state
+        .mutations()
+        .text_save_gate
+        .try_acquire(identity.subject())
+        .ok_or(AppError::Busy)?;
     let limits = state.mutations().limits;
-    let bytes = to_bytes(body, limits.max_text_bytes.saturating_add(1))
-        .await
-        .map_err(|_| AppError::TooLarge)?;
+    let bytes = timeout(
+        state.mutations().text_body_timeout,
+        to_bytes(body, limits.max_text_bytes.saturating_add(1)),
+    )
+    .await
+    .map_err(|_| body_timeout())?
+    .map_err(|_| AppError::TooLarge)?;
     if bytes.len() > limits.max_text_bytes {
         return Err(AppError::TooLarge.into());
     }
@@ -519,7 +573,7 @@ async fn move_entry_inner(
     if destination.file_name() != source.file_name() {
         ensure_creatable(&destination)?;
     }
-    let current = current_metadata(&authorized, &source).await?;
+    let current = gated_metadata(state, identity, &authorized, &source).await?;
     require_if_match(state, &share_id, &source, current, headers)?;
     let commit = state.mutations().commit_lock(&share_id).await;
     let (from, to) = (source, destination.clone());
@@ -562,7 +616,7 @@ async fn delete_entry_inner(
 ) -> MutationResult<Response> {
     let raw_path = query.path.as_deref().ok_or(AppError::InvalidRequest)?;
     let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, raw_path)?;
-    let current = current_metadata(&authorized, &path).await?;
+    let current = gated_metadata(state, identity, &authorized, &path).await?;
     require_if_match(state, &share_id, &path, current, headers)?;
     let commit = state.mutations().commit_lock(&share_id).await;
     let target = path.clone();
@@ -606,7 +660,7 @@ async fn list_trash_items(
     // A trash listing reads up to 10,000 bounded sidecars, so it shares the
     // directory-listing gate. The permit moves into the blocking task so a
     // disconnected client cannot free the slot while the scan still runs.
-    let permit = state.browse().acquire_listing()?;
+    let permit = state.browse().acquire_listing(&identity)?;
     let entries = run_blocking(move || {
         let _permit = permit;
         authorized.view().list_trash(10_000)
@@ -756,13 +810,15 @@ async fn upload_files_inner(
         .ok_or(AppError::Busy)?;
     let limits = state.mutations().limits;
     let idle = state.mutations().upload_idle_timeout;
+    // The idle timeout resets with every part and chunk; this absolute
+    // deadline does not, so a trickling client still releases its slot.
+    let deadline = Instant::now() + state.mutations().upload_deadline;
     let mut total_bytes = 0_u64;
     let mut file_count = 0_usize;
     let mut staged = Vec::new();
 
-    while let Some(mut field) = timeout(idle, multipart.next_field())
-        .await
-        .map_err(|_| idle_timeout())?
+    while let Some(mut field) = receive(deadline, idle, multipart.next_field())
+        .await?
         .map_err(|_| AppError::InvalidRequest)?
     {
         file_count += 1;
@@ -794,9 +850,8 @@ async fn upload_files_inner(
         // blocking pool, so a slow disk never stalls the runtime.
         let mut writer = tokio::fs::File::from_std(pending.writer()?);
         let mut file_bytes = 0_u64;
-        while let Some(chunk) = timeout(idle, field.chunk())
-            .await
-            .map_err(|_| idle_timeout())?
+        while let Some(chunk) = receive(deadline, idle, field.chunk())
+            .await?
             .map_err(|_| AppError::InvalidRequest)?
         {
             let chunk_len = u64::try_from(chunk.len()).map_err(|_| AppError::TooLarge)?;
@@ -896,6 +951,41 @@ fn idle_timeout() -> Rejection {
     Rejection::new(AppError::InvalidRequest, "idle_timeout")
 }
 
+fn upload_deadline_exceeded() -> Rejection {
+    Rejection::new(AppError::InvalidRequest, "upload_deadline")
+}
+
+fn body_timeout() -> Rejection {
+    Rejection::new(AppError::InvalidRequest, "body_timeout")
+}
+
+/// Awaits the next piece of an upload body within both the idle timeout and
+/// the request's absolute deadline, whichever comes first.
+async fn receive<F: Future>(
+    deadline: Instant,
+    idle: Duration,
+    next: F,
+) -> MutationResult<F::Output> {
+    let idle_at = Instant::now() + idle;
+    timeout_at(idle_at.min(deadline), next).await.map_err(|_| {
+        if idle_at < deadline {
+            idle_timeout()
+        } else {
+            upload_deadline_exceeded()
+        }
+    })
+}
+
+/// The absolute upload deadline: the largest permitted request body at
+/// [`UPLOAD_MIN_BYTES_PER_SECOND`], and never less than
+/// [`UPLOAD_DEADLINE_FLOOR`]. With the 256 MiB default this is 4,096 seconds
+/// (about 68 minutes); at the 1 GiB ceiling it is 16,384 seconds (about four
+/// and a half hours).
+fn upload_deadline(max_request_bytes: u64) -> Duration {
+    Duration::from_secs(max_request_bytes.div_ceil(UPLOAD_MIN_BYTES_PER_SECOND))
+        .max(UPLOAD_DEADLINE_FLOOR)
+}
+
 fn authorize_write(
     state: &AppState,
     identity: &AuthenticatedIdentity,
@@ -929,6 +1019,25 @@ async fn current_metadata(
 ) -> MutationResult<EntryMetadata> {
     let (share, path) = (authorized.clone(), path.clone());
     Ok(run_blocking(move || share.view().metadata(&path)).await??)
+}
+
+/// [`current_metadata`] for requests that no dedicated gate bounds (move and
+/// delete): the lookup takes a slot of the shared blocking-work gate, which
+/// moves into the blocking task so a cancelled request cannot release it
+/// early. The later commit is serialized per share by the commit lock.
+async fn gated_metadata(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    authorized: &OwnedAuthorizedShare,
+    path: &VirtualPath,
+) -> MutationResult<EntryMetadata> {
+    let lease = state.browse().acquire_blocking(identity)?;
+    let (share, path) = (authorized.clone(), path.clone());
+    Ok(run_blocking(move || {
+        let _lease = lease;
+        share.view().metadata(&path)
+    })
+    .await??)
 }
 
 /// Creates a private staging file on the blocking pool. If the request is
@@ -1165,6 +1274,8 @@ mod tests {
         app: Router,
         identity: AuthenticatedIdentity,
         upload_gate: Arc<Semaphore>,
+        text_save_gate: Arc<Semaphore>,
+        blocking_gate: Arc<Semaphore>,
     }
 
     fn fixture(access: AccessLevel, global_read_only: bool, limits: MutationLimits) -> Fixture {
@@ -1201,6 +1312,8 @@ mod tests {
         )
         .expect("browse state");
         let upload_gate = Arc::clone(mutations.upload_gate.process_semaphore());
+        let text_save_gate = Arc::clone(mutations.text_save_gate.process_semaphore());
+        let blocking_gate = Arc::clone(browse.blocking_gate());
         let app = app::router(
             AppState::new(true)
                 .with_browse(browse)
@@ -1211,6 +1324,8 @@ mod tests {
             app,
             identity: AuthenticatedIdentity::new("user-1", vec![grant]),
             upload_gate,
+            text_save_gate,
+            blocking_gate,
         }
     }
 
@@ -2234,6 +2349,214 @@ mod tests {
         })
         .expect("mutation state");
         assert!(single.upload_gate.try_acquire("alice").is_some());
+    }
+
+    fn no_staging_temps(root: &std::path::Path) -> bool {
+        let staging = root.join(".crabinet").join("staging");
+        [root.to_path_buf(), staging]
+            .into_iter()
+            .filter_map(|directory| fs::read_dir(directory).ok())
+            .flatten()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".index-tmp-")
+            })
+    }
+
+    fn save_text_request(etag: &str, body: Body) -> Request<Body> {
+        Request::put("/api/v1/shares/documents/text?path=existing.txt")
+            .header(header::IF_MATCH, etag)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(body)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn text_saves_are_concurrency_bounded_before_reading_the_body() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+        let held = Arc::clone(&fixture.text_save_gate)
+            .acquire_many_owned(MAX_CONCURRENT_TEXT_SAVES as u32)
+            .await
+            .expect("text save permits");
+        let busy = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            save_text_request(&etag, Body::from("refused")),
+        )
+        .await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[header::RETRY_AFTER], "60");
+        assert_eq!(
+            fs::read(fixture.root.path().join("existing.txt")).unwrap(),
+            b"original"
+        );
+        assert!(no_staging_temps(fixture.root.path()));
+
+        drop(held);
+        let accepted = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            save_text_request(&etag, Body::from("accepted")),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(
+            fs::read(fixture.root.path().join("existing.txt")).unwrap(),
+            b"accepted"
+        );
+        assert_eq!(
+            fixture.text_save_gate.available_permits(),
+            MAX_CONCURRENT_TEXT_SAVES
+        );
+    }
+
+    #[test]
+    fn one_subject_cannot_take_every_text_save_slot() {
+        let state = MutationState::default();
+        let held: Vec<_> = (0..MAX_CONCURRENT_TEXT_SAVES_PER_SUBJECT)
+            .map(|_| state.text_save_gate.try_acquire("alice").expect("slot"))
+            .collect();
+        assert!(state.text_save_gate.try_acquire("alice").is_none());
+        let other = state.text_save_gate.try_acquire("bob").expect("other user");
+        drop(held);
+        assert!(state.text_save_gate.try_acquire("alice").is_some());
+        drop(other);
+    }
+
+    #[tokio::test]
+    async fn stalled_text_save_bodies_time_out_and_release_their_slot() {
+        let mutations = MutationState::default().with_text_body_timeout(Duration::from_millis(100));
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+        let stalled = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"partial"))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                save_text_request(&etag, Body::from_stream(stalled)),
+            ),
+        )
+        .await
+        .expect("the body timeout ends the request");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            fixture.text_save_gate.available_permits(),
+            MAX_CONCURRENT_TEXT_SAVES
+        );
+        assert_eq!(
+            fs::read(fixture.root.path().join("existing.txt")).unwrap(),
+            b"original"
+        );
+        assert!(no_staging_temps(fixture.root.path()));
+    }
+
+    #[tokio::test]
+    async fn trickling_uploads_hit_the_absolute_deadline_and_release_their_slot() {
+        let limits = MutationLimits {
+            max_concurrent_uploads: 1,
+            ..MutationLimits::default()
+        };
+        // Each chunk arrives well within the idle timeout, so only the
+        // absolute deadline can end this upload.
+        let mutations = MutationState::new(limits)
+            .expect("mutation state")
+            .with_upload_idle_timeout(Duration::from_secs(5))
+            .with_upload_deadline(Duration::from_millis(300));
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        let boundary = "trickle-boundary";
+        let prefix = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"trickle.txt\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        );
+        let trickle = stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(prefix)) })
+            .chain(stream::unfold((), |()| async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), ()))
+            }));
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                Request::post("/api/v1/shares/documents/uploads")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from_stream(trickle))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the absolute deadline ends the upload");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(fixture.upload_gate.available_permits(), 1);
+        assert!(!fixture.root.path().join("trickle.txt").exists());
+        assert!(no_staging_temps(fixture.root.path()));
+    }
+
+    #[test]
+    fn upload_deadline_allows_the_largest_body_at_the_minimum_rate() {
+        // Default 256 MiB: 4,096 seconds.
+        assert_eq!(
+            upload_deadline(268_435_456),
+            Duration::from_secs(268_435_456 / UPLOAD_MIN_BYTES_PER_SECOND)
+        );
+        // Accepted 1 GiB ceiling: 16,384 seconds.
+        assert_eq!(
+            upload_deadline(ABSOLUTE_FILE_UPLOAD_LIMIT as u64),
+            Duration::from_secs(16_384)
+        );
+        // Small limits keep the floor.
+        assert_eq!(upload_deadline(1_048_576), UPLOAD_DEADLINE_FLOOR);
+        assert_eq!(
+            MutationState::default().upload_deadline,
+            Duration::from_secs(4_096)
+        );
+    }
+
+    #[tokio::test]
+    async fn move_and_delete_lookups_take_a_blocking_gate_slot() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+        let move_request = || {
+            Request::post("/api/v1/shares/documents/move")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, &etag)
+                .body(Body::from(
+                    json!({"source":"existing.txt","destination":"renamed.txt"}).to_string(),
+                ))
+                .unwrap()
+        };
+        let delete_request = || {
+            Request::delete("/api/v1/shares/documents/entry?path=existing.txt")
+                .header(header::IF_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let held = Arc::clone(&fixture.blocking_gate)
+            .acquire_many_owned(fixture.blocking_gate.available_permits() as u32)
+            .await
+            .expect("blocking permits");
+        for request in [move_request(), delete_request()] {
+            let busy = send(&fixture.app, Some(&fixture.identity), true, request).await;
+            assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        assert!(fixture.root.path().join("existing.txt").is_file());
+
+        drop(held);
+        let moved = send(&fixture.app, Some(&fixture.identity), true, move_request()).await;
+        assert_eq!(moved.status(), StatusCode::OK);
+        assert!(fixture.root.path().join("renamed.txt").is_file());
     }
 
     #[tokio::test]

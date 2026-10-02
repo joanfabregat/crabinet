@@ -37,6 +37,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     app::AppState,
+    auth::AuthService,
     error::AppError,
     filesystem::{
         AccessLevel, AuthorizedShare, DirectoryEntry, EntryKind, EntryMetadata, FsError,
@@ -54,18 +55,39 @@ const MAX_EVENT_CONNECTIONS_PER_SUBJECT: usize = 4;
 const EVENT_STREAM_LIFETIME: Duration = Duration::from_secs(60);
 /// Reconnect delay hint sent to `EventSource` clients.
 const EVENT_STREAM_RETRY: Duration = Duration::from_secs(1);
+/// How often an open event stream re-checks its session, matching the
+/// keep-alive interval, so a sign-out or revocation ends it within this time
+/// instead of at [`EVENT_STREAM_LIFETIME`].
+#[cfg(not(test))]
+const EVENT_SESSION_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const EVENT_SESSION_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// Concurrent requests that buffer a whole file in memory (text reads and
 /// previews). Each can hold several copies of up to the 16 MiB preview cap.
 const MAX_CONCURRENT_BUFFERED_READS: usize = 4;
+/// Buffered reads per authenticated subject, so one user cannot hold every
+/// buffered-read slot.
+const MAX_CONCURRENT_BUFFERED_READS_PER_SUBJECT: usize = 2;
 /// Concurrent directory scans, each of up to `max_directory_entries` stats.
 const MAX_CONCURRENT_LISTINGS: usize = 16;
-/// Concurrent streaming downloads across the process. Each holds an open
-/// file descriptor until its response body completes or is dropped.
+/// Directory and trash scans per authenticated subject.
+const MAX_CONCURRENT_LISTINGS_PER_SUBJECT: usize = 8;
+/// Request-path filesystem work that no dedicated gate already bounds:
+/// metadata lookups and the pre-commit stat of a move or delete. Each holds a Tokio blocking-pool thread (512 by default) while
+/// a slow disk or network filesystem answers, so this cap keeps such requests
+/// from occupying the pool. Session lookups are deliberately not counted, so
+/// signing in and out stays available while it is saturated.
+const MAX_CONCURRENT_BLOCKING_REQUESTS: usize = 64;
+/// Ungated blocking requests per authenticated subject.
+const MAX_CONCURRENT_BLOCKING_REQUESTS_PER_SUBJECT: usize = 16;
+/// Concurrent streaming downloads across the process, counting streamed
+/// image previews. Each holds an open file descriptor until its response
+/// body completes or is dropped.
 const MAX_CONCURRENT_DOWNLOADS: usize = 64;
 /// Concurrent streaming downloads per authenticated subject: enough for a few
 /// parallel downloads plus a media player's overlapping range requests, while
 /// one user cannot hold every process slot.
-const MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT: usize = 8;
+pub(crate) const MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT: usize = 8;
 
 /// Runs synchronous filesystem work on Tokio's blocking pool so slow disks
 /// or network filesystems never stall the async worker threads.
@@ -190,8 +212,9 @@ pub struct BrowseState {
     cursor_key: [u8; 32],
     event_gate: SubjectGate,
     download_gate: SubjectGate,
-    buffered_read_gate: Arc<Semaphore>,
-    listing_gate: Arc<Semaphore>,
+    buffered_read_gate: SubjectGate,
+    listing_gate: SubjectGate,
+    blocking_gate: SubjectGate,
 }
 
 /// A process-wide concurrency cap combined with a per-subject cap, so one
@@ -290,8 +313,26 @@ impl BrowseState {
                 return Err(BrowseStateError::DuplicateShare);
             }
         }
-        Ok(Self {
-            shares: by_id,
+        Ok(Self::with_gates(by_id, limits, policy, cursor_key))
+    }
+
+    pub(crate) fn disabled() -> Self {
+        Self::with_gates(
+            HashMap::new(),
+            BrowseLimits::default(),
+            GlobalPolicy::default(),
+            [0; 32],
+        )
+    }
+
+    fn with_gates(
+        shares: HashMap<ShareId, Arc<ConfiguredShare>>,
+        limits: BrowseLimits,
+        policy: GlobalPolicy,
+        cursor_key: [u8; 32],
+    ) -> Self {
+        Self {
+            shares,
             limits,
             policy,
             cursor_key,
@@ -300,24 +341,18 @@ impl BrowseState {
                 MAX_CONCURRENT_DOWNLOADS,
                 MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT,
             ),
-            buffered_read_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_BUFFERED_READS)),
-            listing_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_LISTINGS)),
-        })
-    }
-
-    pub(crate) fn disabled() -> Self {
-        Self {
-            shares: HashMap::new(),
-            limits: BrowseLimits::default(),
-            policy: GlobalPolicy::default(),
-            cursor_key: [0; 32],
-            event_gate: SubjectGate::new(MAX_EVENT_CONNECTIONS, MAX_EVENT_CONNECTIONS_PER_SUBJECT),
-            download_gate: SubjectGate::new(
-                MAX_CONCURRENT_DOWNLOADS,
-                MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT,
+            buffered_read_gate: SubjectGate::new(
+                MAX_CONCURRENT_BUFFERED_READS,
+                MAX_CONCURRENT_BUFFERED_READS_PER_SUBJECT,
             ),
-            buffered_read_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_BUFFERED_READS)),
-            listing_gate: Arc::new(Semaphore::new(MAX_CONCURRENT_LISTINGS)),
+            listing_gate: SubjectGate::new(
+                MAX_CONCURRENT_LISTINGS,
+                MAX_CONCURRENT_LISTINGS_PER_SUBJECT,
+            ),
+            blocking_gate: SubjectGate::new(
+                MAX_CONCURRENT_BLOCKING_REQUESTS,
+                MAX_CONCURRENT_BLOCKING_REQUESTS_PER_SUBJECT,
+            ),
         }
     }
 
@@ -345,37 +380,61 @@ impl BrowseState {
     }
 
     /// Admits one request that buffers a complete file in memory.
-    pub(crate) fn acquire_buffered_read(&self) -> Result<OwnedSemaphorePermit, AppError> {
+    pub(crate) fn acquire_buffered_read(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<SubjectLease, AppError> {
         self.buffered_read_gate
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AppError::Busy)
+            .try_acquire(identity.subject())
+            .ok_or(AppError::Busy)
+    }
+
+    /// Admits one request-path blocking filesystem call that no dedicated
+    /// gate bounds. The lease must move into the blocking closure so a
+    /// cancelled request cannot release it while the work still runs.
+    pub(crate) fn acquire_blocking(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<SubjectLease, AppError> {
+        self.blocking_gate
+            .try_acquire(identity.subject())
+            .ok_or(AppError::Busy)
     }
 
     /// Admits one streaming download. The lease must travel with the response
     /// body so the slot is released only when the stream ends or is dropped.
-    fn acquire_download(&self, identity: &AuthenticatedIdentity) -> Result<SubjectLease, AppError> {
+    pub(crate) fn acquire_download(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<SubjectLease, AppError> {
         self.download_gate
             .try_acquire(identity.subject())
             .ok_or(AppError::Busy)
     }
 
     /// Admits one directory or trash scan.
-    pub(crate) fn acquire_listing(&self) -> Result<OwnedSemaphorePermit, AppError> {
+    pub(crate) fn acquire_listing(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<SubjectLease, AppError> {
         self.listing_gate
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AppError::Busy)
+            .try_acquire(identity.subject())
+            .ok_or(AppError::Busy)
     }
 
     #[cfg(test)]
     pub(crate) fn buffered_read_gate(&self) -> &Arc<Semaphore> {
-        &self.buffered_read_gate
+        self.buffered_read_gate.process_semaphore()
     }
 
     #[cfg(test)]
     pub(crate) fn listing_gate(&self) -> &Arc<Semaphore> {
-        &self.listing_gate
+        self.listing_gate.process_semaphore()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blocking_gate(&self) -> &Arc<Semaphore> {
+        self.blocking_gate.process_semaphore()
     }
 
     pub fn authorize<'state>(
@@ -527,7 +586,7 @@ async fn list_directory(
         return Err(AppError::InvalidRequest);
     }
 
-    let permit = browse.acquire_listing()?;
+    let permit = browse.acquire_listing(&identity)?;
     let max_entries = browse.limits.max_directory_entries;
     let listing_path = path.clone();
     let mut entries = run_blocking(move || {
@@ -582,16 +641,34 @@ async fn list_directory(
     }))
 }
 
+struct EventStreamState {
+    watcher: rustix::fd::OwnedFd,
+    deadline: Instant,
+    /// Held for the life of the stream to keep its event-connection slot.
+    _lease: SubjectLease,
+    session: Option<SessionCheck>,
+}
+
+struct SessionCheck {
+    auth: AuthService,
+    cookies: HeaderMap,
+    next_check: Instant,
+}
+
 /// Sends event-driven invalidation hints for one explicitly selected
 /// directory. Authorization is checked when the stream opens, so each
 /// connection is bounded to [`EVENT_STREAM_LIFETIME`]; browsers then
 /// reconnect through authentication middleware, which re-validates the
-/// session and grants. No directory contents are scanned by the event stream.
+/// session and grants. Grants are immutable configuration, so in between the
+/// stream only re-checks that its session is still valid, every
+/// [`EVENT_SESSION_CHECK_INTERVAL`], and ends once it is signed out, expired,
+/// or revoked. No directory contents are scanned by the event stream.
 async fn directory_events(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     Path(raw_share_id): Path<String>,
     Query(query): Query<DirectoryQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
     let path = parse_query_path(query.path.as_deref())?;
@@ -600,41 +677,65 @@ async fn directory_events(
     let watcher = run_blocking(move || authorized.view().watch_directory(&path))
         .await?
         .map_err(map_fs_error)?;
-    let deadline = Instant::now() + EVENT_STREAM_LIFETIME;
+    let now = Instant::now();
+    // Only the session cookie is retained for the periodic re-check. Without
+    // an authentication service (isolated handler tests), there is no
+    // session to re-check.
+    let session = state.auth().cloned().map(|auth| {
+        let mut cookies = HeaderMap::new();
+        for value in headers.get_all(header::COOKIE) {
+            cookies.append(header::COOKIE, value.clone());
+        }
+        SessionCheck {
+            auth,
+            cookies,
+            next_check: now + EVENT_SESSION_CHECK_INTERVAL,
+        }
+    });
+    let stream_state = EventStreamState {
+        watcher,
+        deadline: now + EVENT_STREAM_LIFETIME,
+        _lease: lease,
+        session,
+    };
 
     // A retry-only event sets the browser's reconnect delay without
     // dispatching anything to the page.
     let retry_hint =
         stream::once(async { Ok::<Event, Infallible>(Event::default().retry(EVENT_STREAM_RETRY)) });
-    let events = stream::unfold(
-        (watcher, deadline, lease),
-        |(watcher, deadline, lease)| async move {
-            loop {
-                if Instant::now() >= deadline {
+    let events = stream::unfold(stream_state, |mut stream_state| async move {
+        loop {
+            if Instant::now() >= stream_state.deadline {
+                return None;
+            }
+            sleep(Duration::from_millis(250)).await;
+            if let Some(session) = stream_state.session.as_mut()
+                && Instant::now() >= session.next_check
+            {
+                if !session.auth.session_is_active(&session.cookies).await {
                     return None;
                 }
-                sleep(Duration::from_millis(250)).await;
-                let mut buffer = [MaybeUninit::uninit(); 4096];
-                match rustix::fs::inotify::Reader::new(&watcher, &mut buffer).next() {
-                    Ok(_) => {
-                        return Some((
-                            Ok::<Event, Infallible>(
-                                Event::default().event("invalidate").data("{}"),
-                            ),
-                            (watcher, deadline, lease),
-                        ));
-                    }
-                    Err(rustix::io::Errno::AGAIN) => {}
-                    Err(_) => {
-                        return Some((
-                            Ok::<Event, Infallible>(Event::default().event("resync").data("{}")),
-                            (watcher, Instant::now(), lease),
-                        ));
-                    }
+                session.next_check = Instant::now() + EVENT_SESSION_CHECK_INTERVAL;
+            }
+            let mut buffer = [MaybeUninit::uninit(); 4096];
+            match rustix::fs::inotify::Reader::new(&stream_state.watcher, &mut buffer).next() {
+                Ok(_) => {
+                    return Some((
+                        Ok::<Event, Infallible>(Event::default().event("invalidate").data("{}")),
+                        stream_state,
+                    ));
+                }
+                Err(rustix::io::Errno::AGAIN) => {}
+                Err(_) => {
+                    stream_state.deadline = Instant::now();
+                    return Some((
+                        Ok::<Event, Infallible>(Event::default().event("resync").data("{}")),
+                        stream_state,
+                    ));
                 }
             }
-        },
-    );
+        }
+    });
 
     let mut response = Sse::new(retry_hint.chain(events))
         .keep_alive(
@@ -683,9 +784,13 @@ async fn read_metadata(
     let share_id = authorized.share_id().clone();
     let path = VirtualPath::parse(&query.path).map_err(map_fs_error)?;
     let metadata_path = path.clone();
-    let metadata = run_blocking(move || authorized.view().metadata(&metadata_path))
-        .await?
-        .map_err(map_fs_error)?;
+    let lease = browse.acquire_blocking(&identity)?;
+    let metadata = run_blocking(move || {
+        let _lease = lease;
+        authorized.view().metadata(&metadata_path)
+    })
+    .await?
+    .map_err(map_fs_error)?;
     let name = path
         .components()
         .last()
@@ -737,7 +842,7 @@ async fn read_text(
     let path = VirtualPath::parse(&query.path).map_err(map_fs_error)?;
     // The permit travels with the blocking read, so a cancelled request cannot
     // release it early, and is held until the response body is built.
-    let permit = browse.acquire_buffered_read()?;
+    let permit = browse.acquire_buffered_read(&identity)?;
     let max_bytes = browse.limits.max_text_bytes;
     let read_path = path.clone();
     let (bytes, _permit) =
@@ -2498,6 +2603,134 @@ mod tests {
             .await;
             assert_eq!(accepted.status(), StatusCode::OK, "{uri}");
         }
+    }
+
+    /// A router and the state behind it, so a test can hold gate leases.
+    fn gated_fixture() -> (TempDir, AppState, Router, ShareGrant) {
+        let root = TempDir::new().expect("temporary share");
+        fs::write(root.path().join("a.txt"), b"abcdef").expect("text fixture");
+        let id = ShareId::new("documents").expect("share id");
+        let share = ConfiguredShare::new(
+            "Documents",
+            ShareFs::open(id.clone(), root.path()).expect("open share"),
+        )
+        .expect("configured share");
+        let browse = BrowseState::new(
+            vec![share],
+            BrowseLimits::default(),
+            GlobalPolicy::default(),
+            [0x5a; 32],
+        )
+        .expect("browse state");
+        let state = AppState::new(true).with_browse(browse);
+        let app = app::router(state.clone());
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadOnly,
+        };
+        (root, state, app, grant)
+    }
+
+    async fn get_status(app: &Router, identity: &AuthenticatedIdentity, uri: &str) -> StatusCode {
+        send(
+            app,
+            Some(identity),
+            Request::get(uri).body(Body::empty()).unwrap(),
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test]
+    async fn listing_and_buffered_read_gates_cap_each_subject() {
+        let (_root, state, app, grant) = gated_fixture();
+        let alice = AuthenticatedIdentity::new("alice", vec![grant.clone()]);
+        let bob = AuthenticatedIdentity::new("bob", vec![grant]);
+        let browse = state.browse();
+        let cases: [(&SubjectGate, usize, &[&str]); 2] = [
+            (
+                &browse.listing_gate,
+                MAX_CONCURRENT_LISTINGS_PER_SUBJECT,
+                &[
+                    "/api/v1/shares/documents/directory",
+                    "/api/v1/shares/documents/trash",
+                ],
+            ),
+            (
+                &browse.buffered_read_gate,
+                MAX_CONCURRENT_BUFFERED_READS_PER_SUBJECT,
+                &[
+                    "/api/v1/shares/documents/text?path=a.txt",
+                    "/api/v1/shares/documents/preview?path=a.txt",
+                ],
+            ),
+        ];
+        for (gate, per_subject, uris) in cases {
+            let held: Vec<_> = (0..per_subject)
+                .map(|_| gate.try_acquire("alice").expect("subject lease"))
+                .collect();
+            // The process still has free slots, yet this subject is refused.
+            assert!(gate.process_semaphore().available_permits() > 0);
+            for uri in uris {
+                assert_eq!(
+                    get_status(&app, &alice, uri).await,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{uri}"
+                );
+                assert_eq!(get_status(&app, &bob, uri).await, StatusCode::OK, "{uri}");
+            }
+            drop(held);
+            for uri in uris {
+                assert_eq!(get_status(&app, &alice, uri).await, StatusCode::OK, "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ungated_blocking_requests_share_a_bounded_gate() {
+        let (_root, state, app, grant) = gated_fixture();
+        let alice = AuthenticatedIdentity::new("alice", vec![grant.clone()]);
+        let bob = AuthenticatedIdentity::new("bob", vec![grant]);
+        let uris = ["/api/v1/shares/documents/metadata?path=a.txt"];
+
+        // Process-wide: every slot held refuses every subject.
+        let held = Arc::clone(state.browse().blocking_gate())
+            .acquire_many_owned(MAX_CONCURRENT_BLOCKING_REQUESTS as u32)
+            .await
+            .expect("blocking permits");
+        let busy = send(
+            &app,
+            Some(&alice),
+            Request::get(uris[0]).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(busy.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(json(busy).await["error"]["code"], "busy");
+        drop(held);
+        assert_eq!(get_status(&app, &alice, uris[0]).await, StatusCode::OK);
+        assert_eq!(
+            state.browse().blocking_gate().available_permits(),
+            MAX_CONCURRENT_BLOCKING_REQUESTS
+        );
+
+        // Per subject: one user's slots do not refuse another user.
+        let held: Vec<_> = (0..MAX_CONCURRENT_BLOCKING_REQUESTS_PER_SUBJECT)
+            .map(|_| {
+                state
+                    .browse()
+                    .blocking_gate
+                    .try_acquire("alice")
+                    .expect("subject lease")
+            })
+            .collect();
+        assert_eq!(
+            get_status(&app, &alice, uris[0]).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(get_status(&app, &bob, uris[0]).await, StatusCode::OK);
+        drop(held);
+        assert_eq!(get_status(&app, &alice, uris[0]).await, StatusCode::OK);
     }
 
     proptest! {

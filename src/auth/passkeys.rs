@@ -178,6 +178,11 @@ impl PasskeyState {
     fn take_login(&self, id: &str) -> Result<DiscoverableAuthentication, AppError> {
         take(&self.logins, id)
     }
+
+    #[cfg(test)]
+    pub(super) fn pending_logins(&self) -> Vec<String> {
+        self.logins.lock().unwrap().keys().cloned().collect()
+    }
 }
 
 fn flow_id() -> Result<String, AppError> {
@@ -354,6 +359,7 @@ async fn finish_registration(
 /// and expose their credential IDs.
 async fn start_login(
     State(state): State<AppState>,
+    PeerAddress(peer): PeerAddress,
     headers: HeaderMap,
     payload: Result<Json<StartLogin>, JsonRejection>,
 ) -> Result<Response, AppError> {
@@ -361,6 +367,10 @@ async fn start_login(
     let auth = state.auth().ok_or(AppError::Internal)?;
     let passkeys = enabled(auth)?;
     let Json(_payload) = payload.map_err(|_| AppError::AuthenticationFailed)?;
+    // Counted against the same per-source budget as password sign-in before
+    // a ceremony is stored, so one source cannot flood the bounded pending
+    // map and evict other users' in-progress ceremonies.
+    auth.allow_sign_in_source(auth.sign_in_source(peer, &headers))?;
     let (options, authentication) = passkeys
         .webauthn
         .start_discoverable_authentication()
