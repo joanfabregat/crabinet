@@ -105,6 +105,9 @@ fn every_invalid_fixture_is_rejected() {
         include_str!("fixtures/config/invalid/overlapping-roots.toml"),
         include_str!("fixtures/config/invalid/connection-limit.toml"),
         include_str!("fixtures/config/invalid/header-read-timeout.toml"),
+        include_str!("fixtures/config/invalid/trust-all-proxies.toml"),
+        include_str!("fixtures/config/invalid/malformed-trusted-proxy.toml"),
+        include_str!("fixtures/config/invalid/unknown-proxy-header.toml"),
     ];
     for (index, template) in fixtures.into_iter().enumerate() {
         let temp = tempfile::tempdir().unwrap();

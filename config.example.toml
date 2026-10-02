@@ -18,6 +18,14 @@ auth_max_concurrent = 1
 session_idle_timeout_seconds = 1800
 session_absolute_timeout_seconds = 43200
 login_attempts_per_minute = 5
+# Attempts from one source address per minute across all usernames, checked before
+# any Argon2 work so one client cannot monopolize the verifier by cycling usernames.
+login_attempts_per_source_per_minute = 20
+# Behind a reverse proxy every client shares the proxy's address. List only the
+# proxy's own addresses or CIDR ranges (never 0.0.0.0/0 or ::/0) so login limits use
+# the client address the proxy appends to the header. Empty ignores forwarding headers.
+# trusted_proxies = ["127.0.0.1", "::1"]
+# trusted_proxy_header = "x-forwarded-for"  # or "forwarded" (RFC 7239)
 # Deterministic oldest-first cleanup keeps persistent session state bounded even when
 # clients repeatedly omit their previous cookie.
 max_sessions_per_user = 16

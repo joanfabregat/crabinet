@@ -36,6 +36,21 @@
     "server"
   ],
   "$defs": {
+    "ForwardedHeader": {
+      "description": "Header from which a trusted reverse proxy's client address is read.",
+      "oneOf": [
+        {
+          "description": "`X-Forwarded-For: client, proxy1, proxy2`.",
+          "type": "string",
+          "const": "x-forwarded-for"
+        },
+        {
+          "description": "RFC 7239 `Forwarded: for=client, for=proxy1`.",
+          "type": "string",
+          "const": "forwarded"
+        }
+      ]
+    },
     "Permission": {
       "type": "string",
       "enum": [
@@ -172,6 +187,14 @@
           "maximum": 1000,
           "minimum": 1
         },
+        "login_attempts_per_source_per_minute": {
+          "description": "Password sign-in attempts allowed from one source address each minute,\ncounted across all usernames and checked before any password hashing.\nIPv6 sources are grouped by /64.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 20,
+          "maximum": 10000,
+          "minimum": 1
+        },
         "max_connections": {
           "description": "Maximum simultaneously open client connections; new connections above it are closed.",
           "type": "integer",
@@ -231,6 +254,20 @@
           "default": 30,
           "maximum": 3650,
           "minimum": 1
+        },
+        "trusted_proxies": {
+          "description": "Reverse proxy addresses or CIDR ranges, such as \"192.0.2.10\" or\n\"2001:db8::/64\", whose `trusted_proxy_header` names the client. Empty,\nthe default, ignores forwarding headers and uses the TCP peer.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64
+        },
+        "trusted_proxy_header": {
+          "description": "Forwarding header a trusted proxy sets to name the client.",
+          "$ref": "#/$defs/ForwardedHeader",
+          "default": "x-forwarded-for"
         }
       },
       "additionalProperties": false,
