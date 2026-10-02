@@ -246,6 +246,36 @@ test.describe("writable share operations", () => {
     );
   });
 
+  test("wraps a long unbreakable name in the Trash confirmation", async ({
+    page,
+  }) => {
+    const name = "251104_Note_cle_Scientifique_Metaux_2025_FR_long_name.pdf";
+    const title = `Move ${name} to Trash?`;
+    await openSignedIn(page, "/writable", "writer");
+    await createEntry(page, "New file", "File name", name);
+    await entryAction(page, name, "Delete").click();
+
+    const dialog = page.getByRole("dialog", { name: title });
+    await expect(dialog).toBeVisible();
+    expect(
+      await dialog.evaluate((panel) => panel.scrollWidth - panel.clientWidth),
+    ).toBe(0);
+    const panelBox = await dialog.boundingBox();
+    const closeBox = await dialog
+      .getByRole("button", { name: `Close ${title}` })
+      .boundingBox();
+    expect(panelBox).not.toBeNull();
+    expect(closeBox).not.toBeNull();
+    expect(closeBox!.x + closeBox!.width).toBeLessThanOrEqual(
+      panelBox!.x + panelBox!.width,
+    );
+
+    await dialog.getByRole("button", { name: "Move to Trash" }).click();
+    await expect(
+      directoryListing(page).getByRole("link", { name }),
+    ).toHaveCount(0);
+  });
+
   test("uploads by native drop and file picker with partial limits, conflict, and explicit replacement", async ({
     page,
   }) => {
