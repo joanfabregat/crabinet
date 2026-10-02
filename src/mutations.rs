@@ -1873,6 +1873,80 @@ mod tests {
         assert!(!fixture.root.path().join("blocked.txt").exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn quota_scan_tolerates_links_and_special_files() {
+        use std::os::unix::fs::symlink;
+
+        let limits = MutationLimits {
+            max_share_bytes: Some(30),
+            ..MutationLimits::default()
+        };
+        let fixture = fixture(AccessLevel::ReadWrite, false, limits);
+        let root = fixture.root.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("large"), vec![0_u8; 4096]).expect("large outside file");
+        fs::write(outside.path().join("aliased"), b"0123456789").expect("aliased outside file");
+        symlink(outside.path().join("large"), root.join("link")).expect("symlink fixture");
+        fs::hard_link(outside.path().join("aliased"), root.join("alias"))
+            .expect("hardlink fixture");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            root.join("fifo").as_path(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("fifo fixture");
+
+        let boundary = "quota-scan-boundary";
+        let upload = |name: &str, contents: &[u8]| {
+            Request::post("/api/v1/shares/documents/uploads")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(multipart_body(boundary, &[(name, contents)])))
+                .unwrap()
+        };
+        async fn outcome(response: Response) -> serde_json::Value {
+            let body = to_bytes(response.into_body(), 65_536).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            value["outcomes"][0]["outcome"].clone()
+        }
+
+        // Usage is 13 fixture bytes plus the 10-byte hard link. The symlink's
+        // 4096-byte target is not followed, so 7 more bytes fit exactly.
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            upload("fits.txt", b"1234567"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(outcome(response).await, "created");
+        assert_eq!(fs::read(root.join("fits.txt")).unwrap(), b"1234567");
+
+        // The hard-linked file counts against the quota, so one more byte
+        // does not fit.
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            upload("over.txt", b"1"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(outcome(response).await, "quota_exceeded");
+        assert!(!root.join("over.txt").exists());
+        assert!(root.join("link").is_symlink());
+        assert_eq!(
+            fs::read(outside.path().join("aliased")).unwrap(),
+            b"0123456789"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn symlink_and_hardlink_targets_are_never_mutated() {
