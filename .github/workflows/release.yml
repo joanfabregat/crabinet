@@ -101,7 +101,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_sha=$(git rev-parse HEAD)
-          required=(Frontend Rust Clippy "Browser E2E" "Dependency policy" Semgrep Trivy)
+          required=(
+            "Workflow lint" Frontend Rust Clippy "Browser E2E" "Dependency policy" Semgrep Trivy
+            "Container image" "Fuzz smoke" "CodeQL (actions)" "CodeQL (javascript-typescript)"
+          )
           checks=$(gh api --paginate \
             -H "Accept: application/vnd.github+json" \
             "repos/${GITHUB_REPOSITORY}/commits/${release_sha}/check-runs?per_page=100" \
