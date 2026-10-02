@@ -24,6 +24,14 @@ max_sessions_per_user = 16
 max_sessions_total = 4096
 # Trash items become eligible for background permanent removal after 30 days.
 trash_retention_days = 30
+# Simultaneously open client connections, including idle keep-alive connections and
+# event streams. New connections above the cap are closed. Keep the process's open-file
+# limit comfortably above it.
+max_connections = 1024
+# Seconds a client has to send a complete request head. This also closes idle keep-alive
+# connections between requests, so keep it above the reverse proxy's idle upstream timeout
+# (Caddy: 2 minutes, nginx: 60 seconds). Lower it only when the port is exposed directly.
+header_read_timeout_seconds = 300
 
 [auth]
 # Password sign-in remains enabled by default. Enable OIDC to show both methods.

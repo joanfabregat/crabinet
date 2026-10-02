@@ -36,6 +36,10 @@ const INTERNAL_TEMP_PREFIX: &str = ".index-tmp-";
 /// Entries moved into staging by a delete use a distinct prefix so startup
 /// recovery never removes user data left behind by a failed rollback.
 const INTERNAL_DELETE_PREFIX: &str = ".index-del-";
+/// A replacement's staged file is renamed to this prefix before the exchange
+/// that can move the user's previous file version into staging, so startup
+/// recovery keeps it if the exchange cannot be rolled back.
+const INTERNAL_REPLACE_PREFIX: &str = ".index-rep-";
 
 pub type FsResult<T> = Result<T, FsError>;
 
@@ -351,6 +355,20 @@ impl PendingWrite {
         if !current.matches_validator(&expected) || current.kind != EntryKind::File {
             return Err(FsError::new(FsErrorCode::Conflict));
         }
+        // Move the staged file to a name that startup recovery retains before
+        // the exchange can put the user's previous version under it. Renaming
+        // afterwards would need another write exactly when rollback has just
+        // failed; if this rename fails, nothing user-owned has moved yet.
+        let retained_name = random_internal_name(INTERNAL_REPLACE_PREFIX)?;
+        rustix::fs::renameat_with(
+            &self.staging,
+            &self.temporary_name,
+            &self.staging,
+            &retained_name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| map_io(std::io::Error::from(error)))?;
+        self.temporary_name = retained_name;
         rustix::fs::renameat_with(
             &self.staging,
             &self.temporary_name,
@@ -366,24 +384,14 @@ impl PendingWrite {
                 .is_ok_and(|current| current.matches_validator(&expected));
         if !valid_exchange {
             if self.rollback_exchange().is_err() {
-                // The staging name may now hold the user's original file.
-                // Disarm the drop guard so it is never unlinked.
-                self.published = true;
-                tracing::error!(
-                    operation = "replace",
-                    "replacement rollback failed; the previous file version was left in private staging"
-                );
+                self.retain_after_failed_rollback();
                 return Err(FsError::new(FsErrorCode::Unavailable));
             }
             return Err(FsError::new(FsErrorCode::Conflict));
         }
         if let Err(error) = self.staging.remove_file(&self.temporary_name) {
             if self.rollback_exchange().is_err() {
-                self.published = true;
-                tracing::error!(
-                    operation = "replace",
-                    "replacement rollback failed; the previous file version was left in private staging"
-                );
+                self.retain_after_failed_rollback();
                 return Err(FsError::new(FsErrorCode::Unavailable));
             }
             return Err(map_io(error));
@@ -392,6 +400,18 @@ impl PendingWrite {
         sync_after_commit(&self.staging);
         sync_after_commit(&self.destination_parent);
         Ok(())
+    }
+
+    /// The retained staging name may now hold the user's previous file
+    /// version. Disarm the drop guard so it is never unlinked; startup
+    /// recovery keeps every `INTERNAL_REPLACE_PREFIX` entry as well.
+    fn retain_after_failed_rollback(&mut self) {
+        self.published = true;
+        tracing::error!(
+            operation = "replace",
+            staged_name = %self.temporary_name,
+            "replacement rollback failed; the previous file version was kept in private staging for operator review"
+        );
     }
 
     fn rollback_exchange(&self) -> FsResult<()> {
@@ -1072,9 +1092,10 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
             // A non-UTF-8 name cannot match the reserved ASCII namespace.
             continue;
         };
-        if name.starts_with(INTERNAL_DELETE_PREFIX) {
-            // Never remove these: a failed delete rollback leaves user data
-            // here, and a crash mid-delete is harmless to keep.
+        if name.starts_with(INTERNAL_DELETE_PREFIX) || name.starts_with(INTERNAL_REPLACE_PREFIX) {
+            // Never remove these: a failed delete or replacement rollback
+            // leaves user data here, and a crash mid-operation is harmless
+            // to keep.
             retained += 1;
             continue;
         }
@@ -1095,7 +1116,7 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
     if retained > 0 {
         tracing::error!(
             retained,
-            "private staging holds entries from interrupted or failed deletes; they are kept for operator review"
+            "private staging holds entries from interrupted or failed deletes or replacements; they are kept for operator review"
         );
     }
     Ok(recoverable.len())
@@ -2312,16 +2333,93 @@ mod tests {
             FsErrorCode::Unavailable
         );
         // The exchange happened and the rollback "failed": the original
-        // content now lives under the staging name and must survive drop.
-        let staged = temporary
+        // content now lives in staging under a retained name and must
+        // survive both drop and the next startup recovery.
+        let staging = temporary
             .path()
             .join(INTERNAL_DIRECTORY)
-            .join(INTERNAL_STAGING_DIRECTORY)
-            .join(temporary_name);
-        assert_eq!(fs::read(staged).unwrap(), b"hello");
+            .join(INTERNAL_STAGING_DIRECTORY);
+        let retained = || {
+            fs::read_dir(&staging)
+                .expect("staging listing")
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let names = retained();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].starts_with(INTERNAL_REPLACE_PREFIX));
+        assert!(!staging.join(&temporary_name).exists());
+        assert_eq!(fs::read(staging.join(&names[0])).unwrap(), b"hello");
         assert_eq!(
             fs::read(temporary.path().join("hello.txt")).unwrap(),
             b"replacement"
+        );
+
+        drop(share);
+        let restarted = ShareFs::open(ShareId::new("documents").expect("id"), temporary.path())
+            .expect("reopen share");
+        assert_eq!(restarted.recover_staging_files(10).expect("recover"), 0);
+        assert_eq!(retained(), names);
+        assert_eq!(fs::read(staging.join(&names[0])).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn successful_replacement_leaves_no_retained_staging_entry() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let path = VirtualPath::parse("hello.txt").expect("path");
+        let expected = authorized.metadata(&path).expect("metadata");
+        let pending = authorized.begin_write(&path).expect("temporary file");
+        pending
+            .writer()
+            .expect("writer")
+            .write_all(b"replacement")
+            .expect("write replacement");
+        pending.publish_replacement(expected).expect("replace");
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
+        assert_eq!(fs::read_dir(staging).expect("staging").count(), 0);
+        assert_eq!(
+            fs::read(temporary.path().join("hello.txt")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn rolled_back_replacement_removes_its_retained_staging_entry() {
+        let (temporary, share, _read, write) = fixture();
+        let authorized = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .expect("write access");
+        let path = VirtualPath::parse("hello.txt").expect("path");
+        let expected = authorized.metadata(&path).expect("metadata");
+        let pending = authorized.begin_write(&path).expect("temporary file");
+        pending
+            .writer()
+            .expect("writer")
+            .write_all(b"replacement")
+            .expect("write replacement");
+
+        INJECTED_FAULTS.with(|faults| faults.set(Fault::InvalidExchange as u8));
+        let result = pending.publish_replacement(expected);
+        INJECTED_FAULTS.with(|faults| faults.set(0));
+
+        assert_eq!(
+            result.expect_err("rolled back").code(),
+            FsErrorCode::Conflict
+        );
+        let staging = temporary
+            .path()
+            .join(INTERNAL_DIRECTORY)
+            .join(INTERNAL_STAGING_DIRECTORY);
+        assert_eq!(fs::read_dir(staging).expect("staging").count(), 0);
+        assert_eq!(
+            fs::read(temporary.path().join("hello.txt")).unwrap(),
+            b"hello"
         );
     }
 

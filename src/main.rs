@@ -15,6 +15,7 @@ use crabinet::{
     oidc::OidcService,
     password::hash_confirmed,
     preview::PreviewPolicy,
+    server::{self, ServerLimits},
 };
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -113,14 +114,20 @@ async fn main() -> Result<()> {
     let app = router(state);
     let gc_task = tokio::spawn(async move { trash_gc_loop(gc_state).await });
 
-    tracing::info!(%listen, config = %config.source().display(), "server listening");
-    let result = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await;
+    let limits = ServerLimits {
+        max_connections: config.server().max_connections(),
+        header_read_timeout: Duration::from_secs(config.server().header_read_timeout_seconds()),
+    };
+    tracing::info!(
+        %listen,
+        config = %config.source().display(),
+        max_connections = limits.max_connections,
+        header_read_timeout_seconds = limits.header_read_timeout.as_secs(),
+        "server listening"
+    );
+    // The accept loop runs until the process is terminated.
+    server::serve(listener, app, limits).await;
     gc_task.abort();
-    result?;
     Ok(())
 }
 

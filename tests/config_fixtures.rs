@@ -103,6 +103,8 @@ fn every_invalid_fixture_is_rejected() {
         include_str!("fixtures/config/invalid/symlink-root.toml"),
         include_str!("fixtures/config/invalid/unsafe-root.toml"),
         include_str!("fixtures/config/invalid/overlapping-roots.toml"),
+        include_str!("fixtures/config/invalid/connection-limit.toml"),
+        include_str!("fixtures/config/invalid/header-read-timeout.toml"),
     ];
     for (index, template) in fixtures.into_iter().enumerate() {
         let temp = tempfile::tempdir().unwrap();

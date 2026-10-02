@@ -22,6 +22,9 @@ getrandom = "0.4.3"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hmac = "0.13.0"
+# Direct HTTP/1.1 server builder for header-read timeouts and a connection cap.
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["service", "tokio"] }
 mime_guess = "2.0.5"
 # Keep the WebAuthn crypto self-contained in the scratch-based release image.
 openssl = { version = "0.10.81", features = ["vendored"] }

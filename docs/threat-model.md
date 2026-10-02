@@ -68,6 +68,7 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 | CSRF | CSRF token plus Origin/Referer validation and SameSite cookies | Cross-origin request tests |
 | Stored XSS/active HTML | Inert rendering, sanitizer, CSP sandbox, iframe sandbox | Real-browser hostile fixtures |
 | Upload exhaustion | Streaming, request/file/count/quota limits, private per-share staging, bounded non-recursive recovery, cleanup, bounded concurrency | Multipart failure, staging recovery, and resource tests |
+| Connection exhaustion (slow or idle clients) | Configurable HTTP/1.1 header-read timeout covering new and idle keep-alive connections, configurable process-wide connection cap | TCP-level server tests |
 | Header injection/content sniffing | Validated header values, safe disposition encoding, `nosniff` | Response-header tests |
 | Dependency or workflow compromise | Lockfiles, dependency review, Semgrep, Trivy, pinned Actions, minimal permissions, attestations | Pull-request, weekly, and release CI |
 | Overbroad host access | Explicit mounts, non-root image, read-only rootfs, dropped capabilities | Container smoke tests and operator documentation |

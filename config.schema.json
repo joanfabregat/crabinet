@@ -152,6 +152,14 @@
           "description": "SQLite file. Relative paths are resolved from the configuration directory.",
           "type": "string"
         },
+        "header_read_timeout_seconds": {
+          "description": "Seconds to send a complete request head, also bounding keep-alive idle time.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "maximum": 3600,
+          "minimum": 5
+        },
         "listen": {
           "description": "TCP socket address on which the HTTP server listens.",
           "type": "string"
@@ -162,6 +170,14 @@
           "format": "uint32",
           "default": 5,
           "maximum": 1000,
+          "minimum": 1
+        },
+        "max_connections": {
+          "description": "Maximum simultaneously open client connections; new connections above it are closed.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1024,
+          "maximum": 65535,
           "minimum": 1
         },
         "max_preview_size": {
