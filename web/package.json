@@ -22,6 +22,7 @@
     "lucide-preact": "1.47.0",
     "markdown-it": "15.0.2",
     "markdown-it-footnote": "4.0.0",
+    "pdfjs-dist": "6.3.289",
     "preact": "10.29.8",
     "shiki": "4.4.3"
   },

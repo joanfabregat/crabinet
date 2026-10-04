@@ -69,7 +69,7 @@ import {
 } from "./operations";
 import { EntryIcon } from "./file-icons";
 import { HighlightedCode } from "./highlighted-code";
-import { PdfPreview } from "./pdf-preview-slot";
+import { PdfFirstPage } from "./pdf-preview";
 import { CopyPathButton } from "./copy-path-button";
 import {
   browserNavigation,
@@ -2219,7 +2219,7 @@ function PreviewContent({
   htmlRenderedUrl: string;
   htmlRenderedViewUrl: string;
   imageUrl: string;
-  /** The inline route, for media elements and the PDF slot. */
+  /** The inline route, for media elements and the PDF first-page preview. */
   inlineUrl: string;
   filename: string;
 }) {
@@ -2252,7 +2252,7 @@ function PreviewContent({
   }
 
   if (document.kind === "pdf") {
-    return <PdfPreview url={inlineUrl} filename={filename} />;
+    return <PdfFirstPage url={inlineUrl} filename={filename} />;
   }
 
   if (document.kind === "audio") {

@@ -71,6 +71,22 @@ Uploaded JavaScript execution and live external resources are not supported in v
 
 `GET /api/v1/shares/{shareId}/preview/image?path=...` authenticates and authorizes the request, opens the file through the same share capability, applies the download size cap rather than the buffered preview limit, and validates a bounded header for a supported raster signature and safe known dimensions. The file then streams from that already-validated handle in fixed-size chunks rather than being buffered in Rust memory. Because the stream holds an open file, each image takes a download slot (64 across the process, 8 per user, shared with downloads as described in the [browse API](browse-api.md)) before the file is opened and keeps it until the response body completes or is dropped; further requests receive `429` with code `busy`. The response chooses its media type from the signature, never from an extension or uploaded `Content-Type`, and includes the exact metadata length plus the same no-sniffing, no-referrer, private no-store, permissions, and same-origin resource policies. SVG is intentionally excluded because it is active document content.
 
+## PDF
+
+The preview panel shows only the first page of a PDF, drawn to a `<canvas>` by pdf.js in the browser (see the [architecture decision](architecture-decisions.md#pdf-first-page-with-pdfjs-full-document-in-the-browser-viewer)). The server never parses or renders PDFs; it only classifies the signature and streams bytes from `/open`. pdf.js is loaded on demand as its own chunk the first time a PDF is previewed, so the main bundle does not carry it, and it parses the document in a same-origin module worker that is terminated once the page is drawn or the preview closes.
+
+pdf.js runs under the unchanged application CSP (`default-src 'self'`, with neither `'unsafe-eval'` nor `'wasm-unsafe-eval'`) with these options:
+
+- `useWasm: false`: the JavaScript JPEG 2000 and JBIG2 decoders replace the WebAssembly ones, which the CSP would block and which are not shipped.
+- `annotationMode: DISABLE` and `enableXfa: false`: no annotations, links, form widgets, or XFA forms are drawn or made interactive, and PDF JavaScript is never run.
+- Range loading: `disableRange: false` with `disableStream: true` and `disableAutoFetch: true`, so pdf.js requests only the byte ranges page 1 needs instead of the whole file. This relies on `/open` answering with `Accept-Ranges: bytes`, an exact `Content-Length`, no `Content-Encoding`, and `206` responses with `Content-Range`, which Rust tests assert.
+- Bounded output: the canvas backing store is capped at 16 megapixels (the render scale follows the panel width and device pixel ratio up to that cap), and embedded images larger than 50 megapixels are skipped.
+- CMaps, the Foxit standard fonts, and the non-WebAssembly decoders load by name from `assets/pdfjs-<version>/`, which the build copies unchanged from the package; other fonts fall back to system fonts.
+
+A password-protected, malformed, or unloadable PDF shows an error in the panel instead of a page, and **Open in new tab** and **Download** remain. The canvas is exposed as an image labelled "First page of {file name}".
+
+The full document opens through **Open in new tab**, which loads `/open` as a top-level document in the browser's built-in viewer under the same sandboxed preview CSP as every other inline type (see [Why PDF needs no CSP exception](#why-pdf-needs-no-csp-exception)). That viewer provides search, zoom, and printing; Crabinet never frames it.
+
 ## Inline open
 
 Every file keeps **Download**, an attachment under `default-src 'none'; sandbox`. `GET /api/v1/shares/{shareId}/open?path=...` is the second, inline representation, offered only for bytes a browser displays without running script on this origin. It authenticates and authorizes the request like the other preview routes (a fresh grant resolution, a validated `VirtualPath`, and the same non-disclosing `404`), takes a download slot before opening the file, reads the bounded header, and serves:
