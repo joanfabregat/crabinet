@@ -44,6 +44,8 @@ import {
   downloadUrl,
   htmlPreviewUrl,
   imagePreviewUrl,
+  isStreamedPreviewKind,
+  openUrl,
   renderedHtmlPreviewUrl,
   type ApiClient,
   type AuthMethods,
@@ -67,6 +69,7 @@ import {
 } from "./operations";
 import { EntryIcon } from "./file-icons";
 import { HighlightedCode } from "./highlighted-code";
+import { PdfPreview } from "./pdf-preview-slot";
 import { CopyPathButton } from "./copy-path-button";
 import {
   browserNavigation,
@@ -2026,11 +2029,15 @@ function PreviewPanel({
   const previewDocument = state.status === "ready" ? state.document : undefined;
   // The editor accepts the same UTF-8 text, within the same size limit, that
   // the preview does. Binary, oversized, and unreadable files fail to preview,
-  // and images preview without being text, so none of them offer Edit.
+  // and images, PDFs, audio, and video preview without being text, so none of
+  // them offer Edit.
   const editable =
     previewDocument !== undefined &&
-    previewDocument.kind !== "image" &&
+    !isStreamedPreviewKind(previewDocument.kind) &&
     !previewDocument.truncated;
+  // Only files the server classified as openable get the inline new-tab
+  // action; everything else keeps Download alone.
+  const openable = previewDocument?.openable === true;
   const assetRevision = `${revision}-${refreshKey}`;
 
   return (
@@ -2125,6 +2132,16 @@ function PreviewPanel({
               </TooltipButton>
             </>
           )}
+          {openable && (
+            <TooltipLink
+              href={openUrl(shareId, path)}
+              target="_blank"
+              rel="noopener noreferrer"
+              label={`Open ${filename} in a new tab`}
+            >
+              <ExternalLink size={19} aria-hidden="true" />
+            </TooltipLink>
+          )}
           <TooltipLink
             href={downloadUrl(shareId, path)}
             label={`Download ${filename}`}
@@ -2178,6 +2195,7 @@ function PreviewPanel({
               htmlRenderedUrl={`${renderedHtmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
               htmlRenderedViewUrl={renderedHtmlViewUrl(shareId, path)}
               imageUrl={`${imagePreviewUrl(shareId, path)}&v=${assetRevision}`}
+              inlineUrl={`${openUrl(shareId, path)}&v=${assetRevision}`}
               filename={filename}
             />
           )}
@@ -2193,6 +2211,7 @@ function PreviewContent({
   htmlRenderedUrl,
   htmlRenderedViewUrl,
   imageUrl,
+  inlineUrl,
   filename,
 }: {
   document: PreviewDocument;
@@ -2200,6 +2219,8 @@ function PreviewContent({
   htmlRenderedUrl: string;
   htmlRenderedViewUrl: string;
   imageUrl: string;
+  /** The inline route, for media elements and the PDF slot. */
+  inlineUrl: string;
   filename: string;
 }) {
   if (document.kind === "html_source") {
@@ -2214,28 +2235,51 @@ function PreviewContent({
     );
   }
 
+  // The toolbar's Open in new tab action covers images, so the image itself
+  // is not a second link.
   if (document.kind === "image") {
     return (
       <figure class="image-preview">
-        <a
-          href={imageUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`Open ${filename} in a new tab`}
-          draggable={false}
-        >
-          <img
-            src={imageUrl}
-            alt={`Preview of ${filename}`}
-            draggable={false}
-          />
-        </a>
+        <img src={imageUrl} alt={`Preview of ${filename}`} draggable={false} />
         <figcaption>
           {document.mimeType}
           {document.width && document.height
             ? ` · ${document.width} × ${document.height}`
             : ""}
         </figcaption>
+      </figure>
+    );
+  }
+
+  if (document.kind === "pdf") {
+    return <PdfPreview url={inlineUrl} filename={filename} />;
+  }
+
+  if (document.kind === "audio") {
+    return (
+      <figure class="media-preview">
+        <audio
+          src={inlineUrl}
+          controls
+          preload="metadata"
+          aria-label={`Audio preview of ${filename}`}
+        />
+        <figcaption>{document.mimeType}</figcaption>
+      </figure>
+    );
+  }
+
+  if (document.kind === "video") {
+    return (
+      <figure class="media-preview">
+        <video
+          src={inlineUrl}
+          controls
+          preload="metadata"
+          playsInline
+          aria-label={`Video preview of ${filename}`}
+        />
+        <figcaption>{document.mimeType}</figcaption>
       </figure>
     );
   }
@@ -2309,16 +2353,13 @@ function HtmlPreview({
         </div>
         {/* A top-level document can navigate itself even under a CSP
             sandbox, so rendered HTML opens in Crabinet's own viewer, inside
-            the same empty-sandbox iframe. Plain-text source is inert. */}
+            the same empty-sandbox iframe. The file toolbar's Open in new tab
+            action opens the inert plain-text source. */}
         <TooltipLink
-          href={mode === "rendered" ? renderedViewUrl : sourceUrl}
+          href={renderedViewUrl}
           target="_blank"
           rel="noopener noreferrer"
-          label={
-            mode === "rendered"
-              ? "Open rendered HTML in new tab"
-              : "Open HTML source in new tab"
-          }
+          label="Open rendered HTML in new tab"
         >
           <ExternalLink size={18} aria-hidden="true" />
         </TooltipLink>
@@ -3097,6 +3138,9 @@ function previewTypeLabel(
   filename: string,
 ): string {
   if (document?.kind === "image") return document.mimeType ?? "Image";
+  if (document?.kind === "pdf") return "PDF";
+  if (document?.kind === "audio") return document.mimeType ?? "Audio";
+  if (document?.kind === "video") return document.mimeType ?? "Video";
   if (document?.kind === "markdown_source") return "Markdown";
   if (document?.kind === "html_source") return "HTML";
   if (document?.kind === "code") {

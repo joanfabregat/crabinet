@@ -18,7 +18,7 @@ Crabinet is a security-focused, low-memory file browser for a small server or Po
 - Multiple local users with password, OpenID Connect, and discoverable passkey sign-in, verified-email account mapping, and configuration-defined per-share `read` or `write` grants.
 - Capability-scoped filesystem access: configured roots are opened once, request paths stay relative, and symlinks, hard-link aliases, special files, ambiguous paths, and traversal are rejected.
 - A lazy share/folder tree, touch-friendly folder picker, file-type icons, copyable virtual paths, folder-first browsing, metadata, conditional and ranged downloads, streamed ZIP downloads of whole folders, create/rename/move/delete operations, UTF-8 text editing, and streaming multipart uploads.
-- Bounded syntax-highlighted code and text previews, GitHub Flavored Markdown rendering (tables, task lists, footnotes, alerts, highlighted code, and allowlisted raw HTML, with no images loaded), signature-validated raster image previews, and rendered/source HTML tabs with isolated new-tab views. Rendered HTML is protected by a deny-by-default response CSP and an additional empty iframe sandbox, in the panel and in its full-window view, so uploaded scripts, forms, navigation, and network requests cannot run.
+- Bounded syntax-highlighted code and text previews, GitHub Flavored Markdown rendering (tables, task lists, footnotes, alerts, highlighted code, and allowlisted raw HTML, with no images loaded), signature-validated raster image, PDF, audio, and video previews (identified by file signature, not name), an **Open in new tab** action that serves only those types and inert `text/plain` text inline, and rendered/source HTML tabs with an isolated new-tab view. Rendered HTML is protected by a deny-by-default response CSP and an additional empty iframe sandbox, in the panel and in its full-window view, so uploaded scripts, forms, navigation, and network requests cannot run.
 - Event-driven refreshes for the open directory through a bounded authenticated server-sent-events stream backed by a non-recursive kernel watch; Crabinet does not scan the share to detect changes.
 - Opaque server-side sessions and per-user start-folder and display preferences in SQLite, session-bound CSRF protection, same-origin enforcement, bounded login attempts, and `Secure; HttpOnly; SameSite=Strict` cookies.
 - A single statically linked Linux binary for `amd64` and `arm64`, plus a `scratch`-based non-root OCI image published to GHCR.
@@ -217,7 +217,7 @@ Crabinet emits structured JSON logs to standard output. Set `RUST_LOG=crabinet=d
 - Writes return `403`: verify a `write` grant, `read_only = false`, a current session/CSRF token, and host filesystem permissions.
 - Writes return `409`: refresh metadata; Crabinet uses validators to prevent overwriting a concurrently changed target.
 - Uploads return `413` or `429`: check Crabinet and proxy limits, upload concurrency, and container memory.
-- Preview returns `415` or `413`: the file is binary/invalid UTF-8, unsupported for that preview kind, or exceeds `max_preview_size`; download remains separate and permission-checked.
+- Preview returns `415` or `413`: the file is binary/invalid UTF-8 with no supported image, PDF, audio, or video signature, unsupported for that preview kind, or a text-like file that exceeds `max_preview_size` (streamed types are not bound by it); download remains separate and permission-checked.
 
 ## Development and security
 

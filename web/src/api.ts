@@ -186,18 +186,43 @@ export interface UploadOptions {
 }
 
 export type PreviewKind =
-  "text" | "code" | "markdown_source" | "html_source" | "image";
+  | "text"
+  | "code"
+  | "markdown_source"
+  | "html_source"
+  | "image"
+  | "pdf"
+  | "audio"
+  | "video";
+
+export type PreviewMimeType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/gif"
+  | "image/webp"
+  | "image/avif"
+  | "application/pdf"
+  | "audio/mp4"
+  | "audio/ogg"
+  | "audio/wav"
+  | "audio/flac"
+  | "audio/mpeg"
+  | "video/mp4"
+  | "video/webm"
+  | "video/ogg";
 
 export interface PreviewDocument {
   kind: PreviewKind;
   source: string;
   language?: string;
-  mimeType?:
-    "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif";
+  /** Derived by the server from the file's signature, never its name. */
+  mimeType?: PreviewMimeType;
   width?: number;
   height?: number;
   size: number;
   truncated: boolean;
+  /** The open route serves this file inline in a new tab. */
+  openable?: boolean;
 }
 
 export type ApiErrorKind =
@@ -891,13 +916,31 @@ const previewKinds = new Set<PreviewKind>([
   "markdown_source",
   "html_source",
   "image",
+  "pdf",
+  "audio",
+  "video",
 ]);
+
+/** Kinds that stream from the open route and carry no source text. */
+const streamedPreviewKinds = new Set<PreviewKind>([
+  "image",
+  "pdf",
+  "audio",
+  "video",
+]);
+
+export function isStreamedPreviewKind(kind: PreviewKind): boolean {
+  return streamedPreviewKinds.has(kind);
+}
 
 const maxPreviewBytes = 16 * 1024 * 1024;
 
 function parsePreviewDocument(value: unknown): PreviewDocument {
   if (!isRecord(value)) throw invalidResponse();
   const language = value.language === null ? undefined : value.language;
+  const streamed =
+    typeof value.kind === "string" &&
+    streamedPreviewKinds.has(value.kind as PreviewKind);
   if (
     typeof value.kind !== "string" ||
     !previewKinds.has(value.kind as PreviewKind) ||
@@ -906,17 +949,20 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     typeof value.size !== "number" ||
     !Number.isSafeInteger(value.size) ||
     value.size < 0 ||
-    value.size > maxPreviewBytes ||
-    ((value.kind as PreviewKind) !== "image" &&
+    // Only buffered text is bound by the preview limit; streamed kinds are
+    // metadata about a file of any size.
+    (!streamed && value.size > maxPreviewBytes) ||
+    (!streamed &&
       new TextEncoder().encode(value.source).byteLength !== value.size) ||
     typeof value.truncated !== "boolean" ||
+    (value.openable !== undefined && typeof value.openable !== "boolean") ||
     (language !== undefined &&
       (typeof language !== "string" || !previewLanguages.has(language))) ||
     !previewLanguageMatchesKind(
       value.kind as PreviewKind,
       language as string | undefined,
     ) ||
-    !previewImageMetadataIsValid(value)
+    !previewMediaMetadataIsValid(value)
   ) {
     throw invalidResponse();
   }
@@ -925,9 +971,12 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     source: value.source as string,
     size: value.size as number,
     truncated: value.truncated as boolean,
+    ...(typeof value.openable === "boolean"
+      ? { openable: value.openable }
+      : {}),
     ...(typeof language === "string" ? { language } : {}),
     ...(typeof value.mimeType === "string"
-      ? { mimeType: value.mimeType as PreviewDocument["mimeType"] }
+      ? { mimeType: value.mimeType as PreviewMimeType }
       : {}),
     ...(typeof value.width === "number" ? { width: value.width } : {}),
     ...(typeof value.height === "number" ? { height: value.height } : {}),
@@ -941,36 +990,50 @@ function previewLanguageMatchesKind(
   if (kind === "html_source") return language === "html";
   if (kind === "markdown_source") return language === "markdown";
   if (kind === "text") return language === undefined;
-  if (kind === "image") return language === undefined;
+  if (streamedPreviewKinds.has(kind)) return language === undefined;
   return language !== "html" && language !== "markdown";
 }
 
-const imageMimeTypes = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-]);
+/** The exact media types the server derives from each kind's signatures. */
+const previewMimeTypes: Record<string, ReadonlySet<string>> = {
+  image: new Set([
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+  ]),
+  pdf: new Set(["application/pdf"]),
+  audio: new Set([
+    "audio/mp4",
+    "audio/ogg",
+    "audio/wav",
+    "audio/flac",
+    "audio/mpeg",
+  ]),
+  video: new Set(["video/mp4", "video/webm", "video/ogg"]),
+};
 
-function previewImageMetadataIsValid(value: Record<string, unknown>): boolean {
-  const isImage = value.kind === "image";
-  if (!isImage) {
+function previewMediaMetadataIsValid(value: Record<string, unknown>): boolean {
+  const mimeTypes = previewMimeTypes[value.kind as string];
+  if (mimeTypes === undefined) {
     return (
       value.mimeType === undefined &&
       value.width === undefined &&
       value.height === undefined
     );
   }
+  const isImage = value.kind === "image";
   const validDimension = (dimension: unknown) =>
     dimension === undefined ||
-    (typeof dimension === "number" &&
+    (isImage &&
+      typeof dimension === "number" &&
       Number.isSafeInteger(dimension) &&
       dimension > 0);
   return (
     value.source === "" &&
     typeof value.mimeType === "string" &&
-    imageMimeTypes.has(value.mimeType) &&
+    mimeTypes.has(value.mimeType) &&
     validDimension(value.width) &&
     validDimension(value.height)
   );
@@ -1031,6 +1094,14 @@ export function archiveUrl(shareId: string, path: string): string {
   return path === ""
     ? `/api/v1/shares/${encodeURIComponent(shareId)}/archive`
     : fileApiUrl(shareId, path, "archive");
+}
+
+/**
+ * The inline view of a file whose signature the server allowlists: images,
+ * PDF, audio, video, and text served as `text/plain`.
+ */
+export function openUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "open");
 }
 
 function fileApiUrl(shareId: string, path: string, action: string): string {
