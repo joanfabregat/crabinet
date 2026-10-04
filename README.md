@@ -1,227 +1,84 @@
 # Crabinet
 
 [![CI](https://github.com/joanfabregat/crabinet/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/joanfabregat/crabinet/actions/workflows/ci.yml)
-[![Weekly security scan](https://github.com/joanfabregat/crabinet/actions/workflows/security-weekly.yml/badge.svg?branch=main)](https://github.com/joanfabregat/crabinet/actions/workflows/security-weekly.yml)
 [![Latest release](https://img.shields.io/github/v/release/joanfabregat/crabinet?sort=semver)](https://github.com/joanfabregat/crabinet/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="web/public/crabinet.png" alt="Crabinet logo: a crab on a filing cabinet" width="128">
+<img src="web/public/crabinet.png" alt="Crabinet logo: a crab on a filing cabinet" width="96">
 
-Crabinet is a security-focused, low-memory file browser for a small server or Podman pod. It provides configuration-defined users, per-share read or write grants, normal filesystem-backed storage, drag-and-drop uploads, file operations, and bounded previews from one self-contained Rust executable with an embedded Preact interface.
+**A self-hosted web file browser in a single Rust binary.**
 
-> **Maturity:** pre-1.0. The security model and configuration format are deliberate, but operators should validate resource limits and backup procedures in their own environment before exposing Crabinet to untrusted users.
+Browse existing folders on your Linux server, upload and manage files, and preview documents in your browser. Give each user read or write access to selected shares. Run one executable with the Preact interface embedded, or use the non-root container image with [rootless Podman](docs/operations.md#rootless-podman-pod).
 
-![Crabinet file browser showing a directory and an inert source preview](docs/images/crabinet-browser.png)
+Crabinet started as a small project to replace File Browser. Ideas, feature suggestions, and [bug reports](https://github.com/joanfabregat/crabinet/issues) are welcome and help shape its development.
 
-## What it provides
+![Crabinet showing separate read-only and writable shares, a file list, and a document preview](docs/images/crabinet-browser.png)
 
-- Multiple local users with password, OpenID Connect, and discoverable passkey sign-in, verified-email account mapping, and configuration-defined per-share `read` or `write` grants.
-- Capability-scoped filesystem access: configured roots are opened once, request paths stay relative, and symlinks, hard-link aliases, special files, ambiguous paths, and traversal are rejected.
-- A lazy share/folder tree, touch-friendly folder picker, file-type icons, copyable virtual paths, folder-first browsing, metadata, conditional and ranged downloads, streamed ZIP downloads of whole folders, create/rename/move/delete operations, UTF-8 text editing, and streaming multipart uploads.
-- Bounded syntax-highlighted code and text previews, GitHub Flavored Markdown rendering (tables, task lists, footnotes, alerts, highlighted code, and allowlisted raw HTML, with no images loaded), signature-validated raster image, PDF, audio, and video previews (identified by file signature, not name), server-rendered image thumbnails for PNG, JPEG, GIF, WebP, and camera RAW files (DNG, NEF, ARW, CR2, PEF, ORF) decoded in pure Rust within a configured memory budget and cached on disk, an **Open in new tab** action that serves only those types and inert `text/plain` text inline, and rendered/source HTML tabs with an isolated new-tab view. Rendered HTML is protected by a deny-by-default response CSP and an additional empty iframe sandbox, in the panel and in its full-window view, so uploaded scripts, forms, navigation, and network requests cannot run.
-- Event-driven refreshes for the open directory through a bounded authenticated server-sent-events stream backed by a non-recursive kernel watch; Crabinet does not scan the share to detect changes.
-- Opaque server-side sessions and per-user start-folder and display preferences in SQLite, session-bound CSRF protection, same-origin enforcement, bounded login attempts, and `Secure; HttpOnly; SameSite=Strict` cookies.
-- A single statically linked Linux binary for `amd64` and `arm64`, plus a `scratch`-based non-root OCI image published to GHCR.
-- CI-enforced Rust and frontend tests, dependency policy, Semgrep, Trivy, weekly scans, SBOMs, checksums, and build-provenance attestations.
+[Get started](#get-started) · [Configuration](docs/configuration.md) · [Operator guide](docs/operations.md) · [Releases](https://github.com/joanfabregat/crabinet/releases) · [Contribute](CONTRIBUTING.md)
 
-Crabinet v1 intentionally does not execute uploaded scripts, follow filesystem links, expose special files, recursively delete directories, move entries between shares, edit binary files, hot-reload configuration, or support multiple processes writing the same share. It is not an object-store frontend, collaborative editor, antivirus scanner, or substitute for host backups and filesystem permissions.
+> **Pre-1.0:** configuration and behavior may change between releases. Review release notes, test resource limits, and validate backups for your installation before exposing it to untrusted users.
 
-## Architecture
+## What you can do
 
-The Axum/Tokio backend owns authentication, authorization, bounded streaming, and capability-scoped filesystem operations. Preact and TypeScript are build-time dependencies; Vite's output is embedded in the Rust executable, so production has no Node process. Files remain in mounted share directories. SQLite stores runtime sessions and each user's chosen start folder. One immutable TOML file defines sign-in methods, users, grants, paths, and limits; only the configuration file's path can be selected through the CLI or `CRABINET_CONFIG`.
+- **Browse your existing files.** Files remain in normal server directories. Navigate a folder tree, show hidden files when needed, and download files with range support or whole folders as streamed ZIP archives.
+- **Upload and organize.** Drag and drop uploads, create folders, rename and move entries within a share, edit UTF-8 text, and move files or folders to Trash with restore support.
+- **Preview before downloading.** Read highlighted code and text, rendered GitHub Flavored Markdown, and HTML with rendered/source views. See the first page of a PDF, play audio and video, and view photos as server-rendered thumbnails, including the embedded previews of camera RAW files such as DNG, NEF, and CR2. Open images, PDFs, and text in a new tab in the browser's own viewer, or download them. Preview sizes are bounded; HTML previews block scripts and network requests.
+- **Choose who gets access.** Configure users and per-share read or write grants. Sign in with a password or OpenID Connect, and optionally enroll passkeys.
+- **Use it across devices.** A touch-friendly folder picker, start-folder preferences, hidden-file settings, and appearance preferences follow your account. The open directory refreshes when filesystem changes are detected.
 
-Signed-in users can open **Settings** and select a shared-folder root as their start folder across devices. Choosing **First shared folder** restores the default. Direct folder links continue to open their specified destination. The Show hidden files (off by default) and Appearance settings in Settings follow the account across devices as well.
+## Why Crabinet?
 
-Account pictures use an accepted Google profile image when available or, when an operator enables `auth.gravatar_enabled`, a Gravatar image keyed by the configured email address. These are browser requests to external hosts; see [authentication and account pictures](docs/authentication.md#account-pictures).
+Crabinet suits a small Linux server where you want browser access to selected folders with an explicit access policy and one application process to run.
 
-Start with the [threat model](docs/threat-model.md), [architecture decisions](docs/architecture-decisions.md), and [filesystem invariants](docs/filesystem-security.md) before changing a security boundary. The HTTP behavior used by the frontend is documented in [browse](docs/browse-api.md), [mutation](docs/mutations.md), [preview](docs/previews.md), and [frontend contract](docs/frontend-api-contract.md) notes; these describe the current first-party API, not a stable third-party compatibility promise.
+- **One executable.** The Axum/Tokio backend serves the embedded frontend. Production needs no Node process or separate database server; SQLite holds sessions, preferences, and passkeys, and rendered thumbnails are cached in a private directory beside it. PDF rendering and image decoding are built in, with no helper processes or C image libraries.
+- **Configuration-defined access.** One TOML file defines users, shares, grants, and limits. Grants are absent by default, enforced on the server, and changed by restarting with a validated configuration.
+- **Explicit filesystem boundaries.** Configured roots are opened once and requests stay relative to those roots. Symlinks, hard-link aliases, special files, ambiguous paths, and traversal are rejected. See the [filesystem security design](docs/filesystem-security.md) and [threat model](docs/threat-model.md).
+- **Bounded resource use.** Uploads and downloads stream; previews and authentication concurrency have explicit limits, and image thumbnails decode within one configured memory budget. The container example starts at 256 MiB with one password verifier. A default Argon2id verification temporarily uses about 64 MiB; measure your workload before changing limits. See [authentication sizing](docs/authentication.md).
+- **Verifiable releases.** Static Linux binaries for `amd64` and `arm64`, a `scratch`-based non-root OCI image, checksums, SBOMs, and build-provenance attestations. CI runs tests, dependency checks, and security scans.
 
-## Direct-binary quick start
+Users, grants, and sign-in settings are managed in configuration. Writable shares must have exactly one Crabinet writer. Moving entries between shares, following filesystem links, and hot-reloading configuration are unsupported. See the [configuration guide](docs/configuration.md) for deployment constraints.
 
-Release archives contain the executable, license, README, annotated configuration, and JSON Schema. Linux `x86_64` and `aarch64` are supported; other operating systems and libc targets are not release targets. The commands below describe Crabinet-branded releases; prereleases published before the rename retain their original `index` artifact names.
+## Get started
 
-```sh
-curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/crabinet-v0.1.0-linux-amd64.tar.gz
-curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.1.0/SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify crabinet-v0.1.0-linux-amd64.tar.gz \
-  --repo joanfabregat/crabinet \
-  --signer-workflow joanfabregat/crabinet/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.0
-tar -xzf crabinet-v0.1.0-linux-amd64.tar.gz
-cd crabinet-linux-amd64
-./crabinet --help
-```
+You need a Linux `amd64` or `arm64` server, directories the service user can access, and an HTTPS reverse proxy for browser use. Configuration, secrets, and SQLite state must live outside every share.
 
-Replace `v0.1.0` with an existing release tag in every command. The release publishes one combined `SHA256SUMS` file; `--ignore-missing` checks the archive you downloaded without requiring every release asset. The attestation check pins the signing workflow and tag, so an artifact built by any other workflow or ref is rejected.
+| Install | Start here |
+| --- | --- |
+| **Linux binary** | Download an archive from [Releases](https://github.com/joanfabregat/crabinet/releases/latest), verify its checksum and attestation, and follow the [binary quick start](docs/operations.md#direct-binary-quick-start). |
+| **Rootless container** | Use the non-root image `ghcr.io/joanfabregat/crabinet:<tag>` with separate mounts for shares, configuration, secrets, and state. Follow the [rootless Podman example](docs/operations.md#rootless-podman-pod). |
 
-Prepare paths outside every share, generate a session secret, and create a password hash interactively:
+Both paths use the same setup:
 
-```sh
-install -d -m 0700 ./state ./secrets
-umask 077
-head -c 32 /dev/urandom > ./secrets/session.key
-cp config.example.toml config.toml
-./crabinet hash-password
-```
+1. Copy [config.example.toml](config.example.toml). Set absolute share paths and each user's read or write grants.
+2. Create a session-secret file and generate a password hash with `crabinet hash-password`. Replace the example hash and set the example user's `disabled` flag to `false`.
+3. Run `crabinet check-config --config ./config.toml`, then `crabinet --config ./config.toml` as an unprivileged user.
+4. Place the service behind HTTPS, preserving the original `Host`, and sign in through the proxy.
 
-Put the resulting PHC string in `config.toml`, set real absolute share paths, then validate and start as the same unprivileged user that will run the service:
+The example listens on loopback. Browser sessions use `Secure` cookies; follow the [TLS and reverse proxy guide](docs/operations.md#tls-and-reverse-proxies) for network use. The operator guide includes the complete download, directory, secret, and container commands.
 
-```sh
-./crabinet check-config --config ./config.toml
-./crabinet --config ./config.toml
-```
+## Documentation
 
-The default example listens only on loopback. `GET /health/live` reports process health and `GET /health/ready` reports readiness. Browser authentication uses a `Secure` cookie, so place Crabinet behind HTTPS for real use; do not expose plain HTTP on a network.
+| Topic | Guide |
+| --- | --- |
+| Configuration, grants, and limits | [Configuration](docs/configuration.md), [annotated example](config.example.toml), [JSON Schema](config.schema.json) |
+| Passwords, OpenID Connect, passkeys, and account pictures | [Authentication](docs/authentication.md) |
+| Installation, proxies, backups, upgrades, and troubleshooting | [Operating Crabinet](docs/operations.md) |
+| Security boundaries and implementation choices | [Threat model](docs/threat-model.md), [filesystem security](docs/filesystem-security.md), [architecture decisions](docs/architecture-decisions.md) |
+| Uploads, file operations, and Trash | [Mutations](docs/mutations.md) |
+| Supported previews and their limits | [Previews](docs/previews.md) |
+| Frontend and HTTP behavior | [Browse API](docs/browse-api.md), [frontend contract](docs/frontend-api-contract.md) |
+| Upgrading an installation from before the rename | [Staging cutover](docs/staging-cutover.md) |
 
-## Configuration
+Account pictures can make browser requests to Google or, when enabled, Gravatar. See [account pictures](docs/authentication.md#account-pictures) for the privacy implications and configuration.
 
-Copy [config.example.toml](config.example.toml) and consult [the configuration guide](docs/configuration.md). The committed [JSON Schema](config.schema.json) is generated by `crabinet print-config-schema` and checked against the implementation in CI.
+## Contributing and security
 
-```toml
-version = 1
+Ideas, feature suggestions, bug reports, usability feedback, documentation improvements, and focused contributions are welcome. [Open an issue](https://github.com/joanfabregat/crabinet/issues) to share an idea or report a bug. See [CONTRIBUTING.md](CONTRIBUTING.md) for the containerized Rust/Node workflow and required checks. The HTTP API is documented for the first-party frontend; it is not a stable third-party compatibility promise.
 
-[server]
-listen = "0.0.0.0:8080"
-database_path = "/var/lib/crabinet/crabinet.sqlite3"
-session_secret_file = "/run/secrets/crabinet/session.key"
-max_upload_size = "100 MiB"
-max_preview_size = "2 MiB"
-auth_max_concurrent = 1
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/joanfabregat/crabinet/security/advisories/new), following [SECURITY.md](SECURITY.md).
 
-[auth]
-password_enabled = true
-oidc_enabled = false
+[![Weekly security scan](https://github.com/joanfabregat/crabinet/actions/workflows/security-weekly.yml/badge.svg?branch=main)](https://github.com/joanfabregat/crabinet/actions/workflows/security-weekly.yml)
 
-[[users]]
-username = "alice"
-email = "alice@example.com"
-password_hash = "$argon2id$v=19$m=65536,t=3,p=1$REPLACE_WITH_A_REAL_SALT$REPLACE_WITH_A_REAL_HASH"
+## License
 
-[[shares]]
-id = "documents"
-name = "Documents"
-path = "/shares/documents"
-read_only = false
-
-[[shares.grants]]
-user = "alice"
-permission = "write"
-```
-
-Generate hashes only with `crabinet hash-password`; clear-text passwords are never accepted in arguments or environment variables. To enable OpenID Connect, set `auth.oidc_enabled = true`, configure `[auth.oidc]`, and register the exact callback URL with the provider as described in [the configuration guide](docs/configuration.md). Setting `auth.password_enabled = false` keeps the sign-in page with Google as the initial method; Crabinet rejects a configuration with both initial methods disabled. To enable passkeys, set `[auth.passkeys] origin` to the public HTTPS origin. Users add, name, rename, and remove passkeys in Settings after signing in with Google or a password. New passkeys support sign-in without an email or username. Keep the session secret and OIDC client secret out of TOML and every share. Crabinet reads configuration and secrets once, validates all roots before listening, rejects unknown fields, and never hot-reloads. Restart after every policy, user, hash, secret, grant, or limit change. Rotating the session secret invalidates all sessions; changing a password hash or disabling/removing a user takes effect after restart.
-
-A share grant is absent-by-default. `permission = "read"` cannot mutate. `permission = "write"` can mutate unless the share's `read_only = true`, which always wins. The OS user must still have matching host permissions. Each writable share receives private mode-`0700` `.crabinet/staging` directories for atomic uploads and bounded crash recovery; Crabinet never scans the complete share at startup. `.crabinet` is reserved and hidden even when hidden files are shown. Writable shares must be mounted into only one Crabinet process; read-only shares create no staging state and may be served by separate read-only replicas.
-
-The old `.index-staging` name remains reserved and hidden. A writable share with that entry present refuses startup so data left by an interrupted operation cannot be stranded. Follow the [staging cutover runbook](docs/staging-cutover.md) before upgrading a writable deployment. The session cookie is now named `__Host-crabinet_session`, so upgrading requires users to sign in again; update any deployment setting that uses the old `INDEX_CONFIG` environment variable to `CRABINET_CONFIG`.
-
-## Rootless Podman pod
-
-The image is `ghcr.io/joanfabregat/crabinet:<tag>`. Pin a release digest in production. It is `scratch`-based, runs without root, and has no shell or package manager. Images built from this revision contain the executable, Crabinet's MIT license, and third-party license notices.
-
-The following rootless example maps the invoking host user into the pod, keeps the container root filesystem read-only, drops capabilities, and mounts state separately. Adjust SELinux labels for your host. Use `:ro` for every share that does not need writes.
-
-```sh
-install -d -m 0700 deploy/state deploy/secrets
-install -d -m 0750 deploy/config
-umask 077
-head -c 32 /dev/urandom > deploy/secrets/session.key
-cp config.example.toml deploy/config/config.toml
-podman run --rm --interactive --tty \
-  ghcr.io/joanfabregat/crabinet:v0.1.0 hash-password
-# Put that hash in the copy, enable the user, and use /var/lib/crabinet,
-# /run/secrets/crabinet, and /shares paths.
-
-podman pod create \
-  --name crabinet \
-  --userns=keep-id \
-  -p 127.0.0.1:8080:8080
-
-podman run --detach \
-  --name crabinet-app \
-  --pod crabinet \
-  --user "$(id -u):$(id -g)" \
-  --read-only \
-  --cap-drop=all \
-  --security-opt=no-new-privileges \
-  --memory=256m \
-  --pids-limit=256 \
-  -v "$PWD/deploy/config/config.toml:/etc/crabinet/config.toml:ro,Z" \
-  -v "$PWD/deploy/secrets:/run/secrets/crabinet:ro,Z" \
-  -v "$PWD/deploy/state:/var/lib/crabinet:rw,Z" \
-  -v "/srv/documents:/shares/documents:ro,Z" \
-  ghcr.io/joanfabregat/crabinet:v0.1.0 \
-  --config /etc/crabinet/config.toml
-```
-
-For a writable share change only that share mount to `:rw,Z`; never make the configuration or secret mount writable. Ensure the mapped host user can traverse/read each share and can create, rename, sync, and delete inside writable shares. Avoid `:U` unless you explicitly intend Podman to change host ownership.
-
-Check health from the host or a dedicated proxy/monitor container in the pod:
-
-```sh
-curl --fail --silent --show-error http://127.0.0.1:8080/health/live
-curl --fail --silent --show-error http://127.0.0.1:8080/health/ready
-```
-
-Start with a 256 MiB limit and `auth_max_concurrent = 1`. A default Argon2id verification uses about 64 MiB temporarily; configured hashes may use more within enforced bounds. Idle browsing is much smaller, but upload concurrency, directory sizes, allocator behavior, and the platform affect the real peak. Benchmark the exact release under its cgroup limit before reducing memory or increasing authentication concurrency. See [authentication sizing](docs/authentication.md).
-
-## TLS and reverse proxies
-
-Terminate TLS at a reverse proxy and forward to Crabinet over a private loopback, Unix-network namespace, or pod network. Preserve the original `Host` exactly: login, logout, and mutations compare `Origin`/`Referer` authority with `Host`. Do not rewrite these headers.
-
-By default Crabinet ignores `X-Forwarded-For` and `Forwarded`, and its login limiter keys attempts on the TCP peer. Behind a proxy every client then shares the proxy's address: one client's failed attempts against an account would also block that account's password sign-in for everyone else. List the proxy's own addresses in `server.trusted_proxies` so the limiter sees the real client instead:
-
-```toml
-[server]
-listen = "127.0.0.1:8080"
-# Only connections from these addresses may name the client. Never list 0.0.0.0/0 or ::/0.
-trusted_proxies = ["127.0.0.1", "::1"]
-# "x-forwarded-for" (default) or "forwarded" (RFC 7239), whichever the proxy sets.
-trusted_proxy_header = "x-forwarded-for"
-```
-
-Configure the proxy to append the connecting address to that header (for example nginx `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). Crabinet reads the header only when the TCP peer is inside a trusted range, walks its addresses from the right, skips trusted proxies, and uses the first untrusted address; a missing, malformed, or oversized header falls back to the TCP peer. Addresses that clients put at the left of the header are therefore never used. The resolved address is used only for login rate limiting, never for authorization.
-
-Do not publish the backend port beyond the proxy, and keep every listed range limited to proxies you operate: any host inside it can choose its rate-limit source. Apply conservative request-body and timeout limits at the proxy, but keep them at least as large as Crabinet's configured upload size plus multipart framing. Crabinet closes a connection that does not send a complete request head within `server.header_read_timeout_seconds` (default 300), including an idle keep-alive connection between requests, and closes new connections above `server.max_connections`. The default exceeds common proxy idle upstream timeouts (Caddy two minutes, nginx 60 seconds), so the proxy closes idle upstream connections first; see [configuration](docs/configuration.md). Add HSTS at the TLS endpoint after validating HTTPS.
-
-## Backup and restore
-
-Back up these as separate classes with restrictive permissions:
-
-- `config.toml`, the session-secret file, and deployment metadata;
-- the SQLite file, which holds sessions, per-user preferences, and passkeys, plus its `-wal`/`-shm` companions when present;
-- every share directory, preserving ownership, modes, timestamps, and extended attributes relevant to your workload.
-
-For a simple consistent backup, stop the Crabinet container, snapshot/copy SQLite and writable shares, then restart. A live filesystem copy is not transactionally consistent with concurrent file mutations; use a storage-level snapshot that covers all writable shares and state together, or accept that they represent different instants. Read-only shares may be copied live according to the underlying application's rules.
-
-Restore while Crabinet is stopped. Restore configuration, secret, SQLite state, and share paths with the same ownership and mount semantics; run `crabinet check-config` before starting. Restoring SQLite without its matching session secret safely invalidates existing cookies but cannot recover those sessions. If session continuity is unimportant, deleting the stopped service's SQLite file starts with no sessions.
-
-## Upgrade and rollback
-
-1. Read the release notes and verify checksums, SBOM, and attestation.
-2. Back up state and writable shares, then run the new binary's `check-config` against the production configuration.
-3. Pull by digest, stop the old container, and start exactly one new writer.
-4. Check both health endpoints, login, each grant class, a representative preview, and a small write on a disposable path.
-
-For rollback, stop the new process before starting the old one. Restore the pre-upgrade SQLite/config snapshot if release notes describe a state or schema change. Never run old and new versions concurrently against a writable share or the same SQLite database.
-
-The start-folder and passkey features migrate the SQLite schema through versions 2 and 4. Crabinet v0.1.0 uses schema version 4, even when passkeys are disabled. An older binary cannot open a newer schema; restore its matching pre-upgrade SQLite snapshot before rolling back.
-
-## Troubleshooting and logs
-
-Crabinet emits structured JSON logs to standard output. Set `RUST_LOG=crabinet=debug` only during controlled diagnosis; logs are designed not to include passwords, password hashes, file contents, host paths, session tokens, or CSRF tokens. Every HTTP response includes a server-generated `X-Request-ID`, replacing any value the client sent; correlate it with the request span. Sign-ins, logouts, expired or revoked sessions, refused share access, and mutations emit audit events marked `audit=true`; see [authentication](docs/authentication.md#audit-events).
-
-- Startup fails before listening: run `crabinet check-config`; verify that the session and OIDC client secrets are owner-only (`chmod 600`; any group or other permission is rejected) and long enough, database parent existence, absolute non-overlapping share roots, that no sensitive path is inside a share, that `.index-staging` has been reviewed and removed from writable shares, and that writable share roots permit creation of private `.crabinet/staging` directories.
-- Login succeeds but the browser returns to login: confirm end-to-end HTTPS, preserved `Host`, and matching `Origin`; `Secure` cookies are not for plain network HTTP.
-- A user cannot see a share: grants are case-sensitive and absent-by-default; restart after changing the immutable configuration.
-- Writes return `403`: verify a `write` grant, `read_only = false`, a current session/CSRF token, and host filesystem permissions.
-- Writes return `409`: refresh metadata; Crabinet uses validators to prevent overwriting a concurrently changed target.
-- Uploads return `413` or `429`: check Crabinet and proxy limits, upload concurrency, and container memory.
-- Preview returns `415` or `413`: the file is binary/invalid UTF-8 with no supported image, PDF, audio, or video signature, unsupported for that preview kind, or a text-like file that exceeds `max_preview_size` (streamed types are not bound by it); download remains separate and permission-checked.
-- A thumbnail returns `429` (`busy`): concurrent decodes have reserved all of `max_image_decode_memory`; retry, or raise the budget along with the container memory limit. A `413` (`thumbnail_too_large`) means one image alone needs more than the budget, and the panel shows the original instead where the browser can decode it.
-
-## Development and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the containerized Rust/Node workflow, required checks, and development server, and [dependency licensing](docs/dependency-licenses.md) for the enforced policy and release notices. Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/joanfabregat/crabinet/security/advisories/new), following [SECURITY.md](SECURITY.md); do not open a public issue for an unpatched vulnerability or include active credentials in any report.
-
-Crabinet is released under the [MIT License](LICENSE). Bundled dependencies retain their own terms, collected in [Third-party licenses](THIRD_PARTY_LICENSES.md). Releases built from this revision include both files in archives and container images.
+Crabinet is released under the [MIT License](LICENSE). Bundled dependencies retain their own terms, collected in [Third-party licenses](THIRD_PARTY_LICENSES.md); see the [dependency licensing policy](docs/dependency-licenses.md).
