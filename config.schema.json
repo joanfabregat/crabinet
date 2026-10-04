@@ -203,6 +203,11 @@
           "maximum": 65535,
           "minimum": 1
         },
+        "max_image_decode_memory": {
+          "description": "Total memory, for example \"256 MiB\", that image thumbnail decodes may\nreserve at once, at most \"4 GiB\". Each decode reserves its estimated\npeak first; an image whose estimate exceeds the whole budget is not\nthumbnailed.",
+          "type": "string",
+          "default": "256 MiB"
+        },
         "max_preview_size": {
           "description": "Maximum size of a file previewed as text, code, Markdown, or HTML, for example \"2 MiB\". Streamed images, PDF, audio, and video are not bound by it.",
           "type": "string"
@@ -222,6 +227,11 @@
           "default": 4096,
           "maximum": 100000,
           "minimum": 1
+        },
+        "max_thumbnail_cache_size": {
+          "description": "Maximum total size of cached thumbnails, for example \"256 MiB\", at most\n\"64 GiB\". The oldest entries are evicted beyond it; \"0 B\" disables the\ncache.",
+          "type": "string",
+          "default": "256 MiB"
         },
         "max_upload_size": {
           "description": "Maximum request upload size, for example \"100 MiB\".",
@@ -246,6 +256,14 @@
         "session_secret_file": {
           "description": "File containing 32 to 4096 random bytes. Its contents are never printed.",
           "type": "string"
+        },
+        "thumbnail_cache_path": {
+          "description": "Directory for cached thumbnails, created with owner-only permissions.\nRelative paths are resolved from the configuration directory. Defaults\nto `thumbnails` next to `database_path`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "trash_retention_days": {
           "description": "Number of days before an item in Trash is eligible for permanent removal.",

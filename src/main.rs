@@ -19,6 +19,7 @@ use crabinet::{
     password::hash_confirmed,
     preview::PreviewPolicy,
     server::{self, ServerLimits},
+    thumbnail::{ThumbnailCache, ThumbnailService},
 };
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -88,6 +89,7 @@ async fn main() -> Result<()> {
     let mutation_state = MutationState::from_max_upload_bytes(config.server().max_upload_size())
         .context("configured upload limit is unsafe")?;
     let browse = browse_state(&config).context("cannot initialize configured shares")?;
+    let thumbnails = thumbnail_service(&config).context("cannot initialize image thumbnails")?;
     let listen = config.server().listen();
     let auth = AuthService::from_config(&config).context("cannot initialize authentication")?;
     let oidc = if let Some(settings) = config.auth().oidc() {
@@ -107,6 +109,7 @@ async fn main() -> Result<()> {
     let mut state = AppState::new(true)
         .with_browse(browse)
         .with_preview_policy(preview_policy)
+        .with_thumbnails(thumbnails)
         .with_mutations(mutation_state)
         .with_trash_retention_days(config.server().trash_retention_days())
         .with_auth_service(auth);
@@ -189,6 +192,23 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
         derive_key(b"index:browse-cursor:v1\0", config.session_secret()),
     )
     .context("invalid browse policy")
+}
+
+/// The decode budget and, unless disabled, the private on-disk cache. The
+/// cache directory is created or checked here, before the socket is bound.
+fn thumbnail_service(config: &Config) -> Result<ThumbnailService> {
+    let cache = match config.server().thumbnail_cache_path() {
+        Some(path) => Some(
+            ThumbnailCache::open(path, config.server().max_thumbnail_cache_size())
+                .context("cannot open server.thumbnail_cache_path")?,
+        ),
+        None => None,
+    };
+    Ok(ThumbnailService::new(
+        config.server().max_image_decode_memory(),
+        cache,
+        derive_key(b"crabinet:thumbnail-cache:v1\0", config.session_secret()),
+    )?)
 }
 
 fn derive_key(domain: &[u8], secret: &[u8]) -> [u8; 32] {

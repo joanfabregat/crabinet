@@ -50,6 +50,15 @@ unicode-normalization = "0.1.25"
 url = "2.5.8"
 webauthn-rs = { version = "=0.5.5", features = ["conditional-ui"] }
 webauthn-rs-proto = "=0.5.5"
+# Thumbnail decoders and encoders: pure Rust, all `forbid(unsafe_code)`
+# (jpeg-decoder through `platform_independent`, which also drops its SIMD,
+# and jpeg-encoder without `simd`, its only feature that enables unsafe code).
+gif = { version = "0.14.2", default-features = false, features = ["std"] }
+image-webp = "0.2.4"
+# The one maintained pure-Rust JPEG decoder with scaled (1/2, 1/4, 1/8) IDCT.
+jpeg-decoder = { version = "0.3.2", default-features = false, features = ["platform_independent"] }
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+png = "0.18.1"
 
 [dev-dependencies]
 aws-lc-rs = "1.18.1"

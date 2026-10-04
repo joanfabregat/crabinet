@@ -8,6 +8,7 @@ Crabinet's own source and original assets are licensed under [MIT](LICENSE). Thi
 | MPL-2.0 | `webauthn-rs`, `webauthn-rs-core`, `webauthn-rs-proto`, `webauthn-attestation-ca`, and `base64urlsafedata`, used for passkeys |
 | CDLA-Permissive-2.0 | CA root certificate data in `webpki-roots`, used for OIDC HTTPS connections |
 | BSD-3-Clause, BSD-2-Clause | Adobe CMap data, Foxit standard fonts, and the OpenJPEG and PDFium JBIG2 image decoders distributed with PDF.js, listed under [PDF.js data and decoders](#pdfjs-data-and-decoders) |
+| IJG | The forward DCT in `jpeg-encoder`, ported from mozjpeg, used for JPEG thumbnails |
 
 Source code for the MPL-licensed WebAuthn crates is available from the [upstream repository](https://github.com/kanidm/webauthn-rs) and the exact crate versions listed in `Cargo.lock` are available from [crates.io](https://crates.io/crates/webauthn-rs). Crabinet does not relicense these components.
 
@@ -16,10 +17,11 @@ Source code for the MPL-licensed WebAuthn crates is available from the [upstream
 The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.1+3.6.3`, under Apache-2.0. The embedded web frontend includes PDF.js from `pdfjs-dist` 6.3.289 (Copyright Mozilla Foundation and contributors) under Apache-2.0: its library and worker scripts, and the Mozilla glue code of its JavaScript JBIG2 decoder. The locked Linux runtime graph also contains the following crates whose declared license expression includes Apache-2.0. Some offer an alternative license; the expression for each crate is reproduced as declared. Build-only and development dependencies are omitted from this list.
 
 <details>
-<summary>All 178 Apache-eligible Rust crates and versions</summary>
+<summary>All 191 Apache-eligible Rust crates and versions</summary>
 
 | Crate | Version | Declared license expression |
 | --- | --- | --- |
+| `adler2` | `2.0.1` | `0BSD OR MIT OR Apache-2.0` |
 | `ambient-authority` | `0.0.2` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
 | `anstream` | `1.0.0` | `MIT OR Apache-2.0` |
 | `anstyle` | `1.0.14` | `MIT OR Apache-2.0` |
@@ -54,6 +56,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `const-oid` | `0.10.2` | `Apache-2.0 OR MIT` |
 | `core_detect` | `1.0.0` | `MIT/Apache-2.0` |
 | `cpufeatures` | `0.3.1` | `MIT OR Apache-2.0` |
+| `crc32fast` | `1.5.2` | `MIT OR Apache-2.0` |
 | `crypto-common` | `0.2.2` | `MIT OR Apache-2.0` |
 | `ctutils` | `0.4.2` | `Apache-2.0 OR MIT` |
 | `der-parser` | `9.0.0` | `MIT/Apache-2.0` |
@@ -66,6 +69,8 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `errno` | `0.3.14` | `MIT OR Apache-2.0` |
 | `fallible-iterator` | `0.3.0` | `MIT/Apache-2.0` |
 | `fallible-streaming-iterator` | `0.1.9` | `MIT/Apache-2.0` |
+| `fdeflate` | `0.3.7` | `MIT OR Apache-2.0` |
+| `flate2` | `1.1.10` | `MIT OR Apache-2.0` |
 | `foreign-types` | `0.3.2` | `MIT/Apache-2.0` |
 | `foreign-types-shared` | `0.1.1` | `MIT/Apache-2.0` |
 | `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` |
@@ -78,6 +83,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `getrandom` | `0.2.17` | `MIT OR Apache-2.0` |
 | `getrandom` | `0.3.4` | `MIT OR Apache-2.0` |
 | `getrandom` | `0.4.3` | `MIT OR Apache-2.0` |
+| `gif` | `0.14.2` | `MIT OR Apache-2.0` |
 | `half` | `2.7.1` | `MIT OR Apache-2.0` |
 | `hashbrown` | `0.17.1` | `MIT OR Apache-2.0` |
 | `heck` | `0.5.0` | `MIT OR Apache-2.0` |
@@ -90,6 +96,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `hyper-rustls` | `0.27.10` | `Apache-2.0 OR ISC OR MIT` |
 | `idna` | `1.1.0` | `MIT OR Apache-2.0` |
 | `idna_adapter` | `1.2.2` | `Apache-2.0 OR MIT` |
+| `image-webp` | `0.2.4` | `MIT OR Apache-2.0` |
 | `indexmap` | `2.14.2` | `Apache-2.0 OR MIT` |
 | `io-extras` | `0.19.0` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
 | `io-lifetimes` | `2.0.4` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
@@ -97,6 +104,8 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `ipnet` | `2.12.2` | `MIT OR Apache-2.0` |
 | `is_terminal_polyfill` | `1.70.2` | `MIT OR Apache-2.0` |
 | `itoa` | `1.0.18` | `MIT OR Apache-2.0` |
+| `jpeg-decoder` | `0.3.2` | `MIT OR Apache-2.0` |
+| `jpeg-encoder` | `0.7.1` | `(MIT OR Apache-2.0) AND IJG` |
 | `lazy_static` | `1.5.0` | `MIT OR Apache-2.0` |
 | `libc` | `0.2.189` | `MIT OR Apache-2.0` |
 | `linux-raw-sys` | `0.12.1` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
@@ -105,6 +114,8 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `maybe-owned` | `0.3.4` | `MIT OR Apache-2.0` |
 | `mime` | `0.3.17` | `MIT OR Apache-2.0` |
 | `minimal-lexical` | `0.2.1` | `MIT/Apache-2.0` |
+| `miniz_oxide` | `0.8.9` | `MIT OR Zlib OR Apache-2.0` |
+| `miniz_oxide` | `0.9.1` | `MIT OR Zlib OR Apache-2.0` |
 | `multiversion` | `0.9.0` | `MIT OR Apache-2.0` |
 | `multiversion-macros` | `0.9.0` | `MIT OR Apache-2.0` |
 | `multiversion_no_op` | `1.0.0` | `Apache-2.0 OR MIT` |
@@ -121,9 +132,11 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `percent-encoding` | `2.3.2` | `MIT OR Apache-2.0` |
 | `phc` | `0.6.1` | `Apache-2.0 OR MIT` |
 | `pin-project-lite` | `0.2.17` | `Apache-2.0 OR MIT` |
+| `png` | `0.18.1` | `MIT OR Apache-2.0` |
 | `powerfmt` | `0.2.0` | `MIT OR Apache-2.0` |
 | `ppv-lite86` | `0.2.21` | `MIT OR Apache-2.0` |
 | `proc-macro2` | `1.0.107` | `MIT OR Apache-2.0` |
+| `quick-error` | `2.0.1` | `MIT/Apache-2.0` |
 | `quinn` | `0.11.12` | `MIT OR Apache-2.0` |
 | `quinn-proto` | `0.11.18` | `MIT OR Apache-2.0` |
 | `quinn-udp` | `0.5.15` | `MIT OR Apache-2.0` |
@@ -193,6 +206,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `utf8_iter` | `1.0.4` | `Apache-2.0 OR MIT` |
 | `utf8parse` | `0.2.2` | `Apache-2.0 OR MIT` |
 | `uuid` | `1.26.1` | `Apache-2.0 OR MIT` |
+| `weezl` | `0.1.12` | `MIT OR Apache-2.0` |
 | `x509-parser` | `0.16.0` | `MIT OR Apache-2.0` |
 | `zerocopy` | `0.8.57` | `BSD-2-Clause OR Apache-2.0 OR MIT` |
 | `zerocopy-derive` | `0.8.57` | `BSD-2-Clause OR Apache-2.0 OR MIT` |
@@ -1010,3 +1024,54 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+## Independent JPEG Group License
+
+This text covers the forward DCT of the `jpeg-encoder` crate, version 0.7.1, which encodes JPEG thumbnails. That code is ported from mozjpeg and states that it was part of the Independent JPEG Group's software; the rest of the crate is MIT OR Apache-2.0 and is listed under [Apache License 2.0](#apache-license-20). The "README file" the legalese refers to is this section. This software is based in part on the work of the Independent JPEG Group.
+
+<!-- BEGIN IJG -->
+In plain English:
+
+1. We don't promise that this software works.  (But if you find any bugs,
+   please let us know!)
+2. You can use this software for whatever you want.  You don't have to pay us.
+3. You may not pretend that you wrote this software.  If you use it in a
+   program, you must acknowledge somewhere in your documentation that
+   you've used the IJG code.
+
+In legalese:
+
+The authors make NO WARRANTY or representation, either express or implied,
+with respect to this software, its quality, accuracy, merchantability, or
+fitness for a particular purpose.  This software is provided "AS IS", and you,
+its user, assume the entire risk as to its quality and accuracy.
+
+This software is copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding.
+All Rights Reserved except as specified below.
+
+Permission is hereby granted to use, copy, modify, and distribute this
+software (or portions thereof) for any purpose, without fee, subject to these
+conditions:
+(1) If any part of the source code for this software is distributed, then this
+README file must be included, with this copyright and no-warranty notice
+unaltered; and any additions, deletions, or changes to the original files
+must be clearly indicated in accompanying documentation.
+(2) If only executable code is distributed, then the accompanying
+documentation must state that "this software is based in part on the work of
+the Independent JPEG Group".
+(3) Permission for use of this software is granted only if the user accepts
+full responsibility for any undesirable consequences; the authors accept
+NO LIABILITY for damages of any kind.
+
+These conditions apply to any software derived from or based on the IJG code,
+not just to the unmodified library.  If you use our work, you ought to
+acknowledge us.
+
+Permission is NOT granted for the use of any IJG author's name or company name
+in advertising or publicity relating to this software or products derived from
+it.  This software may be referred to only as "the Independent JPEG Group's
+software".
+
+We specifically permit and encourage the use of this software as the basis of
+commercial products, provided that all warranty or liability claims are
+assumed by the product vendor.
+<!-- END IJG -->

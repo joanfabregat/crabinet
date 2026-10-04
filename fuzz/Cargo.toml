@@ -59,3 +59,17 @@ path = "fuzz_targets/zip_archive.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "thumbnail_raw_preview"
+path = "fuzz_targets/thumbnail_raw_preview.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "thumbnail_decode"
+path = "fuzz_targets/thumbnail_decode.rs"
+test = false
+doc = false
+bench = false

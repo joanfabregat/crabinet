@@ -47,6 +47,8 @@ import {
   isStreamedPreviewKind,
   openUrl,
   renderedHtmlPreviewUrl,
+  thumbnailStatus,
+  thumbnailUrl,
   type ApiClient,
   type AuthMethods,
   type DirectoryEntry,
@@ -2195,6 +2197,7 @@ function PreviewPanel({
               htmlRenderedUrl={`${renderedHtmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
               htmlRenderedViewUrl={renderedHtmlViewUrl(shareId, path)}
               imageUrl={`${imagePreviewUrl(shareId, path)}&v=${assetRevision}`}
+              thumbnailUrl={`${thumbnailUrl(shareId, path, 1600)}&v=${assetRevision}`}
               inlineUrl={`${openUrl(shareId, path)}&v=${assetRevision}`}
               filename={filename}
             />
@@ -2211,6 +2214,7 @@ function PreviewContent({
   htmlRenderedUrl,
   htmlRenderedViewUrl,
   imageUrl,
+  thumbnailUrl,
   inlineUrl,
   filename,
 }: {
@@ -2219,6 +2223,8 @@ function PreviewContent({
   htmlRenderedUrl: string;
   htmlRenderedViewUrl: string;
   imageUrl: string;
+  /** The 1600-pixel server thumbnail, for images and RAW files. */
+  thumbnailUrl: string;
   /** The inline route, for media elements and the PDF first-page preview. */
   inlineUrl: string;
   filename: string;
@@ -2235,19 +2241,15 @@ function PreviewContent({
     );
   }
 
-  // The toolbar's Open in new tab action covers images, so the image itself
-  // is not a second link.
-  if (document.kind === "image") {
+  if (document.kind === "image" || document.kind === "raw") {
     return (
-      <figure class="image-preview">
-        <img src={imageUrl} alt={`Preview of ${filename}`} draggable={false} />
-        <figcaption>
-          {document.mimeType}
-          {document.width && document.height
-            ? ` · ${document.width} × ${document.height}`
-            : ""}
-        </figcaption>
-      </figure>
+      <ImagePreview
+        key={`${thumbnailUrl}\u0000${imageUrl}`}
+        document={document}
+        filename={filename}
+        originalUrl={document.kind === "image" ? imageUrl : undefined}
+        thumbnailUrl={document.thumbnailable ? thumbnailUrl : undefined}
+      />
     );
   }
 
@@ -2289,6 +2291,155 @@ function PreviewContent({
   }
 
   return <SourcePreview document={document} />;
+}
+
+type ImagePreviewState =
+  | { mode: "thumbnail"; attempt: number; checked: boolean }
+  | { mode: "checking"; attempt: number; checked: boolean }
+  | { mode: "original" }
+  | { mode: "busy"; attempt: number }
+  | { mode: "failed"; reason: "too-large" | "unsupported" | "other" };
+
+/**
+ * Shows the server thumbnail, which keeps large photos out of the browser,
+ * and falls back to the original for formats the browser decodes itself. An
+ * `<img>` cannot see why it failed, so a failed thumbnail is requested once
+ * more to read the status: `429` offers a retry, anything else falls back to
+ * the original image or, for RAW files, explains why nothing can be shown.
+ */
+function ImagePreview({
+  document,
+  filename,
+  originalUrl,
+  thumbnailUrl,
+}: {
+  document: PreviewDocument;
+  filename: string;
+  /** The browser-decodable original, absent for RAW files. */
+  originalUrl?: string;
+  thumbnailUrl?: string;
+}) {
+  const [state, setState] = useState<ImagePreviewState>(() =>
+    thumbnailUrl
+      ? { mode: "thumbnail", attempt: 0, checked: false }
+      : originalUrl
+        ? { mode: "original" }
+        : { mode: "failed", reason: "unsupported" },
+  );
+
+  const fallBack = (reason: "too-large" | "unsupported" | "other") =>
+    setState(originalUrl ? { mode: "original" } : { mode: "failed", reason });
+
+  useEffect(() => {
+    if (state.mode !== "checking" || !thumbnailUrl) return;
+    const controller = new AbortController();
+    const { attempt, checked } = state;
+    thumbnailStatus(thumbnailUrl, controller.signal).then(
+      () => {
+        if (controller.signal.aborted) return;
+        // The thumbnail now succeeds, for example once a busy server has
+        // capacity again: load it once more, but never loop.
+        if (checked) fallBack("other");
+        else
+          setState({ mode: "thumbnail", attempt: attempt + 1, checked: true });
+      },
+      (cause: unknown) => {
+        if (controller.signal.aborted || isAborted(cause)) return;
+        const status = cause instanceof ApiError ? cause.status : undefined;
+        if (status === 429) setState({ mode: "busy", attempt });
+        else if (status === 413) fallBack("too-large");
+        else if (status === 415) fallBack("unsupported");
+        else fallBack("other");
+      },
+    );
+    return () => controller.abort();
+    // fallBack reads only props that also key this component.
+  }, [state, thumbnailUrl]);
+
+  const isRaw = document.kind === "raw";
+  const caption = isRaw
+    ? "RAW image"
+    : `${document.mimeType ?? "Image"}${
+        document.width && document.height
+          ? ` · ${document.width} × ${document.height}`
+          : ""
+      }`;
+
+  if (state.mode === "busy") {
+    return (
+      <div class="preview-error" role="alert">
+        <h3>Preview is busy</h3>
+        <p>The server is making other previews right now.</p>
+        <Button
+          onClick={() =>
+            setState({
+              mode: "thumbnail",
+              attempt: state.attempt + 1,
+              checked: false,
+            })
+          }
+        >
+          Try preview again
+        </Button>
+      </div>
+    );
+  }
+
+  if (state.mode === "failed") {
+    const subject = isRaw ? "this RAW file" : "this image";
+    const message =
+      state.reason === "too-large"
+        ? `The preview of ${subject} is too large to show.`
+        : state.reason === "unsupported"
+          ? isRaw
+            ? "This RAW file has no embedded preview that Crabinet can show."
+            : "This image format cannot be previewed."
+          : `The preview of ${subject} could not be shown.`;
+    return (
+      <div class="preview-error" role="alert">
+        <h3>No preview available</h3>
+        <p>{message} Download the file to view it.</p>
+      </div>
+    );
+  }
+
+  if (state.mode === "checking") {
+    return (
+      <p class="status-message" role="status" aria-live="polite">
+        Loading preview…
+      </p>
+    );
+  }
+
+  // The toolbar's Open in new tab action covers images, so the image itself
+  // is not a second link.
+  const source =
+    state.mode === "thumbnail" && thumbnailUrl
+      ? state.attempt === 0
+        ? thumbnailUrl
+        : `${thumbnailUrl}-${state.attempt}`
+      : originalUrl;
+  return (
+    <figure class="image-preview">
+      <img
+        src={source}
+        alt={`Preview of ${filename}`}
+        draggable={false}
+        onError={() => {
+          if (state.mode === "thumbnail") {
+            setState({
+              mode: "checking",
+              attempt: state.attempt,
+              checked: state.checked,
+            });
+          } else {
+            setState({ mode: "failed", reason: "other" });
+          }
+        }}
+      />
+      <figcaption>{caption}</figcaption>
+    </figure>
+  );
 }
 
 function HtmlPreview({
@@ -3139,6 +3290,7 @@ function previewTypeLabel(
 ): string {
   if (document?.kind === "image") return document.mimeType ?? "Image";
   if (document?.kind === "pdf") return "PDF";
+  if (document?.kind === "raw") return "RAW image";
   if (document?.kind === "audio") return document.mimeType ?? "Audio";
   if (document?.kind === "video") return document.mimeType ?? "Video";
   if (document?.kind === "markdown_source") return "Markdown";

@@ -163,6 +163,22 @@ struct RawServerConfig {
     #[serde(default = "default_header_read_timeout_seconds")]
     #[schemars(range(min = 5, max = 3_600))]
     header_read_timeout_seconds: u64,
+    /// Total memory, for example "256 MiB", that image thumbnail decodes may
+    /// reserve at once, at most "4 GiB". Each decode reserves its estimated
+    /// peak first; an image whose estimate exceeds the whole budget is not
+    /// thumbnailed.
+    #[serde(default = "default_max_image_decode_memory")]
+    max_image_decode_memory: String,
+    /// Directory for cached thumbnails, created with owner-only permissions.
+    /// Relative paths are resolved from the configuration directory. Defaults
+    /// to `thumbnails` next to `database_path`.
+    #[serde(default)]
+    thumbnail_cache_path: Option<PathBuf>,
+    /// Maximum total size of cached thumbnails, for example "256 MiB", at most
+    /// "64 GiB". The oldest entries are evicted beyond it; "0 B" disables the
+    /// cache.
+    #[serde(default = "default_max_thumbnail_cache_size")]
+    max_thumbnail_cache_size: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -310,6 +326,9 @@ pub struct ServerConfig {
     trash_retention_days: u16,
     max_connections: usize,
     header_read_timeout_seconds: u64,
+    max_image_decode_memory: u64,
+    thumbnail_cache_path: Option<PathBuf>,
+    max_thumbnail_cache_size: u64,
 }
 
 #[derive(Clone)]
@@ -450,8 +469,39 @@ impl Config {
             ));
         }
 
+        let max_image_decode_memory =
+            parse_size(&raw.server.max_image_decode_memory).map_err(|reason| {
+                ConfigError::Validation(format!("server.max_image_decode_memory {reason}"))
+            })?;
+        if max_image_decode_memory > crate::thumbnail::HARD_MAX_DECODE_MEMORY {
+            return Err(ConfigError::Validation(
+                "server.max_image_decode_memory must not exceed 4 GiB".into(),
+            ));
+        }
+        let max_thumbnail_cache_size = parse_size_or_zero(&raw.server.max_thumbnail_cache_size)
+            .map_err(|reason| {
+                ConfigError::Validation(format!("server.max_thumbnail_cache_size {reason}"))
+            })?;
+        if max_thumbnail_cache_size > crate::thumbnail::HARD_MAX_CACHE_BYTES {
+            return Err(ConfigError::Validation(
+                "server.max_thumbnail_cache_size must not exceed 64 GiB".into(),
+            ));
+        }
+
         let database_path = resolve_path(base, &raw.server.database_path);
         let database_path = validate_database_path(&database_path)?;
+        let thumbnail_cache_path = if max_thumbnail_cache_size == 0 {
+            None
+        } else {
+            let requested = match &raw.server.thumbnail_cache_path {
+                Some(path) => resolve_path(base, path),
+                None => database_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join("thumbnails"),
+            };
+            Some(validate_thumbnail_cache_path(&requested)?)
+        };
         let session_secret_file = resolve_path(base, &raw.server.session_secret_file);
         let (session_secret_file, session_secret) = read_session_secret(&session_secret_file)?;
 
@@ -642,6 +692,27 @@ impl Config {
             oidc.as_ref()
                 .map(|value| value.client_secret_file.as_path()),
         )?;
+        if let Some(cache) = &thumbnail_cache_path {
+            for share in &shares {
+                if cache.starts_with(&share.root) || share.root.starts_with(cache) {
+                    return Err(ConfigError::Validation(format!(
+                        "server.thumbnail_cache_path must not overlap share {:?}",
+                        share.id
+                    )));
+                }
+            }
+            for (label, path) in [
+                ("configuration file", source.as_path()),
+                ("database", database_path.as_path()),
+                ("session secret", session_secret_file.as_path()),
+            ] {
+                if path.starts_with(cache) {
+                    return Err(ConfigError::Validation(format!(
+                        "the {label} must not be located inside server.thumbnail_cache_path"
+                    )));
+                }
+            }
+        }
 
         Ok(Self {
             source,
@@ -671,6 +742,9 @@ impl Config {
                 trash_retention_days: raw.server.trash_retention_days,
                 max_connections: raw.server.max_connections,
                 header_read_timeout_seconds: raw.server.header_read_timeout_seconds,
+                max_image_decode_memory,
+                thumbnail_cache_path,
+                max_thumbnail_cache_size,
             },
             users,
             shares,
@@ -774,6 +848,19 @@ impl ServerConfig {
 
     pub fn header_read_timeout_seconds(&self) -> u64 {
         self.header_read_timeout_seconds
+    }
+
+    pub fn max_image_decode_memory(&self) -> u64 {
+        self.max_image_decode_memory
+    }
+
+    /// The thumbnail cache directory, or `None` when the cache is disabled.
+    pub fn thumbnail_cache_path(&self) -> Option<&Path> {
+        self.thumbnail_cache_path.as_deref()
+    }
+
+    pub fn max_thumbnail_cache_size(&self) -> u64 {
+        self.max_thumbnail_cache_size
     }
 }
 
@@ -906,6 +993,14 @@ const fn default_max_connections() -> usize {
 
 const fn default_header_read_timeout_seconds() -> u64 {
     300
+}
+
+fn default_max_image_decode_memory() -> String {
+    "256 MiB".into()
+}
+
+fn default_max_thumbnail_cache_size() -> String {
+    "256 MiB".into()
 }
 
 impl Share {
@@ -1117,6 +1212,59 @@ pub fn parse_size(value: &str) -> Result<u64, &'static str> {
     number
         .checked_mul(multiplier)
         .ok_or("is too large to represent")
+}
+
+/// Like [`parse_size`], but zero (for example "0 B") is accepted and means
+/// "disabled".
+pub fn parse_size_or_zero(value: &str) -> Result<u64, &'static str> {
+    let trimmed = value.trim();
+    let digits = trimmed
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    if digits > 0 && trimmed[..digits].bytes().all(|byte| byte == b'0') {
+        let unit = trimmed[digits..].trim().to_ascii_lowercase();
+        return if matches!(unit.as_str(), "b" | "kib" | "mib" | "gib") {
+            Ok(0)
+        } else {
+            Err("must use one of the units B, KiB, MiB, or GiB")
+        };
+    }
+    parse_size(value)
+}
+
+/// The thumbnail cache directory may not exist yet, but its parent must, and
+/// neither may be a symbolic link. Startup creates it with mode 0700 and
+/// refuses an existing directory that group or other users can access.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
+)]
+fn validate_thumbnail_cache_path(path: &Path) -> Result<PathBuf, ConfigError> {
+    reject_symlink_if_present(path, "server.thumbnail_cache_path")?;
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(ConfigError::Validation(
+            "server.thumbnail_cache_path must name a directory below an existing parent".into(),
+        ));
+    };
+    // nosemgrep: crabinet-ambient-filesystem-path
+    let parent = fs::canonicalize(parent).map_err(|_| {
+        ConfigError::Validation(
+            "parent directory of server.thumbnail_cache_path is missing or unreadable".into(),
+        )
+    })?;
+    if !parent.is_dir() {
+        return Err(ConfigError::Validation(
+            "parent of server.thumbnail_cache_path is not a directory".into(),
+        ));
+    }
+    let resolved = parent.join(name);
+    // nosemgrep: crabinet-ambient-filesystem-path
+    match fs::symlink_metadata(&resolved) {
+        Ok(metadata) if !metadata.is_dir() => Err(ConfigError::Validation(
+            "server.thumbnail_cache_path is not a directory".into(),
+        )),
+        _ => Ok(resolved),
+    }
 }
 
 #[expect(
@@ -1489,6 +1637,69 @@ permission = "write"
         );
         let invalid = text.replace("trash_retention_days = 45", "trash_retention_days = 0");
         assert!(tree.load(&invalid).is_err());
+    }
+
+    #[test]
+    fn thumbnail_settings_have_defaults_and_bounds() {
+        let tree = TestTree::new();
+        let base = tree.config.parent().unwrap().canonicalize().unwrap();
+        let config = tree.load(&tree.valid_text()).unwrap();
+        assert_eq!(config.server().max_image_decode_memory(), 256 * 1024 * 1024);
+        assert_eq!(
+            config.server().max_thumbnail_cache_size(),
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            config.server().thumbnail_cache_path(),
+            Some(base.join("thumbnails").as_path())
+        );
+
+        let with = |settings: &str| {
+            tree.valid_text().replace(
+                "max_preview_size = \"1 MiB\"",
+                &format!("max_preview_size = \"1 MiB\"\n{settings}"),
+            )
+        };
+        let custom = tree
+            .load(&with(
+                "max_image_decode_memory = \"64 MiB\"\nthumbnail_cache_path = \"cache/thumbs\"\nmax_thumbnail_cache_size = \"1 GiB\"",
+            ))
+            .err();
+        assert!(custom.is_some(), "the parent of the cache path must exist");
+        fs::create_dir(base.join("cache")).unwrap();
+        let custom = tree
+            .load(&with(
+                "max_image_decode_memory = \"64 MiB\"\nthumbnail_cache_path = \"cache/thumbs\"\nmax_thumbnail_cache_size = \"1 GiB\"",
+            ))
+            .unwrap();
+        assert_eq!(custom.server().max_image_decode_memory(), 64 * 1024 * 1024);
+        assert_eq!(
+            custom.server().thumbnail_cache_path(),
+            Some(base.join("cache/thumbs").as_path())
+        );
+        let disabled = tree
+            .load(&with("max_thumbnail_cache_size = \"0 B\""))
+            .unwrap();
+        assert_eq!(disabled.server().max_thumbnail_cache_size(), 0);
+        assert_eq!(disabled.server().thumbnail_cache_path(), None);
+
+        for invalid in [
+            "max_image_decode_memory = \"0 B\"",
+            "max_image_decode_memory = \"5 GiB\"",
+            "max_image_decode_memory = \"lots\"",
+            "max_thumbnail_cache_size = \"65 GiB\"",
+            "max_thumbnail_cache_size = \"0 parsecs\"",
+            "thumbnail_cache_path = \"share/thumbnails\"",
+            "thumbnail_cache_path = \".\"",
+            "thumbnail_cache_path = \"config.toml\"",
+        ] {
+            assert!(tree.load(&with(invalid)).is_err(), "{invalid}");
+        }
+        symlink(base.join("cache"), base.join("linked")).unwrap();
+        assert!(
+            tree.load(&with("thumbnail_cache_path = \"linked\""))
+                .is_err()
+        );
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub const HARD_MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 const SIGNATURE_HEADER_BYTES: u64 = 64 * 1024;
 /// Browsers accept `%PDF-` anywhere in the first kilobyte.
 const PDF_SIGNATURE_WINDOW: usize = 1024;
-const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+pub(crate) const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 const IMAGE_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
 const PREVIEW_CSP: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
@@ -68,6 +68,8 @@ pub enum PreviewKind {
     Image,
     MarkdownSource,
     Pdf,
+    /// A TIFF-based camera RAW file, shown only through its thumbnail.
+    Raw,
     Text,
     Video,
 }
@@ -91,6 +93,9 @@ pub struct PreviewDocument {
     /// and text-like kinds (served as `text/plain`). Audio and video stream
     /// from `/open` into the panel's media elements only.
     pub openable: bool,
+    /// Whether `/thumbnail` can render this file: PNG, JPEG, GIF, and WebP
+    /// images, and RAW files with an embedded JPEG preview.
+    pub thumbnailable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +147,10 @@ pub enum PreviewError {
     Unavailable,
     #[error("preview byte limit is invalid")]
     InvalidLimit,
+    #[error("thumbnail size is not one of the fixed sizes")]
+    InvalidThumbnailSize,
+    #[error("image is too large to thumbnail")]
+    ThumbnailTooLarge,
 }
 
 impl PreviewError {
@@ -157,6 +166,8 @@ impl PreviewError {
             Self::UnsupportedEntry => "unsupported_entry",
             Self::Unavailable => "preview_unavailable",
             Self::InvalidLimit => "invalid_preview_limit",
+            Self::InvalidThumbnailSize => "invalid_thumbnail_size",
+            Self::ThumbnailTooLarge => "thumbnail_too_large",
         }
     }
 
@@ -164,8 +175,8 @@ impl PreviewError {
         match self {
             // Do not disclose whether a share or entry exists to an unauthorized user.
             Self::AccessDenied | Self::NotFound => StatusCode::NOT_FOUND,
-            Self::InvalidPath => StatusCode::BAD_REQUEST,
-            Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::InvalidPath | Self::InvalidThumbnailSize => StatusCode::BAD_REQUEST,
+            Self::TooLarge | Self::ThumbnailTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidUtf8 | Self::Binary | Self::UnsupportedEntry => {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE
             }
@@ -184,6 +195,8 @@ impl PreviewError {
             Self::UnsupportedEntry => "Entry cannot be previewed",
             Self::Unavailable => "Preview is temporarily unavailable",
             Self::InvalidLimit => "Preview service is unavailable",
+            Self::InvalidThumbnailSize => "Thumbnail size is not supported",
+            Self::ThumbnailTooLarge => "Image is too large to thumbnail",
         }
     }
 }
@@ -230,9 +243,12 @@ struct PreviewQuery {
     path: Option<String>,
 }
 
-enum PreviewRequestError {
+pub(crate) enum PreviewRequestError {
     Application(AppError),
     Preview(PreviewError),
+    /// A complete response built elsewhere, such as a busy refusal with a
+    /// route-specific `Retry-After`.
+    Response(Box<Response>),
 }
 
 impl From<AppError> for PreviewRequestError {
@@ -252,6 +268,7 @@ impl IntoResponse for PreviewRequestError {
         match self {
             Self::Application(error) => error.into_response(),
             Self::Preview(error) => error.into_response(),
+            Self::Response(response) => *response,
         }
     }
 }
@@ -569,6 +586,15 @@ pub fn load(
             StreamedMedia::Image(image) => (image.width, image.height),
             _ => (None, None),
         };
+        // AVIF is served as the original only: no permissively licensed
+        // pure-Rust decoder exists.
+        let thumbnailable = matches!(
+            media,
+            StreamedMedia::Image(ImageInfo {
+                mime_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp",
+                ..
+            })
+        );
         return Ok(PreviewDocument {
             kind: media.kind(),
             source: String::new(),
@@ -579,6 +605,28 @@ pub fn load(
             size,
             truncated: false,
             openable: media.opens_in_tab(),
+            thumbnailable,
+        });
+    }
+    // A TIFF-based RAW container is shown through its embedded JPEG preview
+    // only: it is never served by `/open` and has no media type. The walk is
+    // bounded (see `thumbnail::tiff`) and reads only directory entries and
+    // the candidates' JPEG headers.
+    if crate::thumbnail::tiff::is_tiff(&header)
+        && size <= crate::thumbnail::decode::MAX_SOURCE_BYTES
+        && let Ok(Some(_)) = crate::thumbnail::decode::raw_preview(&mut file, size)
+    {
+        return Ok(PreviewDocument {
+            kind: PreviewKind::Raw,
+            source: String::new(),
+            language: None,
+            mime_type: None,
+            width: None,
+            height: None,
+            size,
+            truncated: false,
+            openable: false,
+            thumbnailable: true,
         });
     }
     if size > policy.max_bytes() {
@@ -610,6 +658,7 @@ pub fn load(
         truncated: false,
         // Served by `/open` as `text/plain`, whatever the extension says.
         openable: true,
+        thumbnailable: false,
     })
 }
 
@@ -1034,7 +1083,7 @@ fn mpeg_layer3_frame_len(header: &[u8]) -> Option<usize> {
     usize::try_from(length).ok().filter(|length| *length >= 4)
 }
 
-fn apply_security_headers(headers: &mut HeaderMap) {
+pub(crate) fn apply_security_headers(headers: &mut HeaderMap) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(PREVIEW_CSP),
@@ -1493,6 +1542,7 @@ mod tests {
             size: 5,
             truncated: false,
             openable: true,
+            thumbnailable: false,
         };
         assert_eq!(
             html_source_response(document).expect_err("not HTML"),

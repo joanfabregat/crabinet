@@ -9,6 +9,8 @@ import {
   htmlPreviewUrl,
   imagePreviewUrl,
   openUrl,
+  thumbnailStatus,
+  thumbnailUrl,
   renderedHtmlPreviewUrl,
   withCsrfRetry,
 } from "./api";
@@ -729,6 +731,139 @@ describe("API client", () => {
     await expect(
       createApiClient({ fetch }).preview("docs", "file.bin"),
     ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it("parses thumbnail availability and RAW previews", async () => {
+    const respond = (body: unknown) =>
+      vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json(body));
+    await expect(
+      createApiClient({
+        fetch: respond({
+          kind: "image",
+          source: "",
+          language: null,
+          mimeType: "image/jpeg",
+          size: 2048,
+          truncated: false,
+          openable: true,
+          thumbnailable: true,
+        }),
+      }).preview("docs", "photo.jpg"),
+    ).resolves.toMatchObject({ kind: "image", thumbnailable: true });
+    await expect(
+      createApiClient({
+        fetch: respond({
+          kind: "raw",
+          source: "",
+          language: null,
+          size: 50_000_000,
+          truncated: false,
+          openable: false,
+          thumbnailable: true,
+        }),
+      }).preview("docs", "camera.dng"),
+    ).resolves.toEqual({
+      kind: "raw",
+      source: "",
+      size: 50_000_000,
+      truncated: false,
+      openable: false,
+      thumbnailable: true,
+    });
+  });
+
+  it.each([
+    // RAW files always come with a thumbnail and are never opened inline.
+    { kind: "raw", source: "", size: 1, truncated: false },
+    {
+      kind: "raw",
+      source: "",
+      size: 1,
+      truncated: false,
+      thumbnailable: false,
+    },
+    {
+      kind: "raw",
+      source: "",
+      size: 1,
+      truncated: false,
+      thumbnailable: true,
+      openable: true,
+    },
+    {
+      kind: "raw",
+      source: "",
+      mimeType: "image/jpeg",
+      size: 1,
+      truncated: false,
+      thumbnailable: true,
+    },
+    {
+      kind: "raw",
+      source: "x",
+      size: 1,
+      truncated: false,
+      thumbnailable: true,
+    },
+    // Thumbnails exist only for images and RAW files.
+    {
+      kind: "pdf",
+      source: "",
+      mimeType: "application/pdf",
+      size: 5,
+      truncated: false,
+      thumbnailable: true,
+    },
+    { kind: "text", source: "x", size: 1, truncated: false, thumbnailable: 1 },
+  ])("rejects inconsistent thumbnail metadata %#", async (body) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(Response.json(body));
+    await expect(
+      createApiClient({ fetch }).preview("docs", "file.bin"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it("builds thumbnail URLs for the two allowed sizes", () => {
+    expect(thumbnailUrl("team/a", "R&D/photo.jpg", 1600)).toBe(
+      "/api/v1/shares/team%2Fa/thumbnail?path=R%26D%2Fphoto.jpg&size=1600",
+    );
+    expect(thumbnailUrl("docs", "photo.jpg", 256)).toBe(
+      "/api/v1/shares/docs/thumbnail?path=photo.jpg&size=256",
+    );
+    expect(() => thumbnailUrl("docs", "../secret", 256)).toThrow(ApiError);
+  });
+
+  it("reports why a thumbnail failed", async () => {
+    const url = "/api/v1/shares/docs/thumbnail?path=a.png&size=1600";
+    const ok = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(new Response("jpeg", { status: 200 }));
+    await expect(thumbnailStatus(url, undefined, ok)).resolves.toBeUndefined();
+    expect(ok).toHaveBeenCalledWith(
+      url,
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    for (const [status, code] of [
+      [413, "thumbnail_too_large"],
+      [415, "unsupported_entry"],
+      [429, "busy"],
+    ] as const) {
+      const failing = vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValue(
+          Response.json({ code, message: "No thumbnail" }, { status }),
+        );
+      await expect(
+        thumbnailStatus(url, undefined, failing),
+      ).rejects.toMatchObject({ status, code });
+    }
+    const offline = vi
+      .fn<typeof globalThis.fetch>()
+      .mockRejectedValue(new TypeError("offline"));
+    await expect(
+      thumbnailStatus(url, undefined, offline),
+    ).rejects.toMatchObject({ kind: "network" });
   });
 
   it("builds the inline open URL with the same path validation as downloads", () => {

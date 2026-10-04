@@ -139,3 +139,24 @@ impl Drop for FuzzRoot {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// The TIFF/RAW preview extractor: a bounded IFD, SubIFD, and EXIF walk
+/// over arbitrary bytes, followed by the embedded JPEG header check.
+pub fn thumbnail_raw_preview(data: &[u8]) {
+    let mut cursor = std::io::Cursor::new(data);
+    let _ = crate::thumbnail::tiff::scan(&mut cursor, data.len() as u64);
+    let _ = crate::thumbnail::decode::raw_preview(&mut cursor, data.len() as u64);
+}
+
+/// Header estimates and full decodes of arbitrary bytes under tiny
+/// budgets. The first byte picks the budget and requested size, so the
+/// fuzzer explores both the refusal path and real decodes.
+pub fn thumbnail_decode(data: &[u8]) {
+    let Some((&selector, image)) = data.split_first() else {
+        return;
+    };
+    let long_edge = if selector & 1 == 0 { 256 } else { 1600 };
+    // 64 KiB to 16 MiB: enough for small images, never for large ones.
+    let budget = (64 * 1024_u64) << ((selector >> 1) & 0x07);
+    let _ = crate::thumbnail::decode::render_bytes(image, long_edge, budget);
+}
