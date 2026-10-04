@@ -519,6 +519,14 @@ pub(crate) mod tests {
             .query("path=pixel.png"),
             Route::new(
                 "GET",
+                "/api/v1/shares/{share_id}/open",
+                Share,
+                Safe,
+                DOWNLOADS,
+            )
+            .query("path=a.txt"),
+            Route::new(
+                "GET",
                 "/api/v1/shares/{share_id}/trash",
                 Share,
                 Safe,

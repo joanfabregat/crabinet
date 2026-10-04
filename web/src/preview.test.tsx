@@ -282,6 +282,7 @@ describe("secure file previews", () => {
         previewDocument("<script>alert(1)</script>", {
           kind: "html_source",
           language: "html",
+          openable: true,
         }),
       ),
     });
@@ -333,13 +334,27 @@ describe("secure file previews", () => {
       "src",
       "/api/v1/shares/docs/preview/html?path=demo.html&v=0-0",
     );
+    // The panel keeps one new-tab link, for the rendered viewer. The file
+    // toolbar's Open in new tab action opens the inert plain-text source
+    // from the inline route, so there is no second source link.
+    expect(
+      within(panel).getByRole("link", {
+        name: "Open rendered HTML in new tab",
+      }),
+    ).toHaveAttribute("href", "/docs/demo.html?view=rendered");
+    expect(
+      within(panel).queryByRole("link", {
+        name: "Open HTML source in new tab",
+      }),
+    ).not.toBeInTheDocument();
     const sourceNewTab = within(panel).getByRole("link", {
-      name: "Open HTML source in new tab",
+      name: "Open demo.html in a new tab",
     });
     expect(sourceNewTab).toHaveAttribute(
       "href",
-      "/api/v1/shares/docs/preview/html?path=demo.html&v=0-0",
+      "/api/v1/shares/docs/open?path=demo.html",
     );
+    expect(sourceNewTab).toHaveAttribute("target", "_blank");
     expect(sourceNewTab).toHaveAttribute("rel", "noopener noreferrer");
     expect(
       within(panel).getByRole("link", { name: "Download demo.html" }),
@@ -502,6 +517,7 @@ describe("secure file previews", () => {
         height: 600,
         size: 2048,
         truncated: false,
+        openable: true,
       })),
       metadata: vi.fn(async () => ({
         shareId: "docs",
@@ -524,16 +540,17 @@ describe("secure file previews", () => {
       "src",
       "/api/v1/shares/docs/preview/image?path=photo.png&v=0-0",
     );
+    // The toolbar action is the only new-tab link; the image is not a link.
     const imageLink = screen.getByRole("link", {
       name: "Open photo.png in a new tab",
     });
     expect(imageLink).toHaveAttribute(
       "href",
-      "/api/v1/shares/docs/preview/image?path=photo.png&v=0-0",
+      "/api/v1/shares/docs/open?path=photo.png",
     );
     expect(imageLink).toHaveAttribute("target", "_blank");
     expect(imageLink).toHaveAttribute("rel", "noopener noreferrer");
-    expect(imageLink).toHaveAttribute("draggable", "false");
+    expect(image.closest("a")).toBeNull();
     expect(image).toHaveAttribute("draggable", "false");
     expect(screen.getByText(/800 × 600/)).toBeVisible();
     expect(
@@ -589,6 +606,184 @@ describe("secure file previews", () => {
       previewMode: "side",
     });
   });
+
+  it.each([
+    {
+      name: "a PDF",
+      file: "report.pdf",
+      document: {
+        kind: "pdf" as const,
+        source: "",
+        mimeType: "application/pdf" as const,
+        size: 5_000_000,
+        truncated: false,
+        openable: true,
+      },
+      openable: true,
+    },
+    {
+      name: "text",
+      file: "notes.txt",
+      document: previewDocument("notes", { openable: true }),
+      openable: true,
+    },
+    {
+      name: "a document the server did not mark openable",
+      file: "notes.txt",
+      document: previewDocument("notes"),
+      openable: false,
+    },
+  ])(
+    "offers Open in new tab beside Download only for $name that is openable",
+    async ({ file, document: preview, openable }) => {
+      const navigation = new MemoryNavigation({
+        shareId: "docs",
+        path: "",
+        previewPath: file,
+      });
+      render(
+        <App
+          api={fakeApi({ preview: vi.fn(async () => preview) })}
+          navigation={navigation}
+        />,
+      );
+      const panel = await screen.findByRole("complementary", { name: file });
+      await within(panel).findByRole("link", { name: `Download ${file}` });
+      await waitFor(() =>
+        expect(
+          within(panel).queryByText("Loading preview…"),
+        ).not.toBeInTheDocument(),
+      );
+      const open = within(panel).queryByRole("link", {
+        name: `Open ${file} in a new tab`,
+      });
+      if (!openable) {
+        expect(open).not.toBeInTheDocument();
+        return;
+      }
+      expect(open).toHaveAttribute(
+        "href",
+        `/api/v1/shares/docs/open?path=${file}`,
+      );
+      expect(open).toHaveAttribute("target", "_blank");
+      expect(open).toHaveAttribute("rel", "noopener noreferrer");
+      expect(open).toHaveAttribute("data-tooltip", `Open ${file} in a new tab`);
+    },
+  );
+
+  it("shows a PDF placeholder instead of a size error and never offers Edit", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "",
+      previewPath: "report.pdf",
+    });
+    render(
+      <App
+        api={fakeApi({
+          session: vi.fn(async () => ({
+            ...session,
+            shares: [
+              { id: "docs", name: "Documents", access: "read-write" as const },
+            ],
+          })),
+          preview: vi.fn(async () => ({
+            kind: "pdf" as const,
+            source: "",
+            mimeType: "application/pdf" as const,
+            size: 40_000_000,
+            truncated: false,
+            openable: true,
+          })),
+        })}
+        navigation={navigation}
+      />,
+    );
+    const panel = await screen.findByRole("complementary", {
+      name: "report.pdf",
+    });
+    expect(
+      await within(panel).findByRole("note", {
+        name: "PDF preview of report.pdf",
+      }),
+    ).toBeVisible();
+    expect(
+      within(panel).queryByText("File is too large to preview"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "Edit report.pdf" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(panel).getByRole("link", { name: "Open report.pdf in a new tab" }),
+    ).toHaveAttribute("href", "/api/v1/shares/docs/open?path=report.pdf");
+    expect(within(panel).getByLabelText("File details")).toHaveTextContent(
+      "PDF",
+    );
+  });
+
+  it.each([
+    {
+      kind: "audio" as const,
+      file: "song.mp3",
+      mimeType: "audio/mpeg" as const,
+      tag: "AUDIO",
+    },
+    {
+      kind: "video" as const,
+      file: "clip.webm",
+      mimeType: "video/webm" as const,
+      tag: "VIDEO",
+    },
+  ])(
+    "plays $kind natively from the inline route with metadata preload",
+    async ({ kind, file, mimeType, tag }) => {
+      const navigation = new MemoryNavigation({
+        shareId: "docs",
+        path: "",
+        previewPath: file,
+      });
+      render(
+        <App
+          api={fakeApi({
+            preview: vi.fn(async () => ({
+              kind,
+              source: "",
+              mimeType,
+              size: 50_000_000,
+              truncated: false,
+              openable: false,
+            })),
+          })}
+          navigation={navigation}
+        />,
+      );
+      const panel = await screen.findByRole("complementary", { name: file });
+      const label = `${kind === "audio" ? "Audio" : "Video"} preview of ${file}`;
+      const player = await within(panel).findByLabelText(label);
+      expect(player.tagName).toBe(tag);
+      expect(player).toHaveAttribute(
+        "src",
+        `/api/v1/shares/docs/open?path=${file}&v=0-0`,
+      );
+      expect(player).toHaveAttribute("controls");
+      expect(player).toHaveAttribute("preload", "metadata");
+      expect(player).not.toHaveAttribute("autoplay");
+      expect(player.closest("figure")).toHaveTextContent(mimeType);
+      // A media document cannot play under the sandboxed CSP as a top-level
+      // tab, so the server does not mark media openable and there is no
+      // toolbar action; Download stays.
+      expect(
+        within(panel).queryByRole("link", {
+          name: `Open ${file} in a new tab`,
+        }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(panel).getByRole("link", { name: `Download ${file}` }),
+      ).toBeVisible();
+      expect(
+        within(panel).queryByRole("button", { name: `Edit ${file}` }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("aborts stale previews and ignores a late session error from the old file", async () => {
     const requests = new Map<

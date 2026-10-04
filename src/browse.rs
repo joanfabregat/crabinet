@@ -82,8 +82,8 @@ const MAX_CONCURRENT_BLOCKING_REQUESTS: usize = 64;
 /// Ungated blocking requests per authenticated subject.
 const MAX_CONCURRENT_BLOCKING_REQUESTS_PER_SUBJECT: usize = 16;
 /// Concurrent streaming downloads across the process, counting streamed
-/// image previews. Each holds an open file descriptor until its response
-/// body completes or is dropped.
+/// image previews and inline opens. Each holds an open file descriptor
+/// until its response body completes or is dropped.
 const MAX_CONCURRENT_DOWNLOADS: usize = 64;
 /// Concurrent streaming downloads per authenticated subject: enough for a few
 /// parallel downloads plus a media player's overlapping range requests, while
@@ -498,6 +498,38 @@ impl BrowseState {
         metadata: EntryMetadata,
     ) -> String {
         entry_etag(&self.cursor_key, share_id, path, metadata)
+    }
+
+    /// The validator downloads and inline opens send for an opened file.
+    #[must_use]
+    pub(crate) fn file_etag(
+        &self,
+        share_id: &ShareId,
+        path: &VirtualPath,
+        len: u64,
+        modified: Option<SystemTime>,
+        file_id: u64,
+    ) -> String {
+        metadata_etag(
+            &self.cursor_key,
+            share_id,
+            path,
+            len,
+            modified,
+            file_id,
+            EntryKind::File,
+        )
+    }
+
+    /// Streamed responses share the download size cap and chunk size.
+    #[must_use]
+    pub(crate) const fn max_download_bytes(&self) -> u64 {
+        self.limits.max_download_bytes
+    }
+
+    #[must_use]
+    pub(crate) const fn stream_chunk_bytes(&self) -> usize {
+        self.limits.stream_chunk_bytes
     }
 }
 
@@ -920,14 +952,12 @@ async fn download(
     if total_len > browse.limits.max_download_bytes {
         return Err(AppError::TooLarge);
     }
-    let etag = metadata_etag(
-        &browse.cursor_key,
+    let etag = browse.file_etag(
         &share_id,
         &path,
         total_len,
         opened.modified(),
         opened.file_id(),
-        EntryKind::File,
     );
     let mime = download_mime(mime_for_path(&path));
     let filename = path
@@ -935,15 +965,59 @@ async fn download(
         .last()
         .ok_or(AppError::InvalidRequest)?
         .as_str();
+    let file = StreamedFile {
+        file: opened.into_std(),
+        total_len,
+        etag,
+    };
+    stream_file(
+        &headers,
+        file,
+        browse.limits.stream_chunk_bytes,
+        lease,
+        |response_headers| add_file_headers(response_headers, &mime, filename),
+    )
+    .await
+}
 
-    if if_none_match(headers.get(header::IF_NONE_MATCH), &etag) {
+/// A validated regular-file handle and its validator, ready for
+/// [`stream_file`].
+pub(crate) struct StreamedFile {
+    pub(crate) file: std::fs::File,
+    pub(crate) total_len: u64,
+    pub(crate) etag: String,
+}
+
+/// Streams an already-opened, already-validated file with the conditional
+/// (`If-None-Match`, `If-Range`) and single-range handling downloads use.
+///
+/// `representation` adds the route's own type, disposition, and security
+/// headers to `200`, `206`, and `304` responses; this function adds `ETag`,
+/// `Accept-Ranges`, `Content-Length`, and `Content-Range`. A `416` carries
+/// only the inert JSON error headers. The lease travels with the body
+/// stream, so the slot is released only when the body completes or is
+/// dropped.
+pub(crate) async fn stream_file(
+    request_headers: &HeaderMap,
+    file: StreamedFile,
+    chunk_bytes: usize,
+    lease: SubjectLease,
+    representation: impl FnOnce(&mut HeaderMap) -> Result<(), AppError>,
+) -> Result<Response, AppError> {
+    let StreamedFile {
+        file,
+        total_len,
+        etag,
+    } = file;
+    if if_none_match(request_headers.get(header::IF_NONE_MATCH), &etag) {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
-        add_file_headers(response.headers_mut(), &etag, &mime, filename)?;
+        representation(response.headers_mut())?;
+        add_validator_headers(response.headers_mut(), &etag)?;
         return Ok(response);
     }
 
-    let requested_range = if if_range_allows(headers.get(header::IF_RANGE), &etag) {
-        match headers
+    let requested_range = if if_range_allows(request_headers.get(header::IF_RANGE), &etag) {
+        match request_headers
             .get(header::RANGE)
             .map(|value| parse_range(value, total_len))
         {
@@ -961,26 +1035,24 @@ async fn download(
         Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
         None => (StatusCode::OK, 0, total_len),
     };
-    let mut file = tokio::fs::File::from_std(opened.into_std());
-    if start != 0 {
-        file.seek(SeekFrom::Start(start))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    }
+    let mut file = tokio::fs::File::from_std(file);
+    // Always seek: the caller may have read a signature header first.
+    file.seek(SeekFrom::Start(start))
+        .await
+        .map_err(|_| AppError::Internal)?;
     let stream =
-        ReaderStream::with_capacity(file.take(response_len), browse.limits.stream_chunk_bytes).map(
-            move |chunk| {
-                // The stream owns the lease, so the download slot is released
-                // with the file handle when the body completes or is dropped.
-                let _lease = &lease;
-                chunk
-            },
-        );
+        ReaderStream::with_capacity(file.take(response_len), chunk_bytes).map(move |chunk| {
+            // The stream owns the lease, so the download slot is released
+            // with the file handle when the body completes or is dropped.
+            let _lease = &lease;
+            chunk
+        });
     let mut response = Response::builder()
         .status(status)
         .body(Body::from_stream(stream))
         .map_err(|_| AppError::Internal)?;
-    add_file_headers(response.headers_mut(), &etag, &mime, filename)?;
+    representation(response.headers_mut())?;
+    add_validator_headers(response.headers_mut(), &etag)?;
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
         header_value(&response_len.to_string())?,
@@ -1366,16 +1438,15 @@ fn inert_json<T: Serialize>(value: T) -> Response {
     response
 }
 
-fn add_file_headers(
-    headers: &mut HeaderMap,
-    etag: &str,
-    mime: &str,
-    filename: &str,
-) -> Result<(), AppError> {
-    headers.insert(header::CONTENT_TYPE, header_value(mime)?);
-    headers.insert(header::CONTENT_DISPOSITION, content_disposition(filename)?);
+fn add_validator_headers(headers: &mut HeaderMap, etag: &str) -> Result<(), AppError> {
     headers.insert(header::ETAG, header_value(etag)?);
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    Ok(())
+}
+
+fn add_file_headers(headers: &mut HeaderMap, mime: &str, filename: &str) -> Result<(), AppError> {
+    headers.insert(header::CONTENT_TYPE, header_value(mime)?);
+    headers.insert(header::CONTENT_DISPOSITION, content_disposition(filename)?);
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; sandbox"),

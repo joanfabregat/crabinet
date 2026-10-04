@@ -7,6 +7,7 @@ import {
   downloadUrl,
   htmlPreviewUrl,
   imagePreviewUrl,
+  openUrl,
   renderedHtmlPreviewUrl,
   withCsrfRetry,
 } from "./api";
@@ -621,6 +622,121 @@ describe("API client", () => {
     await expect(
       createApiClient({ fetch }).preview("docs", "file.txt"),
     ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it.each([
+    { kind: "pdf", mimeType: "application/pdf" },
+    { kind: "audio", mimeType: "audio/mpeg" },
+    { kind: "audio", mimeType: "audio/mp4" },
+    { kind: "video", mimeType: "video/webm" },
+    { kind: "video", mimeType: "video/mp4" },
+  ])(
+    "accepts streamed $kind metadata of any size with a signature type",
+    async ({ kind, mimeType }) => {
+      const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+        Response.json({
+          kind,
+          source: "",
+          language: null,
+          mimeType,
+          size: 5 * 1024 * 1024 * 1024,
+          truncated: false,
+          openable: kind === "pdf",
+        }),
+      );
+      await expect(
+        createApiClient({ fetch }).preview("docs", "file.bin"),
+      ).resolves.toEqual({
+        kind,
+        source: "",
+        mimeType,
+        size: 5 * 1024 * 1024 * 1024,
+        truncated: false,
+        openable: kind === "pdf",
+      });
+    },
+  );
+
+  it("keeps the server's openable flag on text previews", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "text",
+        source: "plain",
+        language: null,
+        size: 5,
+        truncated: false,
+        openable: true,
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).preview("docs", "notes.txt"),
+    ).resolves.toMatchObject({ kind: "text", openable: true });
+  });
+
+  it.each([
+    // A streamed kind must carry its own family's media type and no source.
+    {
+      kind: "pdf",
+      source: "",
+      mimeType: "image/png",
+      size: 1,
+      truncated: false,
+    },
+    { kind: "pdf", source: "", size: 1, truncated: false },
+    {
+      kind: "video",
+      source: "",
+      mimeType: "audio/mpeg",
+      size: 1,
+      truncated: false,
+    },
+    {
+      kind: "audio",
+      source: "",
+      mimeType: "text/html",
+      size: 1,
+      truncated: false,
+    },
+    {
+      kind: "pdf",
+      source: "%PDF-",
+      mimeType: "application/pdf",
+      size: 5,
+      truncated: false,
+    },
+    {
+      kind: "video",
+      source: "",
+      mimeType: "video/mp4",
+      width: 4,
+      size: 1,
+      truncated: false,
+    },
+    // Text stays bounded by the preview limit and gets no media type.
+    {
+      kind: "text",
+      source: "x",
+      mimeType: "application/pdf",
+      size: 1,
+      truncated: false,
+    },
+    { kind: "text", source: "x", size: 1, truncated: false, openable: "yes" },
+  ])("rejects inconsistent streamed preview metadata %#", async (body) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(Response.json(body));
+    await expect(
+      createApiClient({ fetch }).preview("docs", "file.bin"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it("builds the inline open URL with the same path validation as downloads", () => {
+    expect(openUrl("team/a", "R&D/東京 report.pdf")).toBe(
+      "/api/v1/shares/team%2Fa/open?path=R%26D%2F%E6%9D%B1%E4%BA%AC+report.pdf",
+    );
+    expect(() => openUrl("docs", "../secret")).toThrow(ApiError);
+    expect(() => openUrl("docs", "/absolute")).toThrow(ApiError);
+    expect(() => openUrl("docs", "a//b")).toThrow(ApiError);
   });
 
   it("builds only authenticated API URLs for HTML source and downloads", () => {
