@@ -17,6 +17,7 @@ import {
   ExternalLink,
   EyeOff,
   FilePenLine,
+  FolderDown,
   FolderInput,
   FolderOpen,
   FolderTree,
@@ -36,6 +37,7 @@ import {
 import {
   accountChangedCode,
   ApiError,
+  archiveUrl,
   createApiClient,
   withCsrfRetry,
   directoryEventsUrl,
@@ -1614,6 +1616,13 @@ function DirectoryBrowser({
                     }
                   />
                 )}
+                <ArchiveDownloadLink
+                  api={api}
+                  shareId={share.id}
+                  path={route.path}
+                  name={crumbs.at(-1)?.name ?? share.name}
+                  onSessionExpired={onSessionExpired}
+                />
                 <CopyPathButton
                   value={`${share.id}${route.path ? `/${route.path}` : ""}`}
                   label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
@@ -2987,6 +2996,80 @@ function TooltipLink({
       {children}
     </a>
   );
+}
+
+/**
+ * Downloads a folder as a ZIP. The server walks the whole folder before it
+ * answers, so the link first asks it to start the archive and shows a
+ * refusal (too large, too deep, busy) here instead of navigating to it.
+ */
+function ArchiveDownloadLink({
+  api,
+  shareId,
+  path,
+  name,
+  onSessionExpired,
+}: {
+  api: ApiClient;
+  shareId: string;
+  path: string;
+  name: string;
+  onSessionExpired: () => void;
+}) {
+  const showToast = useToast();
+  const [checking, setChecking] = useState(false);
+  const href = archiveUrl(shareId, path);
+
+  const download = async () => {
+    setChecking(true);
+    try {
+      await api.checkArchive(shareId, path);
+      // The response is an attachment, so following it keeps this page.
+      const link = document.createElement("a");
+      link.href = href;
+      link.click();
+    } catch (cause) {
+      if (isUnauthorized(cause)) onSessionExpired();
+      else showToast(archiveErrorMessage(cause, name), { tone: "error" });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <TooltipLink
+      href={href}
+      label={`Download ${name} as ZIP`}
+      aria-busy={checking || undefined}
+      onClick={(event) => {
+        // Modified clicks keep the browser's own link behavior.
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        )
+          return;
+        event.preventDefault();
+        if (!checking) void download();
+      }}
+    >
+      <FolderDown size={19} aria-hidden="true" />
+    </TooltipLink>
+  );
+}
+
+function archiveErrorMessage(cause: unknown, name: string): string {
+  const error = asApiError(cause);
+  if (error.code === "too_large")
+    return `${name} is too large or has too many items to download as one ZIP.`;
+  if (error.code === "path_too_deep")
+    return `${name} has folders nested too deeply to download as a ZIP.`;
+  if (error.kind === "rate-limited")
+    return "Too many downloads are in progress. Try again shortly.";
+  if (error.kind === "not-found") return `${name} is no longer available.`;
+  return `Could not download ${name} as a ZIP.`;
 }
 
 function joinPath(path: string, name: string): string {

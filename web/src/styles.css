@@ -1893,7 +1893,12 @@ html.preview-fullscreen-open body {
   flex: none;
 }
 
-/* Set when the labelled buttons would not fit on one line. */
+/* Set when the labelled buttons would not fit on one line. Icons alone sit
+   closer, so a writer's five fit one row of a 300px-wide phone. */
+.directory-heading-actions.is-compact {
+  gap: 0.4rem;
+}
+
 .directory-heading-actions.is-compact .toolbar-button {
   min-height: 2.35rem;
   min-width: 2.35rem;
