@@ -1811,15 +1811,13 @@ html.preview-fullscreen-open body {
   margin-top: 0.75rem;
 }
 
-.pdf-preview {
-  padding: 1.5rem 0;
-  text-align: center;
-}
-
-.pdf-preview-hint {
-  color: var(--muted);
-  font-size: 0.875rem;
-  margin: 0.5rem 0 0;
+/* A PDF page is paper in either theme: white, with a hairline edge so it
+   stays distinct from the panel. Its width follows the panel, as images do. */
+.pdf-first-page canvas {
+  background: #fff;
+  border: 1px solid var(--line);
+  margin: 0 auto;
+  max-width: 100%;
 }
 
 .breadcrumbs {
