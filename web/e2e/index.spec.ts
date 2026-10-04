@@ -409,7 +409,12 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
 
   const [sourcePage] = await Promise.all([
     page.waitForEvent("popup"),
-    page.getByRole("link", { name: "Open HTML source in new tab" }).click(),
+    page
+      .getByRole("link", {
+        name: "Open hostile.html in a new tab",
+        exact: true,
+      })
+      .click(),
   ]);
   await sourcePage.waitForLoadState("domcontentloaded");
   await expect(sourcePage.locator("body")).toContainText(
