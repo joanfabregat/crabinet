@@ -17,7 +17,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{assets, auth, browse, error, mutations, oidc, preview};
+use crate::{assets, auth, browse, error, mutations, oidc, preview, thumbnail};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -31,6 +31,7 @@ pub struct AppState {
     oidc: Option<oidc::OidcService>,
     mutations: Arc<mutations::MutationState>,
     trash_retention_days: u16,
+    thumbnails: Arc<thumbnail::ThumbnailService>,
 }
 
 impl AppState {
@@ -43,6 +44,7 @@ impl AppState {
             oidc: None,
             mutations: Arc::new(mutations::MutationState::default()),
             trash_retention_days: 30,
+            thumbnails: Arc::new(thumbnail::ThumbnailService::default()),
         }
     }
 
@@ -107,6 +109,17 @@ impl AppState {
     pub fn with_trash_retention_days(mut self, days: u16) -> Self {
         self.trash_retention_days = days;
         self
+    }
+
+    #[must_use]
+    pub fn with_thumbnails(mut self, thumbnails: thumbnail::ThumbnailService) -> Self {
+        self.thumbnails = Arc::new(thumbnails);
+        self
+    }
+
+    #[must_use]
+    pub fn thumbnails(&self) -> &Arc<thumbnail::ThumbnailService> {
+        &self.thumbnails
     }
 
     #[must_use]
@@ -175,6 +188,7 @@ async fn discard_client_request_id(mut request: Request<Body>) -> Request<Body> 
 pub fn router(state: AppState) -> Router {
     let reads = browse::router()
         .merge(preview::router())
+        .merge(thumbnail::router())
         .merge(mutations::read_router());
     let writes = mutations::router(state.mutations().http_body_limit());
     let (reads, writes) = if state.auth().is_some() {
@@ -524,6 +538,14 @@ pub(crate) mod tests {
                 DOWNLOADS,
             )
             .query("path=pixel.png"),
+            Route::new(
+                "GET",
+                "/api/v1/shares/{share_id}/thumbnail",
+                Share,
+                Safe,
+                BUFFERED_READS,
+            )
+            .query("path=photo.png&size=256"),
             Route::new(
                 "GET",
                 "/api/v1/shares/{share_id}/open",
@@ -920,6 +942,11 @@ pub(crate) mod tests {
             png.extend_from_slice(&3_u32.to_be_bytes());
             fs::write(root.path().join("pixel.png"), png).expect("image fixture");
             fs::write(root.path().join("page.html"), b"<p>page</p>").expect("HTML fixture");
+            fs::write(
+                root.path().join("photo.png"),
+                crate::thumbnail::tests::png_fixture(4, 3, false),
+            )
+            .expect("decodable image fixture");
             let id = ShareId::new("documents").expect("share id");
             let share = ConfiguredShare::new(
                 "Documents",

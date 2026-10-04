@@ -85,6 +85,7 @@ rules:
         - /src/browse.rs
         - /src/preview.rs
         - /src/mutations.rs
+        - /src/thumbnail.rs
     patterns:
       # Handlers take `ApiPath`, crate::extract's JSON-error wrapper around
       # Axum's `Path`; both spellings are share-path extractors.

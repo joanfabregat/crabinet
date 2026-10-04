@@ -937,3 +937,141 @@ describe("secure file previews", () => {
     ).toBeVisible();
   });
 });
+
+describe("image thumbnails", () => {
+  const imageDocument: PreviewDocument = {
+    kind: "image",
+    source: "",
+    mimeType: "image/jpeg",
+    width: 6000,
+    height: 4000,
+    size: 20_000_000,
+    truncated: false,
+    openable: true,
+    thumbnailable: true,
+  };
+  const rawDocument: PreviewDocument = {
+    kind: "raw",
+    source: "",
+    size: 50_000_000,
+    truncated: false,
+    openable: false,
+    thumbnailable: true,
+  };
+  const thumbnail = (name: string) =>
+    `/api/v1/shares/docs/thumbnail?path=${name}&size=1600&v=0-0`;
+
+  function renderPreview(document: PreviewDocument, name: string) {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "",
+      previewPath: name,
+    });
+    render(
+      <App
+        api={fakeApi({ preview: vi.fn(async () => document) })}
+        navigation={navigation}
+      />,
+    );
+    return screen.findByRole("img", { name: `Preview of ${name}` });
+  }
+
+  function answerThumbnail(status: number, code: string) {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ code, message: "No thumbnail" }, { status }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    return fetch;
+  }
+
+  it("shows the server thumbnail and keeps the open and download actions", async () => {
+    const image = await renderPreview(imageDocument, "photo.jpg");
+    expect(image).toHaveAttribute("src", thumbnail("photo.jpg"));
+    expect(
+      screen.getByRole("link", { name: "Open photo.jpg in a new tab" }),
+    ).toHaveAttribute("href", "/api/v1/shares/docs/open?path=photo.jpg");
+    expect(
+      screen.getByRole("link", { name: "Download photo.jpg" }),
+    ).toBeVisible();
+    expect(screen.getByText(/6000 × 4000/)).toBeVisible();
+  });
+
+  it("keeps the original for images the server does not thumbnail", async () => {
+    const image = await renderPreview(
+      { ...imageDocument, mimeType: "image/avif", thumbnailable: false },
+      "photo.avif",
+    );
+    expect(image).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/image?path=photo.avif&v=0-0",
+    );
+  });
+
+  it.each([
+    [413, "thumbnail_too_large"],
+    [415, "unsupported_entry"],
+  ])(
+    "falls back to the original image after a %i thumbnail",
+    async (status, code) => {
+      const fetch = answerThumbnail(status, code);
+      const image = await renderPreview(imageDocument, "photo.jpg");
+      fireEvent.error(image);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("img", { name: "Preview of photo.jpg" }),
+        ).toHaveAttribute(
+          "src",
+          "/api/v1/shares/docs/preview/image?path=photo.jpg&v=0-0",
+        ),
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        thumbnail("photo.jpg"),
+        expect.anything(),
+      );
+    },
+  );
+
+  it("offers a retry while the server is busy", async () => {
+    answerThumbnail(429, "busy");
+    const image = await renderPreview(imageDocument, "photo.jpg");
+    fireEvent.error(image);
+    expect(await screen.findByText("Preview is busy")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Try preview again" }));
+    expect(
+      await screen.findByRole("img", { name: "Preview of photo.jpg" }),
+    ).toHaveAttribute("src", `${thumbnail("photo.jpg")}-1`);
+  });
+
+  it("shows RAW files only through their thumbnail", async () => {
+    const image = await renderPreview(rawDocument, "camera.dng");
+    expect(image).toHaveAttribute("src", thumbnail("camera.dng"));
+    expect(
+      screen.getByText("RAW image", { selector: "figcaption" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("link", { name: "Open camera.dng in a new tab" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Download camera.dng" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Edit camera.dng" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [415, "unsupported_entry", "This RAW file has no embedded preview"],
+    [413, "thumbnail_too_large", "The preview of this RAW file is too large"],
+    [500, "internal", "The preview of this RAW file could not be shown"],
+  ])("explains a %i RAW thumbnail failure", async (status, code, message) => {
+    answerThumbnail(status, code);
+    const image = await renderPreview(rawDocument, "camera.dng");
+    fireEvent.error(image);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(message);
+    expect(alert).toHaveTextContent("Download the file to view it.");
+    expect(
+      screen.queryByRole("img", { name: "Preview of camera.dng" }),
+    ).not.toBeInTheDocument();
+  });
+});

@@ -193,7 +193,9 @@ export type PreviewKind =
   | "image"
   | "pdf"
   | "audio"
-  | "video";
+  | "video"
+  /** A camera RAW file, shown only through its server-rendered thumbnail. */
+  | "raw";
 
 export type PreviewMimeType =
   | "image/png"
@@ -223,7 +225,12 @@ export interface PreviewDocument {
   truncated: boolean;
   /** The open route serves this file inline in a new tab. */
   openable?: boolean;
+  /** The thumbnail route can render this file (see `thumbnailUrl`). */
+  thumbnailable?: boolean;
 }
+
+/** The only long-edge sizes the thumbnail route accepts. */
+export type ThumbnailSize = 256 | 1600;
 
 export type ApiErrorKind =
   | "unauthorized"
@@ -919,14 +926,19 @@ const previewKinds = new Set<PreviewKind>([
   "pdf",
   "audio",
   "video",
+  "raw",
 ]);
 
-/** Kinds that stream from the open route and carry no source text. */
+/**
+ * Kinds that carry no source text: they stream from the open route, or, for
+ * RAW, are shown only through the thumbnail route.
+ */
 const streamedPreviewKinds = new Set<PreviewKind>([
   "image",
   "pdf",
   "audio",
   "video",
+  "raw",
 ]);
 
 export function isStreamedPreviewKind(kind: PreviewKind): boolean {
@@ -956,6 +968,17 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
       new TextEncoder().encode(value.source).byteLength !== value.size) ||
     typeof value.truncated !== "boolean" ||
     (value.openable !== undefined && typeof value.openable !== "boolean") ||
+    (value.thumbnailable !== undefined &&
+      typeof value.thumbnailable !== "boolean") ||
+    // Thumbnails exist only for images and RAW files, and a RAW file is
+    // never opened inline and always comes with its thumbnail.
+    (value.thumbnailable === true &&
+      value.kind !== "image" &&
+      value.kind !== "raw") ||
+    (value.kind === "raw" &&
+      (value.thumbnailable !== true ||
+        value.openable === true ||
+        value.source !== "")) ||
     (language !== undefined &&
       (typeof language !== "string" || !previewLanguages.has(language))) ||
     !previewLanguageMatchesKind(
@@ -973,6 +996,9 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     truncated: value.truncated as boolean,
     ...(typeof value.openable === "boolean"
       ? { openable: value.openable }
+      : {}),
+    ...(typeof value.thumbnailable === "boolean"
+      ? { thumbnailable: value.thumbnailable }
       : {}),
     ...(typeof language === "string" ? { language } : {}),
     ...(typeof value.mimeType === "string"
@@ -1102,6 +1128,52 @@ export function archiveUrl(shareId: string, path: string): string {
  */
 export function openUrl(shareId: string, path: string): string {
   return fileApiUrl(shareId, path, "open");
+}
+
+/**
+ * A server-rendered JPEG or PNG no larger than `size` on its long edge, with
+ * EXIF orientation applied and no metadata.
+ */
+export function thumbnailUrl(
+  shareId: string,
+  path: string,
+  size: ThumbnailSize,
+): string {
+  return `${fileApiUrl(shareId, path, "thumbnail")}&size=${size}`;
+}
+
+/**
+ * Requests a thumbnail URL that an `<img>` failed to load and reports why:
+ * resolves when it now succeeds, and otherwise rejects with the `ApiError`
+ * the server answered (`413` too large, `415` unsupported, `429` busy). The
+ * page's image policy admits only same-origin URLs, so the image itself is
+ * loaded by the element, never through a blob.
+ */
+export async function thumbnailStatus(
+  url: string,
+  signal?: AbortSignal,
+  fetchImplementation: typeof globalThis.fetch = globalThis.fetch.bind(
+    globalThis,
+  ),
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchImplementation(url, {
+      credentials: "same-origin",
+      headers: { Accept: "image/jpeg, image/png, application/json" },
+      signal,
+    });
+  } catch (cause) {
+    if (isAbortFailure(cause) || signal?.aborted) {
+      throw new ApiError("aborted", "The request was cancelled", { cause });
+    }
+    throw new ApiError("network", "The server could not be reached", {
+      retryable: true,
+      cause,
+    });
+  }
+  if (!response.ok) throw await responseError(response);
+  await response.body?.cancel();
 }
 
 function fileApiUrl(shareId: string, path: string, action: string): string {

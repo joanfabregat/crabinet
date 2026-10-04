@@ -12,6 +12,8 @@ Text previews require valid UTF-8 without binary control characters. Invalid UTF
 
 Every preview document carries `openable`. It is `true` for images, PDF, and every text-like kind, which the UI then offers as **Open in new tab** beside **Download**. It is `false` for audio and video: they stream from `/open` into the panel's `<audio>` and `<video>` elements, but a browser cannot play them as a top-level document under the sandboxed policy (see [Inline open](#inline-open)).
 
+Every preview document also carries `thumbnailable`. It is `true` for PNG, JPEG, GIF, and WebP images and for the `raw` kind, and `false` for everything else, including AVIF, for which no permissively licensed pure-Rust decoder exists. A `raw` document has an empty `source`, no `mimeType` or dimensions, and `openable: false`: RAW bytes are never served by `/open` or `/preview/image`, only through [thumbnails](#thumbnails).
+
 ## Signatures
 
 Only these signatures select a streamed type, checked in this order on the bounded header:
@@ -26,6 +28,7 @@ Only these signatures select a streamed type, checked in this order on the bound
 | `audio` | `RIFF….WAVE` | `audio/wav` |
 | `audio` | `fLaC` followed by a 34-byte STREAMINFO block | `audio/flac` |
 | `audio` | an ID3v2 header (version 2–4, syncsafe size), or two consecutive valid MPEG Layer III frame headers | `audio/mpeg` |
+| `raw` | A TIFF header (`II*\0`, `MM\0*`, or the ORF variants `IIRO`, `IIRS`, `MMOR`) whose bounded IFD walk finds an embedded JPEG preview; checked only after every signature above fails | none: shown only through [thumbnails](#thumbnails) |
 
 The late-`%PDF-` rule is narrower than the browsers' so a text file that mentions the marker near its start stays inert `text/plain`; a marker after the first kilobyte never makes a PDF. QuickTime, 3GP, HEIF, ADTS AAC, and any other container get no streamed type. A single MPEG frame sync is too weak on its own, so a second frame must follow. SVG, HTML, and XML are never a streamed type: they are text.
 
@@ -86,6 +89,26 @@ pdf.js runs under the unchanged application CSP (`default-src 'self'`, with neit
 A password-protected, malformed, or unloadable PDF shows an error in the panel instead of a page, and **Open in new tab** and **Download** remain. The canvas is exposed as an image labelled "First page of {file name}".
 
 The full document opens through **Open in new tab**, which loads `/open` as a top-level document in the browser's built-in viewer under the same sandboxed preview CSP as every other inline type (see [Why PDF needs no CSP exception](#why-pdf-needs-no-csp-exception)). That viewer provides search, zoom, and printing; Crabinet never frames it.
+
+## Thumbnails
+
+`GET /api/v1/shares/{shareId}/thumbnail?path=...&size=...` returns a downscaled copy of a thumbnailable file, so the panel never makes the browser decode a large original. `size` is the long edge and must be exactly `256` or `1600`; anything else, including a missing value, is `400 invalid_thumbnail_size`. Images are never upscaled. The route resolves the session, the share grant, and the path exactly like the other preview routes, so an unknown share, a share without a grant, and a missing file all receive the same non-disclosing `404`. It takes a buffered-read slot (four across the process, shared with text reads), so further requests receive `429 busy`.
+
+Formats are recognized from bytes only: PNG, baseline and progressive JPEG, GIF (first frame), WebP (lossy, lossless, and the first frame of an animation), and TIFF-based RAW containers (DNG, NEF, ARW, CR2, PEF, and ORF). For RAW, a bounded walk of IFD0, its `SubIFDs`, the EXIF IFD, and the next-IFD chain (at most 32 directories, 512 entries each, nesting depth 4, with loop detection and every offset checked against the file length) collects JPEG previews from `JPEGInterchangeFormat` tags and from JPEG-compressed strips, skipping CFA and linear raw data, and decodes the largest one whose own header is valid. Previews stored only in maker notes, CR3, RAF, HEIC, and AVIF are not supported; such files answer `415 unsupported_entry`, as does an undecodable image. Sources larger than 100 MiB answer `413 thumbnail_too_large` before any decoding, and the existing 100-megapixel cap still applies to the decoded frame.
+
+EXIF orientation from a JPEG `APP1` segment or a RAW container's IFD0 is applied. Opaque results are encoded as baseline JPEG; results with any transparent pixel are encoded as PNG, losslessly. The output carries no metadata: no EXIF, ICC profile, text chunks, or comments. Responses use `Content-Disposition: inline`, the sandboxed preview CSP, `nosniff`, `Cache-Control: no-store, private`, and an `ETag` derived from the cache key, so `If-None-Match` receives `304` without decoding.
+
+### Decode memory budget
+
+Memory depends on decoded pixels, not file size. Each request first parses only headers and estimates the peak of its decode path: baseline JPEG decodes at ½, ¼, or ⅛ scale (the smallest that still covers the requested size) and PNG is reduced row by row, while progressive JPEG (all coefficients), WebP, and GIF hold a full frame. The estimate also covers the downscaled image, its oriented copy, and the encoder. It is reserved from one process-wide weighted semaphore sized by `server.max_image_decode_memory` before decoding starts. A request whose estimate exceeds the whole budget answers `413 thumbnail_too_large`; one that cannot get its reservation within about two seconds answers `429 busy` with `Retry-After: 2`. The reservation moves into the blocking decode task, so it is released when that task ends, fails, or panics, never while it still runs, even if the client disconnects. Decoder limits are set from the same plan: dimensions the decoder reports must match the parsed header, the GIF frame buffer is capped at the logical screen, PNG ancillary chunks are capped at 1 MiB, and WebP dimensions are the maximum over every frame in the file.
+
+### Cache
+
+Thumbnails are cached in `server.thumbnail_cache_path` under `server.max_thumbnail_cache_size` (see [configuration](configuration.md)). The cache key is an HMAC-SHA-256, under a key derived from the session secret, of the share ID, the virtual path, the size, and the source's length, inode, and modification time, so a changed file never reuses an entry and entry names reveal nothing. Files without a modification time are not cached. Authorization runs before every cache lookup, so an entry is never served across shares or after a grant is revoked. Entries are written to a temporary file, synced, and renamed, with mode `0600` inside a `0700` directory. The in-memory index is rebuilt at startup from at most 131,072 directory entries, removing leftover temporary files and empty or oversized entries; beyond the size limit or 65,536 entries the oldest are evicted. Concurrent requests for the same key wait for the first one instead of decoding again.
+
+### Interface fallback
+
+The panel loads the 1600-pixel thumbnail for thumbnailable files. If the `<img>` fails, it requests the same URL once to read the status: on `429` it offers **Try preview again**; on any other failure it shows the original from `/preview/image` for browser-decodable images, and for RAW files it explains that no preview can be shown and keeps **Download**. The page's image policy admits only same-origin URLs, so thumbnails are never turned into `blob:` or `data:` URLs.
 
 ## Inline open
 

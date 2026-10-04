@@ -27,7 +27,9 @@ use cap_std::{
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+mod private_dir;
 mod trash;
+pub use private_dir::{PrivateDir, PrivateDirError, PrivateEntry};
 pub use trash::{TrashEmptyBatch, TrashEntry, TrashGcBatch, TrashPage, TrashPosition, TrashSweep};
 
 const MAX_COMPONENT_BYTES: usize = 255;

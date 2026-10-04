@@ -1559,7 +1559,7 @@ fn hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn if_none_match(value: Option<&HeaderValue>, etag: &str) -> bool {
+pub(crate) fn if_none_match(value: Option<&HeaderValue>, etag: &str) -> bool {
     let Some(value) = value.and_then(|value| value.to_str().ok()) else {
         return false;
     };
