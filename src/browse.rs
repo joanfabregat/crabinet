@@ -2412,7 +2412,7 @@ mod tests {
             .await
             .expect("archive body");
         assert_eq!(bytes.len(), length, "Content-Length is exact");
-        crate::zip::tests::read_archive(&bytes)
+        crate::zip::verify::read_archive(&bytes)
             .into_iter()
             .map(|entry| (entry.name, entry.data))
             .collect()

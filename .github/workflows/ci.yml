@@ -481,6 +481,6 @@ jobs:
         run: cargo +"${NIGHTLY_VERSION}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Fuzz each security boundary briefly
         run: |
-          for target in config_toml phc_policy virtual_path multipart markdown_classification content_disposition; do
+          for target in config_toml phc_policy virtual_path multipart markdown_classification content_disposition zip_archive; do
             cargo +"${NIGHTLY_VERSION}" fuzz run "${target}" -- -max_total_time=20 -timeout=10
           done

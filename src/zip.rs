@@ -472,11 +472,11 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// An independent reader and layout checks, shared by the unit tests and the
+/// `zip_archive` fuzz target.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) mod verify {
     use std::time::Duration;
-
-    use proptest::prelude::*;
 
     use super::*;
 
@@ -487,16 +487,73 @@ pub(crate) mod tests {
         pub(crate) data: Option<Vec<u8>>,
     }
 
-    fn u16_at(bytes: &[u8], at: usize) -> u16 {
+    pub(crate) fn u16_at(bytes: &[u8], at: usize) -> u16 {
         u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
     }
 
-    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    pub(crate) fn u32_at(bytes: &[u8], at: usize) -> u32 {
         u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
     }
 
-    fn u64_at(bytes: &[u8], at: usize) -> u64 {
+    pub(crate) fn u64_at(bytes: &[u8], at: usize) -> u64 {
         u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+    }
+
+    /// One central directory header, with ZIP64 extra fields applied.
+    struct CentralRecord {
+        flags: u16,
+        crc: u32,
+        size: u64,
+        offset: u64,
+        name: String,
+        /// Where the next header starts.
+        next: usize,
+    }
+
+    fn read_central(bytes: &[u8], at: usize) -> CentralRecord {
+        assert_eq!(u32_at(bytes, at), CENTRAL_HEADER_SIGNATURE);
+        let flags = u16_at(bytes, at + 8);
+        assert_ne!(flags & FLAG_UTF8, 0);
+        assert_eq!(u16_at(bytes, at + 10), 0, "stored");
+        let crc = u32_at(bytes, at + 16);
+        let compressed = u32_at(bytes, at + 20);
+        let mut size = u64::from(u32_at(bytes, at + 24));
+        assert_eq!(u64::from(compressed), size);
+        let name_len = usize::from(u16_at(bytes, at + 28));
+        let extra_len = usize::from(u16_at(bytes, at + 30));
+        let mut offset = u64::from(u32_at(bytes, at + 42));
+        let name = std::str::from_utf8(&bytes[at + 46..at + 46 + name_len])
+            .unwrap()
+            .to_owned();
+        let mut extra = at + 46 + name_len;
+        let extra_end = extra + extra_len;
+        while extra < extra_end {
+            let id = u16_at(bytes, extra);
+            let len = usize::from(u16_at(bytes, extra + 2));
+            if id == ZIP64_EXTRA_ID {
+                let mut field = extra + 4;
+                if size == U32_SENTINEL {
+                    size = u64_at(bytes, field);
+                    assert_eq!(u64_at(bytes, field + 8), size);
+                    field += 16;
+                }
+                if offset == U32_SENTINEL {
+                    offset = u64_at(bytes, field);
+                    field += 8;
+                }
+                assert_eq!(field, extra + 4 + len, "ZIP64 extra length");
+            }
+            extra += 4 + len;
+        }
+        assert_eq!(extra, extra_end);
+        CentralRecord {
+            flags,
+            crc,
+            size,
+            offset,
+            name,
+            next: extra_end,
+        }
     }
 
     /// Reads an archive the way an extractor does: from the end record,
@@ -522,38 +579,15 @@ pub(crate) mod tests {
         let mut at = central_offset as usize;
         let mut entries = Vec::new();
         for _ in 0..count {
-            assert_eq!(u32_at(bytes, at), CENTRAL_HEADER_SIGNATURE);
-            let flags = u16_at(bytes, at + 8);
-            assert_ne!(flags & FLAG_UTF8, 0);
-            assert_eq!(u16_at(bytes, at + 10), 0, "stored");
-            let crc = u32_at(bytes, at + 16);
-            let mut size = u64::from(u32_at(bytes, at + 24));
-            let name_len = usize::from(u16_at(bytes, at + 28));
-            let extra_len = usize::from(u16_at(bytes, at + 30));
-            let mut offset = u64::from(u32_at(bytes, at + 42));
-            let name = std::str::from_utf8(&bytes[at + 46..at + 46 + name_len])
-                .unwrap()
-                .to_owned();
-            let mut extra = at + 46 + name_len;
-            let extra_end = extra + extra_len;
-            while extra < extra_end {
-                let id = u16_at(bytes, extra);
-                let len = usize::from(u16_at(bytes, extra + 2));
-                if id == ZIP64_EXTRA_ID {
-                    let mut field = extra + 4;
-                    if size == U32_SENTINEL {
-                        size = u64_at(bytes, field);
-                        assert_eq!(u64_at(bytes, field + 8), size);
-                        field += 16;
-                    }
-                    if offset == U32_SENTINEL {
-                        offset = u64_at(bytes, field);
-                    }
-                }
-                extra += 4 + len;
-            }
-            assert_eq!(extra, extra_end);
-            at = extra_end;
+            let CentralRecord {
+                flags,
+                crc,
+                size,
+                offset,
+                name,
+                next,
+            } = read_central(bytes, at);
+            at = next;
 
             let local = offset as usize;
             assert_eq!(u32_at(bytes, local), LOCAL_HEADER_SIGNATURE);
@@ -574,9 +608,7 @@ pub(crate) mod tests {
             } else {
                 assert_ne!(flags & FLAG_DATA_DESCRIPTOR, 0);
                 let data = &bytes[data_start..data_start + size as usize];
-                let mut computed = Crc32::new();
-                computed.update(data);
-                assert_eq!(computed.finish(), crc, "{name}");
+                assert_eq!(reference_crc(data), crc, "{name}");
                 let descriptor = data_start + size as usize;
                 assert_eq!(u32_at(bytes, descriptor), DATA_DESCRIPTOR_SIGNATURE);
                 assert_eq!(u32_at(bytes, descriptor + 4), crc);
@@ -595,9 +627,13 @@ pub(crate) mod tests {
         entries
     }
 
-    /// Streams `contents` through a plan the way the HTTP handler does.
-    fn build(sources: Vec<ZipSource>, contents: &[Option<Vec<u8>>]) -> (ZipPlan, Vec<u8>) {
-        let mut plan = ZipPlan::new(sources).expect("layout");
+    /// Streams `contents` through a plan the way the HTTP handler does, or
+    /// returns `None` when the sources have no valid layout.
+    pub(crate) fn build(
+        sources: Vec<ZipSource>,
+        contents: &[Option<Vec<u8>>],
+    ) -> Option<(ZipPlan, Vec<u8>)> {
+        let mut plan = ZipPlan::new(sources)?;
         let mut out = Vec::new();
         for (index, data) in contents.iter().enumerate() {
             plan.write_local_header(index, &mut out);
@@ -612,10 +648,180 @@ pub(crate) mod tests {
             plan.write_central_header(index, &mut out);
         }
         plan.write_end(&mut out);
-        (plan, out)
+        Some((plan, out))
     }
 
-    fn reference_crc(bytes: &[u8]) -> u32 {
+    /// Writes every record of a layout whose file bytes are not
+    /// materialized and checks that each record has its planned length and
+    /// that the central directory and end records decode to the planned
+    /// sizes, offsets, and counts. This reaches the ZIP64 branches, which
+    /// real data would need gigabytes for.
+    pub(crate) fn check_layout(sources: Vec<ZipSource>) {
+        let Some(mut plan) = ZipPlan::new(sources) else {
+            return;
+        };
+        let mut position = 0_u64;
+        let mut record = Vec::new();
+        for index in 0..plan.entry_count() {
+            assert_eq!(plan.entries[index].offset, position);
+            record.clear();
+            plan.write_local_header(index, &mut record);
+            assert_eq!(record.len() as u64, plan.entries[index].local_len());
+            let zip64_local = u32_at(&record, 18) == u32::MAX;
+            assert_eq!(zip64_local, plan.entries[index].zip64_sizes());
+            position += record.len() as u64 + plan.entries[index].size.unwrap_or(0);
+            record.clear();
+            plan.write_data_descriptor(index, 0x1234_5678, &mut record);
+            assert_eq!(record.len() as u64, plan.entries[index].descriptor_len());
+            position += record.len() as u64;
+        }
+        assert_eq!(position, plan.central_offset);
+
+        let mut central = Vec::new();
+        for index in 0..plan.entry_count() {
+            plan.write_central_header(index, &mut central);
+        }
+        assert_eq!(central.len() as u64, plan.central_len);
+        let mut at = 0;
+        for entry in &plan.entries {
+            let decoded = read_central(&central, at);
+            assert_eq!(decoded.name, entry.name);
+            assert_eq!(decoded.size, entry.size.unwrap_or(0));
+            assert_eq!(decoded.offset, entry.offset);
+            let expected_crc = if entry.size.is_some() { 0x1234_5678 } else { 0 };
+            assert_eq!(decoded.crc, expected_crc);
+            at = decoded.next;
+        }
+        assert_eq!(at, central.len());
+
+        let mut end = Vec::new();
+        plan.write_end(&mut end);
+        assert_eq!(end.len() as u64, plan.end_len());
+        assert_eq!(
+            position + central.len() as u64 + end.len() as u64,
+            plan.len()
+        );
+        let classic = end.len() - END_LEN as usize;
+        assert_eq!(u32_at(&end, classic), END_SIGNATURE);
+        let count = plan.entries.len() as u64;
+        if plan.needs_zip64_end() {
+            assert_eq!(u32_at(&end, 0), ZIP64_END_SIGNATURE);
+            assert_eq!(u64_at(&end, 24), count);
+            assert_eq!(u64_at(&end, 32), count);
+            assert_eq!(u64_at(&end, 40), plan.central_len);
+            assert_eq!(u64_at(&end, 48), plan.central_offset);
+            let locator = ZIP64_END_LEN as usize;
+            assert_eq!(u32_at(&end, locator), ZIP64_LOCATOR_SIGNATURE);
+            assert_eq!(
+                u64_at(&end, locator + 8),
+                plan.central_offset + plan.central_len
+            );
+        } else {
+            assert_eq!(u64::from(u16_at(&end, classic + 10)), count);
+            assert_eq!(u64::from(u32_at(&end, classic + 12)), plan.central_len);
+            assert_eq!(u64::from(u32_at(&end, classic + 16)), plan.central_offset);
+        }
+    }
+
+    /// Decodes fuzzer bytes into archive entries. The first byte selects a
+    /// round trip with real file bytes, or a layout check with arbitrary
+    /// declared sizes; each entry then reads a control byte, a name, an
+    /// optional modification time, and its size or bytes.
+    pub(crate) fn fuzz(data: &[u8]) {
+        let mut input = Input(data);
+        let Some(mode) = input.byte() else {
+            return;
+        };
+        let round_trip = mode & 1 == 0;
+        let mut sources = Vec::new();
+        let mut contents = Vec::new();
+        while sources.len() < 64 {
+            let Some(control) = input.byte() else {
+                break;
+            };
+            let Some(name) = input
+                .take(usize::from(control >> 3) + 1)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            else {
+                break;
+            };
+            let modified = if control & 2 == 0 {
+                None
+            } else {
+                let Some(seconds) = input.take(5) else {
+                    break;
+                };
+                let mut wide = [0_u8; 8];
+                wide[..5].copy_from_slice(seconds);
+                UNIX_EPOCH.checked_add(Duration::from_secs(u64::from_le_bytes(wide)))
+            };
+            let directory = control & 1 == 1;
+            let (size, bytes) = if directory {
+                (None, None)
+            } else if round_trip {
+                let Some(len) = input.byte() else {
+                    break;
+                };
+                let Some(bytes) = input.take(usize::from(len)) else {
+                    break;
+                };
+                (Some(bytes.len() as u64), Some(bytes.to_vec()))
+            } else {
+                let Some(size) = input.take(8) else {
+                    break;
+                };
+                (Some(u64_at(size, 0)), None)
+            };
+            sources.push(ZipSource {
+                name,
+                size,
+                modified,
+            });
+            contents.push(bytes);
+        }
+
+        if !round_trip {
+            check_layout(sources);
+            return;
+        }
+        let expected: Vec<_> = sources
+            .iter()
+            .zip(&contents)
+            .map(|(source, data)| ReadEntry {
+                name: if data.is_some() {
+                    source.name.clone()
+                } else {
+                    format!("{}/", source.name)
+                },
+                data: data.clone(),
+            })
+            .collect();
+        check_layout(sources.clone());
+        let Some((plan, bytes)) = build(sources, &contents) else {
+            return;
+        };
+        assert_eq!(plan.len(), bytes.len() as u64);
+        assert_eq!(read_archive(&bytes), expected);
+    }
+
+    struct Input<'data>(&'data [u8]);
+
+    impl<'data> Input<'data> {
+        fn byte(&mut self) -> Option<u8> {
+            self.take(1).map(|bytes| bytes[0])
+        }
+
+        fn take(&mut self, len: usize) -> Option<&'data [u8]> {
+            if self.0.len() < len {
+                return None;
+            }
+            let (taken, rest) = self.0.split_at(len);
+            self.0 = rest;
+            Some(taken)
+        }
+    }
+
+    pub(crate) fn reference_crc(bytes: &[u8]) -> u32 {
         let mut crc = u32::MAX;
         for byte in bytes {
             crc ^= u32::from(*byte);
@@ -629,6 +835,15 @@ pub(crate) mod tests {
         }
         !crc
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use proptest::prelude::*;
+
+    use super::{verify::*, *};
 
     #[test]
     fn crc_matches_the_standard_check_value() {
@@ -659,7 +874,7 @@ pub(crate) mod tests {
             },
         ];
         let contents = [None, Some(b"hello".to_vec()), Some(Vec::new())];
-        let (plan, bytes) = build(sources, &contents);
+        let (plan, bytes) = build(sources, &contents).expect("layout");
         assert_eq!(plan.len(), bytes.len() as u64);
         assert_eq!(
             read_archive(&bytes),
@@ -746,7 +961,7 @@ pub(crate) mod tests {
             })
             .collect();
         let contents = vec![Some(Vec::new()); sources.len()];
-        let (plan, bytes) = build(sources, &contents);
+        let (plan, bytes) = build(sources, &contents).expect("layout");
         assert!(plan.needs_zip64_end());
         assert_eq!(plan.len(), bytes.len() as u64);
         assert_eq!(read_archive(&bytes).len() as u64, U16_SENTINEL);
@@ -768,7 +983,53 @@ pub(crate) mod tests {
         assert_eq!(unix_mtime(Some(leap)), Some(1_709_214_331));
     }
 
+    #[test]
+    fn zip64_layouts_decode_to_their_planned_values() {
+        let file = |name: &str, size| ZipSource {
+            name: name.into(),
+            size: Some(size),
+            modified: None,
+        };
+        check_layout(vec![
+            file("a", U32_SENTINEL - 1),
+            file("big", U32_SENTINEL),
+            ZipSource {
+                name: "dir".into(),
+                size: None,
+                modified: Some(UNIX_EPOCH + Duration::from_secs(1)),
+            },
+            file("after", u64::from(u32::MAX) * 3),
+        ]);
+    }
+
+    #[test]
+    fn fuzz_seeds_cover_both_modes() {
+        // Round trip: a directory "d" then a three-byte file "d/f".
+        fuzz(&[
+            0,
+            0b0000_0001,
+            b'd',
+            0b0001_0000,
+            b'd',
+            b'/',
+            b'f',
+            3,
+            1,
+            2,
+            3,
+        ]);
+        // Layout: one file declared just past the classic size field.
+        let mut layout = vec![1, 0, b'x'];
+        layout.extend_from_slice(&U32_SENTINEL.to_le_bytes());
+        fuzz(&layout);
+    }
+
     proptest! {
+        #[test]
+        fn fuzz_entry_point_holds_for_arbitrary_input(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            fuzz(&bytes);
+        }
+
         #[test]
         fn crc_matches_a_bitwise_reference(bytes in proptest::collection::vec(any::<u8>(), 0..256), split in 0_usize..256) {
             let split = split.min(bytes.len());
@@ -795,7 +1056,7 @@ pub(crate) mod tests {
                 })
                 .collect();
             let contents: Vec<_> = files.iter().map(|(data, _)| data.clone()).collect();
-            let (plan, bytes) = build(sources, &contents);
+            let (plan, bytes) = build(sources, &contents).expect("layout");
             prop_assert_eq!(plan.len(), bytes.len() as u64);
             let read = read_archive(&bytes);
             prop_assert_eq!(read.len(), contents.len());
