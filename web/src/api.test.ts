@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  archiveUrl,
   createApiClient,
   directoryEventsUrl,
   downloadUrl,
@@ -640,6 +641,50 @@ describe("API client", () => {
       "/api/v1/shares/team%2Fa/events?path=pages",
     );
     expect(() => downloadUrl("docs", "../secret")).toThrow(ApiError);
+  });
+
+  it("builds folder archive URLs, with no path for the share root", () => {
+    expect(archiveUrl("team/a", "")).toBe("/api/v1/shares/team%2Fa/archive");
+    expect(archiveUrl("team/a", "R&D/東京")).toBe(
+      "/api/v1/shares/team%2Fa/archive?path=R%26D%2F%E6%9D%B1%E4%BA%AC",
+    );
+    expect(() => archiveUrl("docs", "../secret")).toThrow(ApiError);
+  });
+
+  it("checks a folder archive and cancels the admitted response body", async () => {
+    let signal: AbortSignal | undefined;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Response("PK", {
+        headers: { "content-type": "application/zip" },
+      });
+    });
+
+    await createApiClient({ fetch }).checkArchive("docs", "photos");
+
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/v1/shares/docs/archive?path=photos",
+    );
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({
+      credentials: "same-origin",
+    });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("rejects a refused folder archive with the server's error code", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json(
+          { error: { code: "too_large", message: "Too large" } },
+          { status: 413 },
+        ),
+      );
+
+    await expect(
+      createApiClient({ fetch }).checkArchive("docs", ""),
+    ).rejects.toMatchObject({ status: 413, code: "too_large" });
+    expect(fetch.mock.calls[0]?.[0]).toBe("/api/v1/shares/docs/archive");
   });
 
   it("adds CSRF and precondition headers to every file mutation", async () => {

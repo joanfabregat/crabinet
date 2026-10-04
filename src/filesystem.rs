@@ -778,44 +778,46 @@ impl AuthorizedShare<'_> {
             if scanned == max_entries {
                 return Err(FsError::new(FsErrorCode::TooLarge));
             }
-            let entry = entry.map_err(map_io)?;
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            if is_internal_name(&name) {
-                continue;
+            if let Some(entry) = supported_entry(entry.map_err(map_io)?)? {
+                result.push(entry);
             }
-            let Ok(name) = EntryName::new(name) else {
-                continue;
-            };
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                // The entry was removed or renamed between `readdir` and
-                // `stat`; the directory itself still exists.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(map_io(error)),
-            };
-            let kind = match classify_metadata(&metadata) {
-                Ok(kind) => kind,
-                Err(error) if error.code() == FsErrorCode::UnsupportedEntry => continue,
-                Err(error) => return Err(error),
-            };
-            if let Err(error) = assert_no_external_alias(&metadata, kind) {
-                if error.code() == FsErrorCode::UnsupportedEntry {
-                    continue;
-                }
-                return Err(error);
-            }
-            result.push(DirectoryEntry {
-                name,
-                kind,
-                size: metadata.len(),
-                modified: metadata.modified().ok().map(|time| time.into_std()),
-                file_id: metadata_identity(&metadata),
-            });
         }
         result.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(result)
+    }
+
+    /// Lists every entry beneath the directory `path` for a folder archive,
+    /// depth first with each directory's children in name order. A directory
+    /// precedes its contents. The walk applies the listing entry policy:
+    /// internal, unsupported, and invalidly named entries are omitted, links
+    /// are never followed, and every scanned entry, omitted or not, counts
+    /// toward `limits.max_entries`. Exceeding a limit fails with
+    /// [`FsErrorCode::TooLarge`], and an entry deeper than [`MAX_PATH_DEPTH`]
+    /// fails with [`FsErrorCode::TooDeep`], before any byte is archived.
+    pub fn archive_items(
+        &self,
+        path: &VirtualPath,
+        limits: ArchiveLimits,
+    ) -> FsResult<ArchiveTree> {
+        let directory = self.share.open_directory(&path.0)?;
+        let modified = directory
+            .dir_metadata()
+            .map_err(map_io)?
+            .modified()
+            .ok()
+            .map(|time| time.into_std());
+        let mut walk = ArchiveWalk {
+            limits,
+            items: Vec::new(),
+            scanned: 0,
+            bytes: 0,
+            name_bytes: 0,
+        };
+        walk.visit(&directory, "", path.depth())?;
+        Ok(ArchiveTree {
+            modified,
+            items: walk.items,
+        })
     }
 
     pub fn open_file(&self, path: &VirtualPath) -> FsResult<OpenedFile> {
@@ -1088,6 +1090,139 @@ impl AuthorizedShare<'_> {
             .then_some(())
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))
     }
+}
+
+/// Bounds on one folder archive walk.
+#[derive(Clone, Copy, Debug)]
+pub struct ArchiveLimits {
+    /// Directory entries scanned, including omitted ones.
+    pub max_entries: usize,
+    /// Sum of archived file sizes.
+    pub max_bytes: u64,
+    /// Sum of archived relative path lengths, which bounds the walk's memory.
+    pub max_name_bytes: usize,
+}
+
+/// A walked folder: its own modification time and every entry beneath it.
+#[derive(Clone, Debug)]
+pub struct ArchiveTree {
+    pub modified: Option<SystemTime>,
+    pub items: Vec<ArchiveItem>,
+}
+
+/// One entry beneath an archived folder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArchiveItem {
+    /// The path relative to the archived folder, `/`-separated.
+    pub relative: String,
+    pub kind: EntryKind,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+}
+
+struct ArchiveWalk {
+    limits: ArchiveLimits,
+    items: Vec<ArchiveItem>,
+    scanned: usize,
+    bytes: u64,
+    name_bytes: usize,
+}
+
+impl ArchiveWalk {
+    /// `depth` is the virtual depth of `directory` itself.
+    fn visit(&mut self, directory: &Dir, prefix: &str, depth: usize) -> FsResult<()> {
+        let mut children = Vec::new();
+        for entry in directory.entries().map_err(map_io)? {
+            self.scanned += 1;
+            if self.scanned > self.limits.max_entries {
+                return Err(FsError::new(FsErrorCode::TooLarge));
+            }
+            if let Some(entry) = supported_entry(entry.map_err(map_io)?)? {
+                children.push(entry);
+            }
+        }
+        if !children.is_empty() && depth >= MAX_PATH_DEPTH {
+            return Err(FsError::new(FsErrorCode::TooDeep));
+        }
+        children.sort_by(|left, right| left.name.cmp(&right.name));
+        for child in children {
+            let relative = if prefix.is_empty() {
+                child.name.as_str().to_owned()
+            } else {
+                format!("{prefix}/{}", child.name)
+            };
+            self.name_bytes = self.name_bytes.saturating_add(relative.len());
+            if self.name_bytes > self.limits.max_name_bytes {
+                return Err(FsError::new(FsErrorCode::TooLarge));
+            }
+            let item = ArchiveItem {
+                relative,
+                kind: child.kind,
+                size: child.size,
+                modified: child.modified,
+            };
+            match child.kind {
+                EntryKind::File => {
+                    self.bytes = self.bytes.saturating_add(child.size);
+                    if self.bytes > self.limits.max_bytes {
+                        return Err(FsError::new(FsErrorCode::TooLarge));
+                    }
+                    self.items.push(item);
+                }
+                EntryKind::Directory => {
+                    let opened = match directory.open_dir_nofollow(child.name.as_str()) {
+                        Ok(opened) => opened,
+                        // Removed or renamed since the scan, as in a listing.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(map_io(error)),
+                    };
+                    let prefix = item.relative.clone();
+                    self.items.push(item);
+                    self.visit(&opened, &prefix, depth + 1)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Applies the listing entry policy to one scanned entry: `None` for an
+/// internal, invalidly named, vanished, or unsupported entry.
+fn supported_entry(entry: cap_std::fs::DirEntry) -> FsResult<Option<DirectoryEntry>> {
+    let Ok(name) = entry.file_name().into_string() else {
+        return Ok(None);
+    };
+    if is_internal_name(&name) {
+        return Ok(None);
+    }
+    let Ok(name) = EntryName::new(name) else {
+        return Ok(None);
+    };
+    let metadata = match entry.metadata() {
+        Ok(metadata) => metadata,
+        // The entry was removed or renamed between `readdir` and `stat`; the
+        // directory itself still exists.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(map_io(error)),
+    };
+    let kind = match classify_metadata(&metadata) {
+        Ok(kind) => kind,
+        Err(error) if error.code() == FsErrorCode::UnsupportedEntry => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = assert_no_external_alias(&metadata, kind) {
+        if error.code() == FsErrorCode::UnsupportedEntry {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    Ok(Some(DirectoryEntry {
+        name,
+        kind,
+        size: metadata.len(),
+        modified: metadata.modified().ok().map(|time| time.into_std()),
+        file_id: metadata_identity(&metadata),
+    }))
 }
 
 fn metadata_in_parent(parent: &Dir, name: &EntryName) -> FsResult<EntryMetadata> {
@@ -2189,6 +2324,112 @@ mod tests {
         let mut names: Vec<_> = listing.iter().map(|entry| entry.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, ["hello.txt", "nested"]);
+
+        let limits = ArchiveLimits {
+            max_entries: 11,
+            max_bytes: 11,
+            max_name_bytes: 32,
+        };
+        let items = authorized
+            .archive_items(&VirtualPath::root(), limits)
+            .expect("archive walk")
+            .items;
+        let summary: Vec<_> = items
+            .iter()
+            .map(|item| (item.relative.as_str(), item.kind, item.size))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("hello.txt", EntryKind::File, 5),
+                ("nested", EntryKind::Directory, summary[1].2),
+                ("nested/inside.txt", EntryKind::File, 6),
+            ],
+            "links, aliases, special files, invalid names, and internal entries are omitted"
+        );
+        // Ten root entries, including the internal directory, plus one nested.
+        for tighter in [
+            ArchiveLimits {
+                max_entries: 10,
+                ..limits
+            },
+            ArchiveLimits {
+                max_bytes: 10,
+                ..limits
+            },
+            ArchiveLimits {
+                max_name_bytes: 31,
+                ..limits
+            },
+        ] {
+            assert_eq!(
+                authorized
+                    .archive_items(&VirtualPath::root(), tighter)
+                    .expect_err("limit")
+                    .code(),
+                FsErrorCode::TooLarge,
+                "{tighter:?}"
+            );
+        }
+        let nested = authorized
+            .archive_items(&VirtualPath::parse("nested").expect("path"), limits)
+            .expect("subfolder walk")
+            .items;
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].relative, "inside.txt");
+        assert_eq!(
+            authorized
+                .archive_items(&VirtualPath::parse("hello.txt").expect("path"), limits)
+                .expect_err("a file is not a folder")
+                .code(),
+            FsErrorCode::NotFound
+        );
+    }
+
+    #[test]
+    fn archive_walk_stops_at_the_depth_limit() {
+        let limits = ArchiveLimits {
+            max_entries: 1_000,
+            max_bytes: 1 << 20,
+            max_name_bytes: 1 << 20,
+        };
+        let temporary = TempDir::new().expect("temporary directory");
+        nested_tree(temporary.path(), MAX_PATH_DEPTH - 1);
+        let share = ShareFs::open_read_only(ShareId::new("deep").expect("id"), temporary.path())
+            .expect("open share");
+        let grant = ShareGrant {
+            share_id: ShareId::new("deep").expect("id"),
+            access: AccessLevel::ReadOnly,
+        };
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("read access");
+        let items = authorized
+            .archive_items(&VirtualPath::root(), limits)
+            .expect("the leaf sits exactly at the limit")
+            .items;
+        let leaf = items.last().expect("leaf");
+        assert_eq!(leaf.relative.split('/').count(), MAX_PATH_DEPTH);
+        // The archived folder's own depth counts: its entries keep their
+        // virtual paths.
+        let subfolder = VirtualPath::parse(&depth_path(3)).expect("path");
+        assert_eq!(
+            authorized
+                .archive_items(&subfolder, limits)
+                .expect("walk")
+                .items
+                .len(),
+            items.len() - 3
+        );
+
+        fs::create_dir_all(temporary.path().join(depth_path(MAX_PATH_DEPTH + 1))).expect("deeper");
+        assert_eq!(
+            authorized
+                .archive_items(&VirtualPath::root(), limits)
+                .expect_err("too deep")
+                .code(),
+            FsErrorCode::TooDeep
+        );
     }
 
     #[test]

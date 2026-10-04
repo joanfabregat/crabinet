@@ -487,6 +487,13 @@ pub(crate) mod tests {
             .query("path=a.txt"),
             Route::new(
                 "GET",
+                "/api/v1/shares/{share_id}/archive",
+                Share,
+                Safe,
+                Bound::Browse(BrowseGate::Archives),
+            ),
+            Route::new(
+                "GET",
                 "/api/v1/shares/{share_id}/preview",
                 Share,
                 Safe,
@@ -601,9 +608,10 @@ pub(crate) mod tests {
     };
 
     /// Every request gate. Each must guard at least one route.
-    const GATES: [Bound; 7] = [
+    const GATES: [Bound; 8] = [
         Bound::Browse(BrowseGate::Events),
         Bound::Browse(BrowseGate::Downloads),
+        Bound::Browse(BrowseGate::Archives),
         Bound::Browse(BrowseGate::BufferedReads),
         Bound::Browse(BrowseGate::Listings),
         Bound::Browse(BrowseGate::Blocking),

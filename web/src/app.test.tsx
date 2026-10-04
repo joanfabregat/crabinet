@@ -120,6 +120,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         size: 0,
         truncated: false,
       })),
+    checkArchive: overrides.checkArchive ?? vi.fn(async () => undefined),
     metadata:
       overrides.metadata ??
       vi.fn(async (shareId, path) => ({
@@ -988,6 +989,69 @@ describe("directory browser", () => {
     expect(document.querySelector(".app-frame")?.firstElementChild).toHaveClass(
       "development-banner",
     );
+  });
+
+  it("downloads the open folder as a ZIP once the server admits it", async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const checkArchive = vi.fn(async () => undefined);
+    const navigation = new MemoryNavigation({
+      shareId: "read-only",
+      path: "",
+    });
+    render(<App api={fakeApi({ checkArchive })} navigation={navigation} />);
+
+    const link = await screen.findByRole("link", {
+      name: "Download Reference as ZIP",
+    });
+    expect(link.closest(".directory-heading-actions")).not.toBeNull();
+    expect(link).toHaveAttribute("href", "/api/v1/shares/read-only/archive");
+    fireEvent.click(link);
+
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(checkArchive).toHaveBeenCalledWith("read-only", "");
+    expect(click.mock.contexts[0]).toHaveAttribute(
+      "href",
+      "/api/v1/shares/read-only/archive",
+    );
+    click.mockRestore();
+
+    navigation.go({ shareId: "work", path: "projects/2024" });
+    expect(
+      await screen.findByRole("link", { name: "Download 2024 as ZIP" }),
+    ).toHaveAttribute(
+      "href",
+      "/api/v1/shares/work/archive?path=projects%2F2024",
+    );
+  });
+
+  it("shows a refused folder archive as a toast and stays on the page", async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const checkArchive = vi.fn(async () => {
+      throw new ApiError("server", "Request exceeds a configured limit", {
+        status: 413,
+        code: "too_large",
+      });
+    });
+    const navigation = new MemoryNavigation({ shareId: "work", path: "" });
+    render(<App api={fakeApi({ checkArchive })} navigation={navigation} />);
+
+    fireEvent.click(
+      await screen.findByRole("link", {
+        name: "Download Working files as ZIP",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Working files is too large or has too many items to download as one ZIP.",
+      ),
+    ).toBeVisible();
+    expect(click).not.toHaveBeenCalled();
+    click.mockRestore();
   });
 
   it("shows the profile picture supplied by the session", async () => {

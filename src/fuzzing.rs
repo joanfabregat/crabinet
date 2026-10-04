@@ -54,6 +54,12 @@ pub fn content_disposition(data: &[u8]) {
     }
 }
 
+/// Builds folder archives from fuzzer-chosen entries and checks them with an
+/// independent reader, plus layouts with arbitrary declared sizes.
+pub fn zip_archive(data: &[u8]) {
+    crate::zip::verify::fuzz(data);
+}
+
 pub fn multipart(data: &[u8]) {
     let root = FuzzRoot::new();
     let share_id = ShareId::new("fuzz").expect("static share ID");

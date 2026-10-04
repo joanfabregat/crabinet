@@ -294,6 +294,16 @@ export interface ApiClient {
     path: string,
     signal?: AbortSignal,
   ): Promise<EntryMetadata>;
+  /**
+   * Starts a folder archive and cancels it as soon as the server admits it,
+   * so a refusal can be shown in the app before the browser downloads
+   * {@link archiveUrl}. Rejects with the server's error otherwise.
+   */
+  checkArchive(
+    shareId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
   text(
     shareId: string,
     path: string,
@@ -590,6 +600,33 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       return parsePreviewDocument(
         await request<unknown>(url, { signal }, true),
       );
+    },
+    checkArchive: async (shareId, path, signal) => {
+      const url = archiveUrl(shareId, path);
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        const response = await fetchImplementation(url, {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw await responseError(response);
+      } catch (cause) {
+        if (cause instanceof ApiError) throw cause;
+        if (isAbortFailure(cause) || signal?.aborted) {
+          throw new ApiError("aborted", "The request was cancelled", { cause });
+        }
+        throw new ApiError("network", "The server could not be reached", {
+          retryable: true,
+          cause,
+        });
+      } finally {
+        signal?.removeEventListener("abort", cancel);
+        // Stops an admitted archive's body; the browser downloads it anew.
+        controller.abort();
+      }
     },
     metadata: async (shareId, path, signal) =>
       parseMetadata(
@@ -987,6 +1024,13 @@ export function directoryEventsUrl(shareId: string, path: string): string {
 
 export function downloadUrl(shareId: string, path: string): string {
   return fileApiUrl(shareId, path, "download");
+}
+
+/** A ZIP archive of the folder `path`; the empty path is the share root. */
+export function archiveUrl(shareId: string, path: string): string {
+  return path === ""
+    ? `/api/v1/shares/${encodeURIComponent(shareId)}/archive`
+    : fileApiUrl(shareId, path, "archive");
 }
 
 function fileApiUrl(shareId: string, path: string, action: string): string {

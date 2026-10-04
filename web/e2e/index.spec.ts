@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
@@ -645,6 +647,27 @@ test("the folder toolbar drops its labels before leaving the title's line", asyn
     if (expectLabels) expect(sawLabels).toBe(true);
     expect(sawIconsBeside).toBe(true);
   }
+});
+
+test("a folder downloads as a ZIP of its files", async ({ page }) => {
+  await openSignedIn(page, "/read-only/nested");
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("link", { name: "Download nested as ZIP" }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe("nested.zip");
+  expect(await download.failure()).toBeNull();
+  const archive = await readFile((await download.path())!);
+  // Entries are stored, so names and contents appear verbatim.
+  expect(archive.subarray(0, 4).toString("latin1")).toBe("PK\u0003\u0004");
+  const text = archive.toString("utf8");
+  expect(text).toContain("nested/notes.txt");
+  expect(text).toContain(
+    "This file proves direct nested routes and browser history work.",
+  );
+  // The download leaves the folder open.
+  await expect(page).toHaveURL(/\/read-only\/nested$/);
 });
 
 test("an iPad in portrait shows two columns", async ({ page }) => {

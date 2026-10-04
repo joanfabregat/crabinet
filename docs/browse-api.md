@@ -74,7 +74,21 @@ The endpoint supports one RFC-style byte range (`start-end`, `start-`, or `-suff
 
 Downloads include a safe ASCII fallback plus RFC 5987 UTF-8 filename in `Content-Disposition`. Every file, including raw HTML and SVG, is an attachment. Responses also set `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Accept-Ranges: bytes`, an explicit MIME type, ETag, and content length. The MIME type comes from the file extension, except that JavaScript, CSS, and WebAssembly types are replaced by `application/octet-stream`. An attachment disposition does not stop `<script src>` or `<link rel="stylesheet">` from loading a same-origin URL, so this, together with `nosniff`, keeps the application CSP's `'self'` sources from covering user files.
 
-Every browse response, including share discovery, listings, metadata, text, and downloads, sets `Cache-Control: no-store, private` so authenticated content does not remain in the browser disk cache after sign-out. ETags remain available for explicit `If-None-Match`, `If-Range`, and mutation `If-Match` requests.
+## Folder archive
+
+`GET /api/v1/shares/{shareId}/archive?path=relative/folder` streams a folder and everything beneath it as a ZIP archive; an absent or empty `path` archives the share root. Any grant on the share, read or read-write, may archive it. The archive's top-level entry is the folder's name, or the share ID for the share root, and the attachment is named after it with a `.zip` suffix.
+
+Before the response starts, the server walks the folder through the share capability with the listing's entry policy: links, special files, hard-link aliases, invalid names, and Crabinet's internal entries are omitted, and every scanned entry counts toward the limit, omitted or not. A folder that exceeds a limit (the sum of file sizes above the download maximum, more scanned entries than the archive entry maximum, or more than 4 MiB of relative path names) returns `413` (`too_large`); an entry deeper than the 64-component limit returns `400` (`path_too_deep`); a path that names a file or nothing returns `404`. No archive bytes are produced for a refused folder.
+
+Entries are stored uncompressed, in depth-first order with each directory's children sorted by name and every directory, including empty ones, present as its own entry. Names are UTF-8 (general-purpose flag bit 11), so an extractor sees the same canonical components the browse API returns; the grammar rules out `..`, absolute names, and backslashes. File modes are fixed (`0644` for files, `0755` for directories), and times are the modification times in UTC, both as MS-DOS fields and an extended timestamp. ZIP64 fields appear only where an entry, an offset, or the entry count overflows the classic fields. Because the layout is fixed before streaming, the response carries the archive's exact `Content-Length`.
+
+Each file is reopened through the capability with a no-follow open only when its turn comes, and only one file is open at a time. If a file was removed, replaced by a link or special file, or changed size since the walk, the server ends the response body with an error instead of finishing it. Against the announced `Content-Length` the client then sees a failed transfer, never a complete-looking archive with different contents. A file rewritten in place without a size change is read as it is at that moment, as with a single-file download. Archives do not support `Range`, `If-None-Match`, or ETags.
+
+At most 4 archives run concurrently across the process and 2 per authenticated user; a slot is held from the walk until the response body completes or is dropped, and further requests receive `429` with code `busy` and `Retry-After`. Memory per archive is bounded by the walk (at most the entry maximum and 4 MiB of names, held twice while the layout is built) plus one read chunk, independent of the total archive size. Responses set `Content-Type: application/zip`, the same `Content-Disposition` encoding as downloads, `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: default-src 'none'; sandbox`.
+
+The browser client first requests the archive with `fetch`, cancels it once the response headers show it was admitted, and then hands the same URL to the browser as a download. A refusal is shown in the app instead of replacing the page with a JSON error. The extra request repeats the walk once.
+
+Every browse response, including share discovery, listings, metadata, text, downloads, and archives, sets `Cache-Control: no-store, private` so authenticated content does not remain in the browser disk cache after sign-out. ETags remain available for explicit `If-None-Match`, `If-Range`, and mutation `If-Match` requests.
 
 ## Default resource limits
 
@@ -84,7 +98,9 @@ Every browse response, including share discovery, listings, metadata, text, and 
 | Maximum requested page | 200 entries |
 | Maximum directory scan | 10,000 entries |
 | UTF-8 text read | 1 MiB |
-| Download | 1 GiB |
+| Download, and the sum of file sizes in one folder archive | 1 GiB |
+| Folder archive scan | 10,000 entries |
+| Folder archive names | 4 MiB |
 | Streaming read chunk | 64 KiB |
 
 All values are startup configuration inputs through `BrowseLimits`; invalid zero or internally inconsistent limits prevent browse-state construction. Startup must also provide a non-zero 32-byte cursor HMAC secret from the authenticated application configuration; it is never accepted from a request.

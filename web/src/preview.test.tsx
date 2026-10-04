@@ -102,6 +102,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     preview:
       overrides.preview ?? vi.fn(async () => previewDocument("plain text")),
     metadata: overrides.metadata ?? vi.fn(),
+    checkArchive: overrides.checkArchive ?? vi.fn(),
     text: overrides.text ?? vi.fn(),
     createDirectory: overrides.createDirectory ?? vi.fn(),
     createFile: overrides.createFile ?? vi.fn(),

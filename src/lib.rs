@@ -18,5 +18,6 @@ pub mod oidc;
 pub mod password;
 pub mod preview;
 pub mod server;
+mod zip;
 
 pub const APP_NAME: &str = "crabinet";
