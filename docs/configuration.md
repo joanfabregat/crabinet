@@ -26,7 +26,7 @@ The top-level fields are:
 
 Paths under `server` may be relative to the directory containing the configuration file. The database's parent directory must already exist. Share roots must be absolute existing directories. A share root cannot be `/`, a symbolic link, overlap another share, or contain the configuration file, database, or session-secret file. Crabinet canonicalizes trusted paths once at startup; request paths are handled separately inside those capabilities.
 
-Sizes use a positive integer and one binary unit: `B`, `KiB`, `MiB`, or `GiB`. The preview limit cannot exceed the upload limit.
+Sizes use a positive integer and one binary unit: `B`, `KiB`, `MiB`, or `GiB`. The preview limit cannot exceed the upload limit. `max_preview_size` bounds only previews that buffer the whole file: text, code, Markdown, and HTML. Raster images, PDF, audio, and video are classified from a bounded header and stream from the file handle, so they are not bound by it; they share the download size cap and concurrency limits instead, and images keep a pixel cap. See [Preview security contract](previews.md).
 
 `server.max_connections` defaults to 1024 and accepts 1–65535. It caps simultaneously open client connections, counting idle keep-alive connections, open event streams, and in-flight uploads and downloads; a connection accepted above the cap is closed immediately without a response, and the first such close after a period below the cap is logged as a warning. Keep the process's open-file limit comfortably above the cap.
 

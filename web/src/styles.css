@@ -1781,16 +1781,45 @@ html.preview-fullscreen-open body {
   width: auto;
 }
 
-.image-preview a {
-  cursor: zoom-in;
-  display: inline-block;
-  max-width: 100%;
-}
-
 .image-preview figcaption {
   color: var(--muted);
   font-size: 0.8rem;
   margin-top: 0.75rem;
+}
+
+.media-preview {
+  margin: 0;
+  text-align: center;
+}
+
+.media-preview audio,
+.media-preview video {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  width: 100%;
+}
+
+.media-preview video {
+  background: #000;
+  max-height: 70vh;
+}
+
+.media-preview figcaption {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.75rem;
+}
+
+.pdf-preview {
+  padding: 1.5rem 0;
+  text-align: center;
+}
+
+.pdf-preview-hint {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin: 0.5rem 0 0;
 }
 
 .breadcrumbs {

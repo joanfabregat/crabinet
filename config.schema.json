@@ -204,7 +204,7 @@
           "minimum": 1
         },
         "max_preview_size": {
-          "description": "Maximum file size eligible for preview, for example \"2 MiB\".",
+          "description": "Maximum size of a file previewed as text, code, Markdown, or HTML, for example \"2 MiB\". Streamed images, PDF, audio, and video are not bound by it.",
           "type": "string"
         },
         "max_sessions_per_user": {
