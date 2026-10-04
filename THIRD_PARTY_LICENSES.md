@@ -4,15 +4,16 @@ Crabinet's own source and original assets are licensed under [MIT](LICENSE). Thi
 
 | License | Bundled component |
 | --- | --- |
-| Apache-2.0 | OpenSSL and the Rust crates listed under [Apache License 2.0](#apache-license-20), including `aws-lc-sys`, `openssl`, `ring`, `rpassword`, `rtoolbox`, and `sync_wrapper` |
+| Apache-2.0 | OpenSSL, PDF.js (`pdfjs-dist`), used for PDF previews, and the Rust crates listed under [Apache License 2.0](#apache-license-20), including `aws-lc-sys`, `openssl`, `ring`, `rpassword`, `rtoolbox`, and `sync_wrapper` |
 | MPL-2.0 | `webauthn-rs`, `webauthn-rs-core`, `webauthn-rs-proto`, `webauthn-attestation-ca`, and `base64urlsafedata`, used for passkeys |
 | CDLA-Permissive-2.0 | CA root certificate data in `webpki-roots`, used for OIDC HTTPS connections |
+| BSD-3-Clause, BSD-2-Clause | Adobe CMap data, Foxit standard fonts, and the OpenJPEG and PDFium JBIG2 image decoders distributed with PDF.js, listed under [PDF.js data and decoders](#pdfjs-data-and-decoders) |
 
 Source code for the MPL-licensed WebAuthn crates is available from the [upstream repository](https://github.com/kanidm/webauthn-rs) and the exact crate versions listed in `Cargo.lock` are available from [crates.io](https://crates.io/crates/webauthn-rs). Crabinet does not relicense these components.
 
 ## Apache License 2.0
 
-The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.1+3.6.3`, under Apache-2.0. The locked Linux runtime graph also contains the following crates whose declared license expression includes Apache-2.0. Some offer an alternative license; the expression for each crate is reproduced as declared. Build-only and development dependencies are omitted from this list.
+The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.1+3.6.3`, under Apache-2.0. The embedded web frontend includes PDF.js from `pdfjs-dist` 6.3.289 (Copyright Mozilla Foundation and contributors) under Apache-2.0: its library and worker scripts, and the Mozilla glue code of its JavaScript JBIG2 decoder. The locked Linux runtime graph also contains the following crates whose declared license expression includes Apache-2.0. Some offer an alternative license; the expression for each crate is reproduced as declared. Build-only and development dependencies are omitted from this list.
 
 <details>
 <summary>All 178 Apache-eligible Rust crates and versions</summary>
@@ -852,3 +853,160 @@ agreement.
 of Data, including for example machine learning models and models'
 insights.
 <!-- END CDLA-Permissive-2.0 -->
+
+## PDF.js data and decoders
+
+The embedded web frontend serves the following files from `pdfjs-dist` 6.3.289 unchanged under `assets/pdfjs-6.3.289/`, so the PDF preview can load them by name. They carry their own licenses, reproduced below. The Liberation Sans fonts and the WebAssembly binaries in the same package are not distributed: the preview uses the browser's system fonts for Helvetica, and the JavaScript decoders replace WebAssembly, which the application's content security policy does not allow.
+
+| Files | Component | License |
+| --- | --- | --- |
+| `cmaps/*.bcmap` | Adobe CMap resources | BSD-3-Clause |
+| `standard_fonts/Foxit*.pfb` | Foxit standard fonts from PDFium | BSD-3-Clause |
+| `wasm/openjpeg_nowasm_fallback.js` | OpenJPEG, compiled to JavaScript with Mozilla glue code | BSD-2-Clause (both) |
+| `wasm/jbig2_nowasm_fallback.js` | PDFium JBIG2 decoder, compiled to JavaScript with Mozilla glue code | BSD-3-Clause (PDFium), Apache-2.0 (Mozilla glue) |
+
+### Adobe CMap resources
+
+```text
+-----------------------------------------------------------
+Copyright 1990-2009 Adobe Systems Incorporated.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or
+without modification, are permitted provided that the
+following conditions are met:
+
+Redistributions of source code must retain the above
+copyright notice, this list of conditions and the following
+disclaimer.
+
+Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following
+disclaimer in the documentation and/or other materials
+provided with the distribution.
+
+Neither the name of Adobe Systems Incorporated nor the names
+of its contributors may be used to endorse or promote
+products derived from this software without specific prior
+written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-----------------------------------------------------------
+```
+
+### Foxit standard fonts and PDFium JBIG2 decoder
+
+```text
+Copyright 2014 PDFium Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+The JBIG2 decoder carries the same notice with the line `Copyright 2014 The PDFium Authors`; the Mozilla glue code is under the Apache License 2.0 reproduced above.
+
+### OpenJPEG
+
+```text
+/*
+ * The copyright in this software is being made available under the 2-clauses
+ * BSD License, included below. This software may be subject to other third
+ * party and contributor rights, including patent rights, and no such rights
+ * are granted under this license.
+ *
+ * Copyright (c) 2002-2014, Universite catholique de Louvain (UCL), Belgium
+ * Copyright (c) 2002-2014, Professor Benoit Macq
+ * Copyright (c) 2003-2014, Antonin Descampe
+ * Copyright (c) 2003-2009, Francois-Olivier Devaux
+ * Copyright (c) 2005, Herve Drolon, FreeImage Team
+ * Copyright (c) 2002-2003, Yannick Verschueren
+ * Copyright (c) 2001-2003, David Janssens
+ * Copyright (c) 2011-2012, Centre National d'Etudes Spatiales (CNES), France
+ * Copyright (c) 2012, CS Systemes d'Information, France
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS `AS IS'
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+```
+
+### Mozilla glue code for OpenJPEG
+
+```text
+Copyright (c) 2024, Mozilla Foundation
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

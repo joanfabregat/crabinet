@@ -140,6 +140,37 @@ mod tests {
         assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
+    /// pdf.js loads its CMaps, standard fonts, and JavaScript image decoders
+    /// by name from `assets/pdfjs-<version>/`, so the embed glob must reach
+    /// nested paths and serve them like any other hashed asset.
+    #[tokio::test]
+    async fn pdfjs_data_files_are_served_from_nested_assets() {
+        let find = |suffix: &str| {
+            WebAssets::iter()
+                .find(|path| path.starts_with("assets/pdfjs-") && path.ends_with(suffix))
+                .unwrap_or_else(|| panic!("frontend build lacks pdf.js file {suffix}"))
+        };
+        for (suffix, mime) in [
+            ("/wasm/openjpeg_nowasm_fallback.js", "javascript"),
+            ("/cmaps/UniJIS-UCS2-H.bcmap", "application/octet-stream"),
+        ] {
+            let path = find(suffix);
+            let response = serve(OriginalUri(format!("/{path}").parse().unwrap())).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let content_type = response.headers()[header::CONTENT_TYPE].to_str().unwrap();
+            assert!(content_type.contains(mime), "{path}: {content_type}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+        }
+        // The GPL-licensed Liberation fonts in pdfjs-dist are never shipped.
+        assert!(
+            !WebAssets::iter()
+                .any(|path| path.starts_with("assets/pdfjs-") && path.ends_with(".ttf"))
+        );
+    }
+
     #[tokio::test]
     async fn missing_assets_are_not_cached_or_sniffed() {
         for path in ["/assets/missing.js", "/health/missing", "/api/missing"] {
