@@ -2044,6 +2044,12 @@ mod tests {
         let fixture = api_fixture(4096);
         write_fixture(&fixture, "report.pdf", &pdf_bytes());
         let full = open(&fixture, "report.pdf").await;
+        // pdf.js switches to range requests only when the full response
+        // advertises byte ranges with an exact, unencoded length.
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(full.headers()[header::CONTENT_LENGTH], "215");
+        assert!(!full.headers().contains_key(header::CONTENT_ENCODING));
         let etag = full.headers()[header::ETAG].clone();
         let request = |range: Option<&str>, if_none_match: Option<&HeaderValue>| {
             let mut request = Request::get("/api/v1/shares/documents/open?path=report.pdf");
@@ -2065,6 +2071,8 @@ mod tests {
         assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(partial.headers()[header::CONTENT_RANGE], "bytes 1-4/215");
         assert_eq!(partial.headers()[header::CONTENT_LENGTH], "4");
+        assert_eq!(partial.headers()[header::ACCEPT_RANGES], "bytes");
+        assert!(!partial.headers().contains_key(header::CONTENT_ENCODING));
         assert_eq!(partial.headers()[header::CONTENT_TYPE], "application/pdf");
         assert_eq!(
             partial.headers()[header::CONTENT_SECURITY_POLICY],

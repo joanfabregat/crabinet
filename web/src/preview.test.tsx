@@ -17,6 +17,14 @@ import {
 import { App } from "./app";
 import type { BrowserNavigation, BrowserRoute } from "./navigation";
 
+// pdf.js does not run in jsdom; the panel's contract is which component it
+// mounts and with what URL. pdf-preview.test.tsx covers the renderer itself.
+vi.mock("./pdf-preview", () => ({
+  PdfFirstPage: ({ url, filename }: { url: string; filename: string }) => (
+    <div data-testid="pdf-first-page" data-url={url} data-filename={filename} />
+  ),
+}));
+
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
   shares: [{ id: "docs", name: "Documents", access: "read" }],
@@ -671,7 +679,7 @@ describe("secure file previews", () => {
     },
   );
 
-  it("shows a PDF placeholder instead of a size error and never offers Edit", async () => {
+  it("renders a PDF's first page from the open route with Open and Download, never Edit", async () => {
     const navigation = new MemoryNavigation({
       shareId: "docs",
       path: "",
@@ -701,11 +709,17 @@ describe("secure file previews", () => {
     const panel = await screen.findByRole("complementary", {
       name: "report.pdf",
     });
+    const firstPage = await within(panel).findByTestId("pdf-first-page");
+    // The same inline route as the toolbar link, with the revision parameter
+    // that re-renders the page after the file changes.
+    expect(firstPage).toHaveAttribute(
+      "data-url",
+      "/api/v1/shares/docs/open?path=report.pdf&v=0-0",
+    );
+    expect(firstPage).toHaveAttribute("data-filename", "report.pdf");
     expect(
-      await within(panel).findByRole("note", {
-        name: "PDF preview of report.pdf",
-      }),
-    ).toBeVisible();
+      within(panel).getByRole("link", { name: "Download report.pdf" }),
+    ).toHaveAttribute("href", "/api/v1/shares/docs/download?path=report.pdf");
     expect(
       within(panel).queryByText("File is too large to preview"),
     ).not.toBeInTheDocument();
