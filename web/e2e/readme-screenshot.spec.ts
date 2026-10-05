@@ -12,7 +12,7 @@ test("capture the deterministic authenticated browser", async ({ page }) => {
   const icon = await page.request.get("/crabinet.png");
   expect(icon.ok()).toBe(true);
   expect(icon.headers()["content-type"]).toContain("image/png");
-  await page.getByRole("link", { name: "README.md" }).click();
+  await page.getByRole("link", { name: "README.md", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "README.md", level: 2 }),
   ).toBeFocused();

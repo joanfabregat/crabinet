@@ -191,6 +191,7 @@ describe("row action menu", () => {
         entry={entry}
         path="projects/notes.txt"
         copyPath="work/projects/notes.txt"
+        download={{ href: "/download/notes.txt" }}
         writable
         onOperation={onOperation}
       />,
@@ -204,6 +205,7 @@ describe("row action menu", () => {
     const menu = screen.getByRole("menu", { name: "Actions for notes.txt" });
     const items = within(menu).getAllByRole("menuitem");
     expect(items.map((item) => item.textContent)).toEqual([
+      "Download",
       "Copy full path",
       "Rename",
       "Move to…",
@@ -211,7 +213,7 @@ describe("row action menu", () => {
     ]);
     await waitFor(() => expect(items[0]).toHaveFocus());
     fireEvent.keyDown(menu, { key: "ArrowUp" });
-    expect(items[3]).toHaveFocus();
+    expect(items[4]).toHaveFocus();
 
     fireEvent.keyDown(menu, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
@@ -226,6 +228,7 @@ describe("row action menu", () => {
         entry={entry}
         path="projects/notes.txt"
         copyPath="work/projects/notes.txt"
+        download={{ href: "/download/notes.txt" }}
         writable
         onOperation={onOperation}
       />,
@@ -246,6 +249,7 @@ describe("row action menu", () => {
         entry={entry}
         path="projects/notes.txt"
         copyPath="work/projects/notes.txt"
+        download={{ href: "/download/notes.txt" }}
         writable={false}
         onOperation={onOperation}
       />,
@@ -255,6 +259,65 @@ describe("row action menu", () => {
     );
     expect(
       within(screen.getByRole("menu")).getAllByRole("menuitem"),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+  });
+});
+
+describe("row downloads", () => {
+  it("downloads a file directly with any grant", () => {
+    render(
+      <EntryActionButtons
+        entry={{ name: "notes.txt", kind: "file", size: 5 }}
+        path="projects/notes.txt"
+        copyPath="work/projects/notes.txt"
+        download={{ href: "/download/notes.txt" }}
+        writable={false}
+        onOperation={vi.fn()}
+      />,
+    );
+    const link = screen.getByRole("link", { name: "Download notes.txt" });
+    expect(link).toHaveAttribute("href", "/download/notes.txt");
+    expect(link).toHaveAttribute("data-tooltip", "Download");
+    // A plain link: the browser follows it to the attachment.
+    expect(fireEvent.click(link)).toBe(true);
+    fireEvent.click(
+      screen.getByRole("button", { name: "More actions for notes.txt" }),
+    );
+    expect(
+      screen.getByRole("menuitem", { name: "Download notes.txt" }),
+    ).toHaveAttribute("href", "/download/notes.txt");
+  });
+
+  it("checks a folder's ZIP before downloading it, from the row and the menu", () => {
+    const onArchive = vi.fn();
+    render(
+      <EntryActionButtons
+        entry={{ name: "photos", kind: "directory" }}
+        path="photos"
+        copyPath="work/photos"
+        download={{ href: "/archive/photos", onArchive }}
+        writable={false}
+        onOperation={vi.fn()}
+      />,
+    );
+    const link = screen.getByRole("link", { name: "Download photos as ZIP" });
+    expect(link).toHaveAttribute("href", "/archive/photos");
+    expect(link).toHaveAttribute("data-tooltip", "Download as ZIP");
+    expect(fireEvent.click(link)).toBe(false);
+    expect(onArchive).toHaveBeenCalledTimes(1);
+    // A modified click keeps the browser's own link behavior.
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(true);
+    expect(onArchive).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "More actions for photos" }),
+    );
+    const item = screen.getByRole("menuitem", {
+      name: "Download photos as ZIP",
+    });
+    expect(item).toHaveTextContent("Download as ZIP");
+    fireEvent.click(item);
+    expect(onArchive).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 });

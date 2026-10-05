@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { chooseFiles, csrfToken, dropFiles, openSignedIn } from "./helpers";
@@ -18,16 +20,22 @@ test.describe("writable share operations", () => {
 
     await createEntry(page, "New folder", "Folder name", "e2e-folder");
     await expect(
-      directoryListing(page).getByRole("link", { name: "e2e-folder" }),
+      directoryListing(page).getByRole("link", {
+        name: "e2e-folder",
+        exact: true,
+      }),
     ).toBeVisible();
 
     await createEntry(page, "New file", "File name", "e2e-note.txt");
     await expect(
-      directoryListing(page).getByRole("link", { name: "e2e-note.txt" }),
+      directoryListing(page).getByRole("link", {
+        name: "e2e-note.txt",
+        exact: true,
+      }),
     ).toBeVisible();
 
     await directoryListing(page)
-      .getByRole("link", { name: "e2e-note.txt" })
+      .getByRole("link", { name: "e2e-note.txt", exact: true })
       .click();
     await page.getByRole("button", { name: "Edit e2e-note.txt" }).click();
     const editor = page.getByLabel("UTF-8 text content");
@@ -47,18 +55,24 @@ test.describe("writable share operations", () => {
       .click();
     await moveDialog.getByRole("button", { name: "Move here" }).click();
     await expect(
-      directoryListing(page).getByRole("link", { name: "e2e-note.txt" }),
+      directoryListing(page).getByRole("link", {
+        name: "e2e-note.txt",
+        exact: true,
+      }),
     ).toHaveCount(0);
 
     await directoryListing(page)
-      .getByRole("link", { name: "e2e-folder" })
+      .getByRole("link", { name: "e2e-folder", exact: true })
       .click();
     await expect(
-      directoryListing(page).getByRole("link", { name: "e2e-note.txt" }),
+      directoryListing(page).getByRole("link", {
+        name: "e2e-note.txt",
+        exact: true,
+      }),
     ).toBeVisible();
 
     await directoryListing(page)
-      .getByRole("link", { name: "e2e-note.txt" })
+      .getByRole("link", { name: "e2e-note.txt", exact: true })
       .click();
     await previewAction(page, "e2e-note.txt", "Rename").click();
     const renameDialog = page.getByRole("dialog", {
@@ -107,7 +121,7 @@ test.describe("writable share operations", () => {
     await overwriteDialog.getByRole("button", { name: "Cancel" }).click();
 
     await directoryListing(page)
-      .getByRole("link", { name: "example.toml" })
+      .getByRole("link", { name: "example.toml", exact: true })
       .click();
     await expect(
       page.getByRole("heading", { name: "example.toml" }),
@@ -120,7 +134,10 @@ test.describe("writable share operations", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByText("Moved example.toml to Trash.")).toBeVisible();
     await expect(
-      directoryListing(page).getByRole("link", { name: "example.toml" }),
+      directoryListing(page).getByRole("link", {
+        name: "example.toml",
+        exact: true,
+      }),
     ).toHaveCount(0);
     await expect(
       page.getByRole("heading", { name: "example.toml" }),
@@ -143,7 +160,10 @@ test.describe("writable share operations", () => {
       .getByRole("button", { name: "Move to Trash" })
       .click();
     await expect(
-      directoryListing(page).getByRole("link", { name: "e2e-folder" }),
+      directoryListing(page).getByRole("link", {
+        name: "e2e-folder",
+        exact: true,
+      }),
     ).toHaveCount(0);
 
     await page.goto("/trash");
@@ -185,10 +205,16 @@ test.describe("writable share operations", () => {
     await expect(deletedFolder).toHaveCount(0);
     await page.goto("/writable");
     await expect(
-      directoryListing(page).getByRole("link", { name: "Projects" }),
+      directoryListing(page).getByRole("link", {
+        name: "Projects",
+        exact: true,
+      }),
     ).toBeVisible();
     await expect(
-      directoryListing(page).getByRole("link", { name: "e2e-folder" }),
+      directoryListing(page).getByRole("link", {
+        name: "e2e-folder",
+        exact: true,
+      }),
     ).toBeVisible();
 
     const readOnlyLeak = await page.request.get(
@@ -208,10 +234,12 @@ test.describe("writable share operations", () => {
       competingPage.getByLabel("Shared folders", { exact: true }),
     ).toBeVisible();
 
-    await page.getByRole("link", { name: "README.md" }).click();
+    await page.getByRole("link", { name: "README.md", exact: true }).click();
     await page.getByRole("button", { name: "Edit README.md" }).click();
     await expect(page.getByLabel("UTF-8 text content")).toBeFocused();
-    await competingPage.getByRole("link", { name: "README.md" }).click();
+    await competingPage
+      .getByRole("link", { name: "README.md", exact: true })
+      .click();
     await competingPage.getByRole("button", { name: "Edit README.md" }).click();
     await expect(competingPage.getByLabel("UTF-8 text content")).toBeFocused();
 
@@ -248,7 +276,9 @@ test.describe("writable share operations", () => {
     page,
   }) => {
     await openSignedIn(page, "/writable", "writer");
-    await expect(page.getByRole("link", { name: "README.md" })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "README.md", exact: true }),
+    ).toBeVisible();
     await page.waitForTimeout(500);
 
     const token = await csrfToken(page);
@@ -262,7 +292,7 @@ test.describe("writable share operations", () => {
     );
     expect(created.ok()).toBe(true);
     await expect(
-      page.getByRole("link", { name: "sse-external" }),
+      page.getByRole("link", { name: "sse-external", exact: true }),
     ).toBeVisible();
 
     await entryAction(page, "sse-external", "Delete").click();
@@ -270,9 +300,9 @@ test.describe("writable share operations", () => {
       .getByRole("dialog", { name: "Move sse-external to Trash?" })
       .getByRole("button", { name: "Move to Trash" })
       .click();
-    await expect(page.getByRole("link", { name: "sse-external" })).toHaveCount(
-      0,
-    );
+    await expect(
+      page.getByRole("link", { name: "sse-external", exact: true }),
+    ).toHaveCount(0);
   });
 
   test("wraps a long unbreakable name in the Trash confirmation", async ({
@@ -301,7 +331,7 @@ test.describe("writable share operations", () => {
 
     await dialog.getByRole("button", { name: "Move to Trash" }).click();
     await expect(
-      directoryListing(page).getByRole("link", { name }),
+      directoryListing(page).getByRole("link", { name, exact: true }),
     ).toHaveCount(0);
   });
 
@@ -452,8 +482,12 @@ test.describe("writable share operations", () => {
     await pickerUploads
       .getByRole("button", { name: "Close", exact: true })
       .click();
-    await expect(page.getByRole("link", { name: "dragged.txt" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "picked.txt" })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "dragged.txt", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "picked.txt", exact: true }),
+    ).toBeVisible();
     const readOnlyLeak = await page.request.get(
       "/api/v1/shares/read-only/metadata?path=dragged.txt",
     );
@@ -529,10 +563,10 @@ test.describe("writable share operations", () => {
     page,
   }) => {
     await openSignedIn(page, "/writable", "writer");
-    await page.getByRole("link", { name: "Projects" }).click();
+    await page.getByRole("link", { name: "Projects", exact: true }).click();
     await expect(page).toHaveURL(/\/writable\/Projects$/);
     await expect(
-      page.getByRole("link", { name: "example.toml" }),
+      page.getByRole("link", { name: "example.toml", exact: true }),
     ).toBeVisible();
 
     let releaseUpload!: () => void;
@@ -564,6 +598,77 @@ test.describe("writable share operations", () => {
       "/api/v1/shares/writable/metadata?path=Projects%2Fcancel-on-navigation.txt",
     );
     expect(cancelled.status()).toBe(404);
+  });
+
+  test("selects files with click and Shift-click, downloads them as one ZIP, and moves them to Trash", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/writable", "writer");
+    await chooseFiles(page.getByLabel("Choose files to upload"), [
+      { name: "select-a.txt", mimeType: "text/plain", contents: "first\n" },
+      { name: "select-b.txt", mimeType: "text/plain", contents: "second\n" },
+      { name: "select-c.txt", mimeType: "text/plain", contents: "third\n" },
+    ]);
+    const uploads = page.getByRole("dialog", { name: "Uploads" });
+    await expect(uploadJob(uploads, "select-c.txt")).toContainText("Succeeded");
+    await uploads.getByRole("button", { name: "Close", exact: true }).click();
+
+    const listing = directoryListing(page);
+    const first = listing.getByRole("checkbox", {
+      name: "Select select-a.txt",
+    });
+    const last = listing.getByRole("checkbox", { name: "Select select-c.txt" });
+    const row = listing.getByRole("listitem").filter({
+      has: page.getByRole("checkbox", { name: "Select select-a.txt" }),
+    });
+    // The checkbox takes the icon's place only while the row is hovered.
+    await page.mouse.move(0, 0);
+    await expect(first).toHaveCSS("opacity", "0");
+    await row.hover();
+    await expect(first).toHaveCSS("opacity", "1");
+    await expect(row.locator(".entry-icon")).toBeHidden();
+
+    await first.click();
+    await last.click({ modifiers: ["Shift"] });
+    await expect(page).toHaveURL(/\/writable$/);
+    await expect(
+      listing.getByRole("checkbox", { name: "Select select-b.txt" }),
+    ).toBeChecked();
+    const bar = page.getByRole("toolbar", { name: "Selection actions" });
+    await expect(bar).toContainText("3 selected");
+    // Selection mode shows every row's checkbox.
+    await expect(
+      listing.getByRole("checkbox", { name: "Select README.md" }),
+    ).toHaveCSS("opacity", "1");
+    await last.click();
+    await expect(bar).toContainText("2 selected");
+
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      bar.getByRole("button", { name: "Download as ZIP" }).click(),
+    ]);
+    expect(download.suggestedFilename()).toBe("writable.zip");
+    expect(await download.failure()).toBeNull();
+    const archive = await readFile((await download.path())!);
+    // The selected files sit at the top level, with no folder around them.
+    expect(zipEntryNames(archive)).toEqual(["select-a.txt", "select-b.txt"]);
+
+    await bar.getByRole("button", { name: "Delete" }).click();
+    const confirm = page.getByRole("dialog", {
+      name: "Move 2 items to Trash?",
+    });
+    await confirm.getByRole("button", { name: "Move to Trash" }).click();
+    await expect(page.getByText("Moved 2 items to Trash.")).toBeVisible();
+    await expect(
+      listing.getByRole("link", { name: "select-a.txt", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      listing.getByRole("link", { name: "select-b.txt", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      listing.getByRole("link", { name: "select-c.txt", exact: true }),
+    ).toBeVisible();
+    await expect(bar).toHaveCount(0);
   });
 });
 
@@ -609,4 +714,18 @@ async function readText(page: Page, shareId: string, path: string) {
   const body = (await response.json()) as { text?: unknown };
   expect(typeof body.text).toBe("string");
   return body.text as string;
+}
+
+/** The entry names in a ZIP archive's central directory, in order. */
+function zipEntryNames(archive: Buffer): string[] {
+  const names: string[] = [];
+  let at = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  while (at !== -1 && archive.readUInt32LE(at) === 0x02014b50) {
+    const nameLength = archive.readUInt16LE(at + 28);
+    const extraLength = archive.readUInt16LE(at + 30);
+    const commentLength = archive.readUInt16LE(at + 32);
+    names.push(archive.toString("utf8", at + 46, at + 46 + nameLength));
+    at += 46 + nameLength + extraLength + commentLength;
+  }
+  return names;
 }

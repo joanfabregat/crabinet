@@ -327,13 +327,14 @@ export interface ApiClient {
     signal?: AbortSignal,
   ): Promise<EntryMetadata>;
   /**
-   * Starts a folder archive and cancels it as soon as the server admits it,
-   * so a refusal can be shown in the app before the browser downloads
-   * {@link archiveUrl}. Rejects with the server's error otherwise.
+   * Starts an archive of a folder, a file, or a selection of one folder's
+   * entries (see {@link archiveUrl}) and cancels it as soon as the server
+   * admits it, so a refusal can be shown in the app before the browser
+   * downloads the same URL. Rejects with the server's error otherwise.
    */
   checkArchive(
     shareId: string,
-    path: string,
+    paths: string | readonly string[],
     signal?: AbortSignal,
   ): Promise<void>;
   text(
@@ -633,8 +634,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         await request<unknown>(url, { signal }, true),
       );
     },
-    checkArchive: async (shareId, path, signal) => {
-      const url = archiveUrl(shareId, path);
+    checkArchive: async (shareId, paths, signal) => {
+      const url = archiveUrl(shareId, paths);
       const controller = new AbortController();
       const cancel = () => controller.abort();
       signal?.addEventListener("abort", cancel, { once: true });
@@ -1115,11 +1116,27 @@ export function downloadUrl(shareId: string, path: string): string {
   return fileApiUrl(shareId, path, "download");
 }
 
-/** A ZIP archive of the folder `path`; the empty path is the share root. */
-export function archiveUrl(shareId: string, path: string): string {
-  return path === ""
-    ? `/api/v1/shares/${encodeURIComponent(shareId)}/archive`
-    : fileApiUrl(shareId, path, "archive");
+/** The most entries one archive request may select (server-enforced too). */
+export const maxArchivePaths = 1_000;
+
+/**
+ * A ZIP archive. One path names a folder (the empty path is the share root)
+ * or a single file; several paths name entries of one folder, each at the
+ * archive's top level.
+ */
+export function archiveUrl(
+  shareId: string,
+  paths: string | readonly string[],
+): string {
+  const list = typeof paths === "string" ? [paths] : paths;
+  const base = `/api/v1/shares/${encodeURIComponent(shareId)}/archive`;
+  if (list.length === 1 && list[0] === "") return base;
+  if (list.length === 0 || !list.every(isValidVirtualPath)) {
+    throw new ApiError("invalid-request", "The virtual path is invalid");
+  }
+  const query = new URLSearchParams();
+  for (const path of list) query.append("path", path);
+  return `${base}?${query.toString()}`;
 }
 
 /**

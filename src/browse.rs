@@ -17,7 +17,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{FromRequestParts, State},
+    extract::{FromRequestParts, RawQuery, State},
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -42,8 +42,8 @@ use crate::{
     extract::{ApiPath, ApiQuery},
     filesystem::{
         AccessLevel, ArchiveLimits, AuthorizedShare, DirectoryEntry, EntryKind, EntryMetadata,
-        FsError, FsErrorCode, GlobalPolicy, OwnedAuthorizedShare, ShareFs, ShareGrant, ShareId,
-        VirtualPath,
+        EntryName, FsError, FsErrorCode, GlobalPolicy, OwnedAuthorizedShare, ShareFs, ShareGrant,
+        ShareId, VirtualPath,
     },
     zip::{Crc32, ZipPlan, ZipSource},
 };
@@ -97,11 +97,21 @@ pub(crate) const MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT: usize = 8;
 const MAX_CONCURRENT_ARCHIVES: usize = 4;
 /// Folder archives per authenticated subject.
 const MAX_CONCURRENT_ARCHIVES_PER_SUBJECT: usize = 2;
-/// Total length of the relative paths in one folder archive. While its
-/// layout is built, an archive holds these names twice, the second copy
-/// prefixed with the folder name (at most 256 bytes per entry), so with
+/// Total length of the relative paths in one archive: relative to the
+/// archived folder, or to a selection's directory including the selected
+/// names. While its layout is built, an archive holds these names twice, a
+/// folder archive's second copy prefixed with the folder name (at most 256
+/// bytes per entry), so with
 /// [`MAX_CONCURRENT_ARCHIVES`] name memory peaks at about 42 MiB.
 const MAX_ARCHIVE_NAME_BYTES: usize = 4 * 1024 * 1024;
+/// Paths one archive request may select. Every selected path must already
+/// fit the query length bound below; this caps the per-path work, such as
+/// a no-follow open of each selected entry, independently of name lengths.
+const MAX_ARCHIVE_PATHS: usize = 1_000;
+/// Raw query string length of one archive request, checked before any path
+/// is decoded. A thousand selected names of typical length fit easily; the
+/// HTTP server's own header limit applies before this one.
+const MAX_ARCHIVE_QUERY_BYTES: usize = 256 * 1024;
 
 /// Runs synchronous filesystem work on Tokio's blocking pool so slow disks
 /// or network filesystems never stall the async worker threads.
@@ -1100,47 +1110,142 @@ pub(crate) async fn stream_file(
     Ok(response)
 }
 
-#[derive(Debug, Deserialize)]
-struct ArchiveQuery {
-    path: Option<String>,
+/// What one archive request names, parsed from its repeated `path`
+/// parameters.
+#[derive(Debug, Eq, PartialEq)]
+enum ArchiveRequest {
+    /// No path, or one empty path: the share root as a folder archive.
+    Root,
+    /// One path: a folder archive if it names a folder, otherwise an archive
+    /// of that file alone.
+    Single(VirtualPath),
+    /// Two or more entries of the same directory, each at the top level.
+    Selection {
+        parent: VirtualPath,
+        names: Vec<EntryName>,
+    },
 }
 
-/// Streams a folder as a store-only ZIP archive. The whole folder is walked
-/// and checked against the archive limits before the response starts, so a
-/// refusal is an ordinary error response and an admitted archive carries its
-/// exact `Content-Length`. If the folder changes while it streams, the body
-/// ends with an error, so the client sees a failed transfer rather than a
-/// complete-looking archive.
-async fn download_archive(
-    State(state): State<AppState>,
-    identity: AuthenticatedIdentity,
-    ApiPath(raw_share_id): ApiPath<String>,
-    ApiQuery(query): ApiQuery<ArchiveQuery>,
-) -> Result<Response, AppError> {
-    let browse = state.browse();
-    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
-    let folder = parse_query_path(query.path.as_deref())?;
-    // The lease travels into the walk and then the body stream, so the slot
-    // is released only when the archive is complete or dropped.
-    let lease = Arc::new(browse.acquire_archive(&identity)?);
-    let limits = ArchiveLimits {
-        max_entries: browse.limits.max_archive_entries,
-        max_bytes: browse.limits.max_download_bytes,
-        max_name_bytes: MAX_ARCHIVE_NAME_BYTES,
-    };
-    let walk_share = authorized.clone();
-    let walk_folder = folder.clone();
-    let walk_lease = Arc::clone(&lease);
-    let tree = run_blocking(move || {
-        let _lease = walk_lease;
-        walk_share.view().archive_items(&walk_folder, limits)
-    })
-    .await?
-    .map_err(map_fs_error)?;
+/// Parses an archive query: `path` may repeat, other parameters are ignored
+/// like on every other route. More than one path must name distinct entries
+/// of the same directory. The query length and path count are bounded before
+/// any path is parsed.
+fn parse_archive_query(raw: Option<&str>) -> Result<ArchiveRequest, AppError> {
+    let raw = raw.unwrap_or_default();
+    if raw.len() > MAX_ARCHIVE_QUERY_BYTES {
+        return Err(AppError::TooLarge);
+    }
+    let mut values = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        if key != "path" {
+            continue;
+        }
+        if values.len() == MAX_ARCHIVE_PATHS {
+            return Err(AppError::TooLarge);
+        }
+        values.push(value);
+    }
+    match values.as_slice() {
+        [] => Ok(ArchiveRequest::Root),
+        [only] if only.is_empty() => Ok(ArchiveRequest::Root),
+        [only] => VirtualPath::parse(only)
+            .map(ArchiveRequest::Single)
+            .map_err(map_fs_error),
+        _ => {
+            let mut parent: Option<VirtualPath> = None;
+            let mut names = Vec::with_capacity(values.len());
+            for value in &values {
+                let path = VirtualPath::parse(value).map_err(map_fs_error)?;
+                let (path_parent, name) = path.split_parent().ok_or(AppError::InvalidRequest)?;
+                match &parent {
+                    Some(parent) if *parent != path_parent => {
+                        return Err(AppError::InvalidRequest);
+                    }
+                    Some(_) => {}
+                    None => parent = Some(path_parent),
+                }
+                names.push(name.clone());
+            }
+            let mut sorted: Vec<&EntryName> = names.iter().collect();
+            sorted.sort();
+            if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(AppError::InvalidRequest);
+            }
+            Ok(ArchiveRequest::Selection {
+                parent: parent.ok_or(AppError::InvalidRequest)?,
+                names,
+            })
+        }
+    }
+}
 
+/// A walked archive: its entries in order, how to find each file entry's
+/// virtual path again, and the attachment name.
+struct ArchiveLayout {
+    sources: Vec<ZipSource>,
+    /// Directory the entry names are relative to, after `prefix_len` bytes.
+    base: VirtualPath,
+    prefix_len: usize,
+    filename: String,
+}
+
+/// Walks what `request` names within the limits. A folder archive has the
+/// folder (named after the share at the root) as its one top-level entry; a
+/// single file or a selection puts each selected entry at the top level.
+fn archive_layout(
+    share: &AuthorizedShare<'_>,
+    request: ArchiveRequest,
+    limits: ArchiveLimits,
+) -> Result<ArchiveLayout, FsError> {
+    let (parent, names) = match request {
+        ArchiveRequest::Root => {
+            return folder_layout(share, VirtualPath::root(), limits);
+        }
+        ArchiveRequest::Single(path) => {
+            let is_folder = share.metadata(&path)?.kind == EntryKind::Directory;
+            let split = path
+                .split_parent()
+                .map(|(parent, name)| (parent, name.clone()));
+            match split {
+                Some((parent, name)) if !is_folder => (parent, vec![name]),
+                _ => return folder_layout(share, path, limits),
+            }
+        }
+        ArchiveRequest::Selection { parent, names } => (parent, names),
+    };
+    let items = share.archive_selection(&parent, &names, limits)?;
+    let filename = match names.as_slice() {
+        [only] => only.as_str(),
+        _ => parent
+            .file_name()
+            .map_or_else(|| share.share_id().as_str(), EntryName::as_str),
+    };
+    let filename = format!("{filename}.zip");
+    let sources = items
+        .into_iter()
+        .map(|item| ZipSource {
+            name: item.relative,
+            size: (item.kind == EntryKind::File).then_some(item.size),
+            modified: item.modified,
+        })
+        .collect();
+    Ok(ArchiveLayout {
+        sources,
+        base: parent,
+        prefix_len: 0,
+        filename,
+    })
+}
+
+fn folder_layout(
+    share: &AuthorizedShare<'_>,
+    folder: VirtualPath,
+    limits: ArchiveLimits,
+) -> Result<ArchiveLayout, FsError> {
+    let tree = share.archive_items(&folder, limits)?;
     let root_name = folder
         .file_name()
-        .map_or_else(|| authorized.share_id().as_str(), |name| name.as_str())
+        .map_or_else(|| share.share_id().as_str(), EntryName::as_str)
         .to_owned();
     let mut sources = Vec::with_capacity(tree.items.len() + 1);
     sources.push(ZipSource {
@@ -1153,12 +1258,54 @@ async fn download_archive(
         size: (item.kind == EntryKind::File).then_some(item.size),
         modified: item.modified,
     }));
-    let plan = ZipPlan::new(sources).ok_or(AppError::TooLarge)?;
+    Ok(ArchiveLayout {
+        sources,
+        base: folder,
+        prefix_len: root_name.len() + 1,
+        filename: format!("{root_name}.zip"),
+    })
+}
+
+/// Streams a folder, a file, or a selection of entries of one folder as a
+/// store-only ZIP archive. Everything is walked and checked against the
+/// archive limits before the response starts, so a refusal is an ordinary
+/// error response and an admitted archive carries its exact
+/// `Content-Length`. If an entry changes while it streams, the body ends
+/// with an error, so the client sees a failed transfer rather than a
+/// complete-looking archive.
+async fn download_archive(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    ApiPath(raw_share_id): ApiPath<String>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Response, AppError> {
+    let browse = state.browse();
+    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
+    let request = parse_archive_query(raw_query.as_deref())?;
+    // The lease travels into the walk and then the body stream, so the slot
+    // is released only when the archive is complete or dropped.
+    let lease = Arc::new(browse.acquire_archive(&identity)?);
+    let limits = ArchiveLimits {
+        max_entries: browse.limits.max_archive_entries,
+        max_bytes: browse.limits.max_download_bytes,
+        max_name_bytes: MAX_ARCHIVE_NAME_BYTES,
+    };
+    let walk_share = authorized.clone();
+    let walk_lease = Arc::clone(&lease);
+    let layout = run_blocking(move || {
+        let _lease = walk_lease;
+        archive_layout(&walk_share.view(), request, limits)
+    })
+    .await?
+    .map_err(map_fs_error)?;
+
+    let plan = ZipPlan::new(layout.sources).ok_or(AppError::TooLarge)?;
     let content_length = plan.len();
+    let filename = layout.filename;
     let archive = ArchiveStream {
         share: authorized,
-        folder,
-        prefix_len: root_name.len() + 1,
+        base: layout.base,
+        prefix_len: layout.prefix_len,
         plan,
         state: ArchiveState::Entry(0),
         sent: 0,
@@ -1186,10 +1333,7 @@ async fn download_archive(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/zip"),
     );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        content_disposition(&format!("{root_name}.zip"))?,
-    );
+    headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
     headers.insert(
         header::CONTENT_LENGTH,
         header_value(&content_length.to_string())?,
@@ -1222,9 +1366,13 @@ enum ArchiveState {
 /// Dropping it closes the open file and releases the archive slot.
 struct ArchiveStream {
     share: OwnedAuthorizedShare,
-    folder: VirtualPath,
-    /// Length of the archive's root name and its slash, stripped from an
-    /// entry name to recover the entry's path relative to `folder`.
+    /// Directory every entry name is relative to once `prefix_len` bytes are
+    /// stripped: the archived folder, or the selection's parent directory.
+    /// Entry paths are rebuilt from the planned names instead of being
+    /// stored a second time, so names stay within the documented memory.
+    base: VirtualPath,
+    /// Length of a folder archive's root name and its slash, or zero for a
+    /// selection, whose entry names are already relative to `base`.
     prefix_len: usize,
     plan: ZipPlan,
     state: ArchiveState,
@@ -1316,11 +1464,15 @@ impl ArchiveStream {
     /// Reopens file entry `index` through the share capability, exactly as a
     /// single-file download would, and checks it still has its planned size.
     async fn open(&self, index: usize, size: u64) -> std::io::Result<tokio::fs::File> {
-        let relative = &self.plan.entry_name(index)[self.prefix_len..];
-        let path = if self.folder.is_root() {
+        let relative = self
+            .plan
+            .entry_name(index)
+            .get(self.prefix_len..)
+            .ok_or_else(archive_changed)?;
+        let path = if self.base.is_root() {
             VirtualPath::parse(relative)
         } else {
-            VirtualPath::parse(&format!("{}/{relative}", self.folder))
+            VirtualPath::parse(&format!("{}/{relative}", self.base))
         }
         .map_err(|_| archive_changed())?;
         let share = self.share.clone();
@@ -1341,6 +1493,21 @@ impl ArchiveStream {
 
 fn archive_changed() -> std::io::Error {
     std::io::Error::other("an archived entry changed while streaming")
+}
+
+/// Parses a fuzzer-chosen archive query and checks that an accepted
+/// selection names at least two distinct entries of one directory, within
+/// the path cap.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_archive_query(raw: &str) {
+    if let Ok(ArchiveRequest::Selection { parent, names }) = parse_archive_query(Some(raw)) {
+        assert!((2..=MAX_ARCHIVE_PATHS).contains(&names.len()));
+        let mut distinct = names.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), names.len());
+        assert!(parent.depth() < crate::filesystem::MAX_PATH_DEPTH);
+    }
 }
 
 fn parse_query_path(raw: Option<&str>) -> Result<VirtualPath, AppError> {
@@ -2569,7 +2736,11 @@ mod tests {
         });
         for (query, status, code) in [
             ("", StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
-            ("?path=a.txt", StatusCode::NOT_FOUND, "not_found"),
+            (
+                "?path=missing.txt&path=a.txt",
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
             ("?path=missing", StatusCode::NOT_FOUND, "not_found"),
             (
                 "?path=..%2Fescape",
@@ -2610,6 +2781,346 @@ mod tests {
         for change in ["resize", "remove", "replace with a link"] {
             fs::write(folder.join("entry.txt"), b"1234").expect("archived file");
             let response = archive(&fixture.app, &fixture.identity, "?path=a-directory").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            match change {
+                "resize" => fs::write(folder.join("entry.txt"), b"123456789").expect("resize"),
+                "remove" => fs::remove_file(folder.join("entry.txt")).expect("remove"),
+                _ => {
+                    fs::remove_file(folder.join("entry.txt")).expect("remove");
+                    std::os::unix::fs::symlink(
+                        outside.path().join("secret"),
+                        folder.join("entry.txt"),
+                    )
+                    .expect("link");
+                }
+            }
+            assert!(
+                to_bytes(response.into_body(), usize::MAX).await.is_err(),
+                "{change}"
+            );
+            let _ = fs::remove_file(folder.join("entry.txt"));
+        }
+    }
+
+    fn disposition(response: &Response) -> String {
+        response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn entry_names(response: Response) -> Vec<String> {
+        archive_names(response)
+            .await
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn archive_queries_parse_repeated_paths_of_one_directory() {
+        let path = |value: &str| VirtualPath::parse(value).unwrap();
+        let name = |value: &str| EntryName::new(value.to_owned()).unwrap();
+        assert_eq!(parse_archive_query(None).unwrap(), ArchiveRequest::Root);
+        assert_eq!(
+            parse_archive_query(Some("path=")).unwrap(),
+            ArchiveRequest::Root
+        );
+        assert_eq!(
+            parse_archive_query(Some("path=a%2Fb&other=1")).unwrap(),
+            ArchiveRequest::Single(path("a/b"))
+        );
+        assert_eq!(
+            parse_archive_query(Some("path=a%2Fz&path=a%2Fb+c")).unwrap(),
+            ArchiveRequest::Selection {
+                parent: path("a"),
+                names: vec![name("z"), name("b c")],
+            }
+        );
+        assert_eq!(
+            parse_archive_query(Some("path=x&path=y")).unwrap(),
+            ArchiveRequest::Selection {
+                parent: VirtualPath::root(),
+                names: vec![name("x"), name("y")],
+            }
+        );
+        for (query, expected) in [
+            // Mixed parents, including a folder and an entry inside it.
+            ("path=a%2Fb&path=c", AppError::InvalidRequest),
+            ("path=a&path=a%2Fb", AppError::InvalidRequest),
+            // Duplicates, also after percent decoding.
+            ("path=a&path=a", AppError::InvalidRequest),
+            ("path=a&path=%61", AppError::InvalidRequest),
+            // The share root cannot be part of a selection.
+            ("path=&path=a", AppError::InvalidRequest),
+            ("path=a&path=", AppError::InvalidRequest),
+            ("path=..%2Fa&path=b", AppError::InvalidRequest),
+            ("path=a%2F..", AppError::InvalidRequest),
+        ] {
+            assert_eq!(
+                parse_archive_query(Some(query)).unwrap_err().to_string(),
+                expected.to_string(),
+                "{query}"
+            );
+        }
+        let at_limit: Vec<_> = (0..MAX_ARCHIVE_PATHS)
+            .map(|n| format!("path={n}"))
+            .collect();
+        assert!(matches!(
+            parse_archive_query(Some(&at_limit.join("&"))).unwrap(),
+            ArchiveRequest::Selection { names, .. } if names.len() == MAX_ARCHIVE_PATHS
+        ));
+        let over_limit = format!("{}&path=extra", at_limit.join("&"));
+        assert!(matches!(
+            parse_archive_query(Some(&over_limit)),
+            Err(AppError::TooLarge)
+        ));
+        let long = format!("path={}", "a".repeat(MAX_ARCHIVE_QUERY_BYTES));
+        assert!(matches!(
+            parse_archive_query(Some(&long)),
+            Err(AppError::TooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn selection_archives_put_each_selected_entry_at_the_top_level() {
+        let fixture = fixture(BrowseLimits::default());
+        let root = fixture._root.path();
+        fs::create_dir(root.join("a-directory/inner")).expect("nested directory");
+        let large = vec![7_u8; 200_000];
+        fs::write(root.join("a-directory/inner/b.bin"), &large).expect("large file");
+        fs::write(root.join("a-directory/c.txt"), b"see").expect("small file");
+        fs::write(root.join("a-directory/d.txt"), b"dee").expect("unselected file");
+
+        // Several files of the share root: named after the share.
+        let response = archive(
+            &fixture.app,
+            &fixture.identity,
+            "?path=page.html&path=a.txt",
+        )
+        .await;
+        assert_eq!(
+            disposition(&response),
+            "attachment; filename=\"documents.zip\"; filename*=UTF-8''documents.zip"
+        );
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+        assert_eq!(
+            archive_names(response).await,
+            [
+                ("a.txt".to_owned(), Some(b"abcdef".to_vec())),
+                (
+                    "page.html".to_owned(),
+                    Some(b"<script>window.evil=true</script>".to_vec())
+                ),
+            ]
+        );
+
+        // Files and folders of a subfolder: named after that folder, with no
+        // wrapping root entry.
+        let response = archive(
+            &fixture.app,
+            &fixture.identity,
+            "?path=a-directory%2Finner&path=a-directory%2Fc.txt",
+        )
+        .await;
+        assert_eq!(
+            disposition(&response),
+            "attachment; filename=\"a-directory.zip\"; filename*=UTF-8''a-directory.zip"
+        );
+        assert_eq!(
+            archive_names(response).await,
+            [
+                ("c.txt".to_owned(), Some(b"see".to_vec())),
+                ("inner/".to_owned(), None),
+                ("inner/b.bin".to_owned(), Some(large)),
+            ]
+        );
+
+        // One file: an archive of just that file, named after it.
+        let response = archive(&fixture.app, &fixture.identity, "?path=a-directory%2Fc.txt").await;
+        assert_eq!(
+            disposition(&response),
+            "attachment; filename=\"c.txt.zip\"; filename*=UTF-8''c.txt.zip"
+        );
+        assert_eq!(
+            archive_names(response).await,
+            [("c.txt".to_owned(), Some(b"see".to_vec()))]
+        );
+
+        // One folder keeps the folder archive layout.
+        let response = archive(&fixture.app, &fixture.identity, "?path=a-directory%2Finner").await;
+        assert_eq!(
+            disposition(&response),
+            "attachment; filename=\"inner.zip\"; filename*=UTF-8''inner.zip"
+        );
+        assert_eq!(entry_names(response).await, ["inner/", "inner/b.bin"]);
+
+        // A read-only grant may archive a selection.
+        let reader = AuthenticatedIdentity::new(
+            "reader",
+            vec![ShareGrant {
+                share_id: fixture.grant.share_id.clone(),
+                access: AccessLevel::ReadOnly,
+            }],
+        );
+        let response = archive(&fixture.app, &reader, "?path=a.txt&path=a-directory").await;
+        assert_eq!(
+            entry_names(response).await,
+            [
+                "a-directory/",
+                "a-directory/c.txt",
+                "a-directory/d.txt",
+                "a-directory/inner/",
+                "a-directory/inner/b.bin",
+                "a.txt",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn selection_archives_refuse_before_streaming() {
+        let fixture = fixture(BrowseLimits::default());
+        let root = fixture._root.path();
+        std::os::unix::fs::symlink(root.join("a.txt"), root.join("link.txt")).expect("link");
+        let too_many = (0..=MAX_ARCHIVE_PATHS)
+            .map(|n| format!("path={n}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let too_many = format!("?{too_many}");
+        for (query, status, code) in [
+            (
+                "?path=a.txt&path=a-directory%2Fx",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "?path=a-directory&path=a-directory%2Fx",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "?path=a.txt&path=a.txt",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                "?path=a.txt&path=",
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                too_many.as_str(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+            ),
+            (
+                "?path=a.txt&path=missing",
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                "?path=a.txt&path=link.txt",
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            ("?path=link.txt", StatusCode::NOT_FOUND, "not_found"),
+            (
+                "?path=missing%2Fa&path=missing%2Fb",
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+        ] {
+            let response = archive(&fixture.app, &fixture.identity, query).await;
+            assert_eq!(response.status(), status, "{query}");
+            assert_eq!(json(response).await["error"]["code"], code, "{query}");
+        }
+
+        // An ungranted share is indistinguishable from a missing one.
+        let stranger = AuthenticatedIdentity::new("stranger", Vec::new());
+        let response = archive(&fixture.app, &stranger, "?path=a.txt&path=page.html").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json(response).await["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn selection_archive_limits_are_shared_across_selected_entries() {
+        // a.txt is six bytes, invalid.txt two, and page.html thirty-three.
+        let bytes = fixture(BrowseLimits {
+            max_download_bytes: 8,
+            ..BrowseLimits::default()
+        });
+        let response = archive(&bytes.app, &bytes.identity, "?path=a.txt&path=invalid.txt").await;
+        assert_eq!(
+            archive_names(response).await.len(),
+            2,
+            "exactly at the limit"
+        );
+        let response = archive(
+            &bytes.app,
+            &bytes.identity,
+            "?path=a.txt&path=invalid.txt&path=a-directory",
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "an empty folder adds no bytes"
+        );
+        fs::write(bytes._root.path().join("a-directory/one"), b"1").expect("one byte");
+        let response = archive(
+            &bytes.app,
+            &bytes.identity,
+            "?path=a.txt&path=invalid.txt&path=a-directory",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Each selected entry and each entry beneath a selected folder is
+        // scanned once.
+        let entries = fixture(BrowseLimits {
+            max_archive_entries: 3,
+            ..BrowseLimits::default()
+        });
+        fs::write(entries._root.path().join("a-directory/one"), b"1").expect("file");
+        let response = archive(
+            &entries.app,
+            &entries.identity,
+            "?path=a.txt&path=a-directory",
+        )
+        .await;
+        assert_eq!(archive_names(response).await.len(), 3);
+        fs::write(entries._root.path().join("a-directory/two"), b"2").expect("file");
+        let response = archive(
+            &entries.app,
+            &entries.identity,
+            "?path=a.txt&path=a-directory",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = archive(
+            &entries.app,
+            &entries.identity,
+            "?path=a.txt&path=invalid.txt&path=page.html&path=a-directory",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn selection_archives_abort_when_a_selected_file_changes_while_streaming() {
+        let fixture = fixture(BrowseLimits::default());
+        let folder = fixture._root.path().join("a-directory");
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("secret"), b"WXYZ").expect("outside file");
+        fs::write(folder.join("kept.txt"), b"kept").expect("other selected file");
+        for change in ["resize", "remove", "replace with a link"] {
+            fs::write(folder.join("entry.txt"), b"1234").expect("archived file");
+            let response = archive(
+                &fixture.app,
+                &fixture.identity,
+                "?path=a-directory%2Fkept.txt&path=a-directory%2Fentry.txt",
+            )
+            .await;
             assert_eq!(response.status(), StatusCode::OK);
             match change {
                 "resize" => fs::write(folder.join("entry.txt"), b"123456789").expect("resize"),

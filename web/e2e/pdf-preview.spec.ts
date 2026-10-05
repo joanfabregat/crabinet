@@ -34,7 +34,7 @@ test("a PDF previews its first page with pdf.js under the application CSP", asyn
   });
 
   await openSignedIn(page);
-  await page.getByRole("link", { name: "text.pdf" }).click();
+  await page.getByRole("link", { name: "text.pdf", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "text.pdf", level: 2 }),
   ).toBeFocused();
@@ -43,10 +43,12 @@ test("a PDF previews its first page with pdf.js under the application CSP", asyn
   await expect(firstPage).toBeVisible();
   await expect(page.getByText("Loading the first page…")).toHaveCount(0);
   await expect(
-    page.getByRole("link", { name: "Open text.pdf in a new tab" }),
+    page.getByRole("link", { name: "Open text.pdf in a new tab", exact: true }),
   ).toHaveAttribute("href", "/api/v1/shares/read-only/open?path=text.pdf");
   await expect(
-    page.getByRole("link", { name: "Download text.pdf" }),
+    page
+      .getByRole("complementary", { name: "text.pdf" })
+      .getByRole("link", { name: "Download text.pdf", exact: true }),
   ).toBeVisible();
 
   // Page 1 of the fixture has a red band across its top; page 2 is a blue

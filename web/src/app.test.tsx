@@ -2796,3 +2796,257 @@ describe("security review regressions", () => {
     ).toBeDisabled();
   });
 });
+
+describe("selecting entries", () => {
+  const listing: DirectoryPage = {
+    shareId: "work",
+    path: "projects",
+    entries: [
+      { name: "drafts", kind: "directory" },
+      { name: "a.txt", kind: "file", size: 1 },
+      { name: "b.txt", kind: "file", size: 2 },
+      { name: "c.txt", kind: "file", size: 3 },
+    ],
+  };
+
+  function renderSelection(
+    overrides: Partial<ApiClient> = {},
+    route: BrowserRoute = { shareId: "work", path: "projects" },
+  ) {
+    const navigation = new MemoryNavigation(route);
+    const directory =
+      overrides.directory ??
+      vi.fn(async (shareId: string, path: string) => ({
+        ...listing,
+        shareId,
+        path,
+      }));
+    render(
+      <App
+        api={fakeApi({ ...overrides, directory })}
+        navigation={navigation}
+      />,
+    );
+    return navigation;
+  }
+
+  const checkbox = (name: string) =>
+    screen.getByRole("checkbox", { name: `Select ${name}` });
+
+  it("puts each row's checkbox in place of its icon and selects without navigating", async () => {
+    const navigation = renderSelection();
+    await screen.findByRole("link", { name: "a.txt" });
+    const box = checkbox("a.txt");
+    // The checkbox shares the icon's cell, one per row.
+    const cell = box.closest(".entry-select");
+    expect(cell?.querySelector(".entry-icon")).not.toBeNull();
+    expect(
+      screen.queryByRole("toolbar", { name: "Selection actions" }),
+    ).toBeNull();
+    const visits = navigation.visits.length;
+
+    fireEvent.click(box);
+    expect(box).toBeChecked();
+    expect(navigation.visits).toHaveLength(visits);
+    expect(document.querySelector(".has-preview")).toBeNull();
+    const bar = screen.getByRole("toolbar", { name: "Selection actions" });
+    expect(bar).toHaveTextContent("1 selected");
+    // The bar sits above the list; the heading keeps its own actions.
+    expect(bar.nextElementSibling).toHaveClass("entry-list");
+    expect(bar.nextElementSibling).toHaveClass("has-checked");
+    expect(
+      screen.getByRole("link", { name: "Download projects as ZIP" }),
+    ).toBeVisible();
+
+    // Shift-click selects the range from the last toggled row.
+    fireEvent.click(checkbox("c.txt"), { shiftKey: true });
+    expect(checkbox("b.txt")).toBeChecked();
+    expect(checkbox("drafts")).not.toBeChecked();
+    expect(bar).toHaveTextContent("3 selected");
+    // And backward, from the new anchor.
+    fireEvent.click(checkbox("drafts"), { shiftKey: true });
+    expect(bar).toHaveTextContent("4 selected");
+    expect(
+      within(bar).getByRole("checkbox", { name: "Select all" }),
+    ).toBeChecked();
+
+    fireEvent.click(within(bar).getByRole("checkbox", { name: "Select all" }));
+    expect(
+      screen.queryByRole("toolbar", { name: "Selection actions" }),
+    ).toBeNull();
+
+    fireEvent.click(checkbox("b.txt"));
+    fireEvent.keyDown(checkbox("b.txt"), { key: "Escape" });
+    expect(checkbox("b.txt")).not.toBeChecked();
+    expect(
+      screen.queryByRole("toolbar", { name: "Selection actions" }),
+    ).toBeNull();
+  });
+
+  it("downloads the selection as one ZIP of its paths", async () => {
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const checkArchive = vi.fn(async () => undefined);
+    renderSelection({ checkArchive });
+    await screen.findByRole("link", { name: "a.txt" });
+    fireEvent.click(checkbox("drafts"));
+    fireEvent.click(checkbox("b.txt"));
+    const bar = screen.getByRole("toolbar", { name: "Selection actions" });
+    fireEvent.click(
+      within(bar).getByRole("button", { name: "Download as ZIP" }),
+    );
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(checkArchive).toHaveBeenCalledWith("work", [
+      "projects/drafts",
+      "projects/b.txt",
+    ]);
+    expect(click.mock.contexts[0]).toHaveAttribute(
+      "href",
+      "/api/v1/shares/work/archive?path=projects%2Fdrafts&path=projects%2Fb.txt",
+    );
+    click.mockRestore();
+  });
+
+  it("offers row downloads and no bulk Delete on a read-only share", async () => {
+    renderSelection({}, { shareId: "read-only", path: "projects" });
+    await screen.findByRole("link", { name: "a.txt" });
+    expect(
+      within(screen.getByLabelText("Actions for a.txt")).getByRole("link", {
+        name: "Download a.txt",
+      }),
+    ).toHaveAttribute(
+      "href",
+      "/api/v1/shares/read-only/download?path=projects%2Fa.txt",
+    );
+    expect(
+      within(screen.getByLabelText("Actions for drafts")).getByRole("link", {
+        name: "Download drafts as ZIP",
+      }),
+    ).toHaveAttribute(
+      "href",
+      "/api/v1/shares/read-only/archive?path=projects%2Fdrafts",
+    );
+    fireEvent.click(checkbox("a.txt"));
+    const bar = screen.getByRole("toolbar", { name: "Selection actions" });
+    expect(within(bar).queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(
+      within(bar).getByRole("button", { name: "Download as ZIP" }),
+    ).toBeVisible();
+  });
+
+  it("clears the selection on navigation and drops entries that disappear", async () => {
+    let entries = listing.entries;
+    const directory = vi.fn(async (shareId: string, path: string) => ({
+      shareId,
+      path,
+      entries,
+    }));
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
+      async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+        trashId: "trash-1",
+      }),
+    );
+    const navigation = renderSelection({ directory, deleteEntry });
+    await screen.findByRole("link", { name: "a.txt" });
+    fireEvent.click(checkbox("a.txt"));
+    fireEvent.click(checkbox("c.txt"));
+
+    // Deleting c.txt on its own refreshes the listing without it.
+    entries = listing.entries.filter((entry) => entry.name !== "c.txt");
+    fireEvent.click(
+      within(screen.getByLabelText("Actions for c.txt")).getByRole("button", {
+        name: "Delete c.txt",
+      }),
+    );
+    await confirmMoveToTrash();
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "c.txt" })).toBeNull(),
+    );
+    expect(
+      screen.getByRole("toolbar", { name: "Selection actions" }),
+    ).toHaveTextContent("1 selected");
+
+    navigation.go({ shareId: "work", path: "projects/drafts" });
+    await screen.findByRole("heading", { name: "drafts" });
+    navigation.go({ shareId: "work", path: "projects" });
+    await screen.findByRole("heading", { name: "projects" });
+    await screen.findByRole("link", { name: "a.txt" });
+    expect(checkbox("a.txt")).not.toBeChecked();
+    expect(
+      screen.queryByRole("toolbar", { name: "Selection actions" }),
+    ).toBeNull();
+  });
+
+  it("moves the selection to Trash after one confirmation and reports partial failures", async () => {
+    let entries = listing.entries;
+    const directory = vi.fn(async (shareId: string, path: string) => ({
+      shareId,
+      path,
+      entries,
+    }));
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
+      async (shareId, path) => {
+        if (path === "projects/b.txt")
+          throw new ApiError("conflict", "changed", { status: 409 });
+        entries = entries.filter((entry) => `projects/${entry.name}` !== path);
+        return {
+          shareId,
+          path,
+          outcome: "success" as const,
+          trashId: `trash-${path}`,
+        };
+      },
+    );
+    const restoreTrash = vi.fn<ApiClient["restoreTrash"]>(
+      async () => undefined,
+    );
+    renderSelection({ directory, deleteEntry, restoreTrash });
+    await screen.findByRole("link", { name: "a.txt" });
+    fireEvent.click(checkbox("a.txt"));
+    fireEvent.click(checkbox("c.txt"), { shiftKey: true });
+    fireEvent.click(
+      within(
+        screen.getByRole("toolbar", { name: "Selection actions" }),
+      ).getByRole("button", { name: "Delete" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Move 3 items to Trash?",
+    });
+    expect(deleteEntry).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Move to Trash" }),
+    );
+    await waitFor(() => expect(deleteEntry).toHaveBeenCalledTimes(3));
+    expect(deleteEntry.mock.calls.map((call) => call[1])).toEqual([
+      "projects/a.txt",
+      "projects/b.txt",
+      "projects/c.txt",
+    ]);
+    expect(deleteEntry.mock.calls[0]?.[3]).toBe("csrf-in-memory");
+    expect(
+      await screen.findByText(
+        "Moved 2 of 3 items to Trash. 1 could not be moved.",
+      ),
+    ).toBeVisible();
+    // The item that failed stays selected, so it can be retried.
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "a.txt" })).toBeNull(),
+    );
+    expect(checkbox("b.txt")).toBeChecked();
+    expect(
+      screen.getByRole("toolbar", { name: "Selection actions" }),
+    ).toHaveTextContent("1 selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(restoreTrash).toHaveBeenCalledTimes(2));
+    expect(restoreTrash.mock.calls.map((call) => call[1])).toEqual([
+      "trash-projects/a.txt",
+      "trash-projects/c.txt",
+    ]);
+    expect(await screen.findByText("Restored 2 items.")).toBeVisible();
+  });
+});
