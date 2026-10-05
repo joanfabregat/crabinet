@@ -599,6 +599,39 @@ describe("API client", () => {
     );
   });
 
+  it("accepts the head of a large SVG and a renderable large HTML head", async () => {
+    const svg = {
+      kind: "svg",
+      source: "<svg/>\n",
+      language: "xml",
+      size: 900,
+      truncated: true,
+      shownBytes: 7,
+      shownLines: 1,
+      openable: true,
+      renderable: false,
+    };
+    const html = {
+      kind: "html_source",
+      source: "<p>x</p>\n",
+      language: "html",
+      size: 30_000_000,
+      truncated: true,
+      shownBytes: 9,
+      shownLines: 1,
+      openable: true,
+      renderable: true,
+    };
+    for (const body of [svg, html]) {
+      const fetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValue(Response.json(body));
+      await expect(
+        createApiClient({ fetch }).preview("docs", "file"),
+      ).resolves.toEqual(body);
+    }
+  });
+
   it("counts lines like the server, including a final line without a feed", () => {
     expect(countLines("")).toBe(0);
     expect(countLines("a")).toBe(1);
@@ -726,7 +759,7 @@ describe("API client", () => {
       shownBytes: 64 * 1024 + 1,
       shownLines: 1,
     },
-    // Streamed kinds and SVG are never heads; SVG is always XML.
+    // Streamed kinds are never heads; SVG is always XML.
     {
       kind: "pdf",
       source: "",
@@ -736,16 +769,32 @@ describe("API client", () => {
       shownBytes: 0,
       shownLines: 0,
     },
+    { kind: "svg", source: "<svg/>", size: 6, truncated: false },
+    // Only HTML renders, and only with a boolean.
     {
       kind: "svg",
-      source: "<svg/>\n",
+      source: "<svg/>",
       language: "xml",
-      size: 900,
-      truncated: true,
-      shownBytes: 7,
-      shownLines: 1,
+      size: 6,
+      truncated: false,
+      renderable: true,
     },
-    { kind: "svg", source: "<svg/>", size: 6, truncated: false },
+    {
+      kind: "markdown_source",
+      source: "# x",
+      language: "markdown",
+      size: 3,
+      truncated: false,
+      renderable: true,
+    },
+    {
+      kind: "html_source",
+      source: "<p>",
+      language: "html",
+      size: 3,
+      truncated: false,
+      renderable: "yes",
+    },
     {
       kind: "svg",
       source: "<svg/>",

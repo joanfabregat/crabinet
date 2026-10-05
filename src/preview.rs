@@ -9,7 +9,7 @@
 //! The inline open route serves a file in a new tab only when its bytes match
 //! a type the browser displays without running script on this origin: raster
 //! images, PDF, allowlisted audio and video containers, a content-detected SVG
-//! document within the preview limit (as `image/svg+xml` under the sandboxed
+//! document within the render limit (as `image/svg+xml` under the sandboxed
 //! CSP, which runs no script), and UTF-8 text, which is always `text/plain`.
 //! The type comes from the bytes, never from the filename or an uploaded
 //! `Content-Type`.
@@ -44,6 +44,13 @@ use crate::{
 /// value. It bounds only previews that buffer the whole file (text, code,
 /// Markdown, and HTML); streamed types are bounded by the download limit.
 pub const HARD_MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+/// The default largest HTML file rendered and SVG shown as an image. Both
+/// stream from the file handle, so this bounds the work a reader's browser is
+/// handed, not server memory.
+pub const DEFAULT_MAX_RENDER_BYTES: u64 = 32 * 1024 * 1024;
+/// The render limit's ceiling, the download size cap that bounds every
+/// streamed response.
+pub const HARD_MAX_RENDER_BYTES: u64 = 1024 * 1024 * 1024;
 /// The bounded prefix every preview and inline open reads to classify a file
 /// by signature, and the prefix the open route checks for UTF-8 text.
 const SIGNATURE_HEADER_BYTES: u64 = 64 * 1024;
@@ -66,6 +73,7 @@ const SVG_MIME_TYPE: &str = "image/svg+xml";
 const PREVIEW_CSP: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
     base-uri 'none'; form-action 'none'; frame-ancestors 'self'; navigate-to 'none'";
 const TEXT_PLAIN_UTF8: &str = "text/plain; charset=utf-8";
+const HTML_UTF8: &str = "text/html; charset=utf-8";
 const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), display-capture=(), \
     encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), \
     idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), \
@@ -83,8 +91,9 @@ pub enum PreviewKind {
     Pdf,
     /// A TIFF-based camera RAW file, shown only through its thumbnail.
     Raw,
-    /// A complete SVG document, detected from its content, within the
-    /// preview limit: its source plus an image view from `/preview/svg`.
+    /// An SVG document, detected from its content, within the render limit:
+    /// its source (a head above the preview limit) plus an image view of the
+    /// whole file from `/preview/svg`.
     Svg,
     Text,
     Video,
@@ -118,6 +127,9 @@ pub struct PreviewDocument {
     /// `text/plain`). Audio and video stream from `/open` into the panel's
     /// media elements only.
     pub openable: bool,
+    /// Whether `/preview/html/rendered` renders this file: an `html_source`
+    /// document, whole or a head, whose file is within the render limit.
+    pub renderable: bool,
     /// Whether the panel shows this file through `/thumbnail`: PNG and JPEG
     /// images, still GIF and WebP images, and RAW files with an embedded
     /// JPEG preview. An animated GIF or WebP is `false`, so the panel shows
@@ -129,21 +141,61 @@ pub struct PreviewDocument {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreviewPolicy {
     max_bytes: u64,
+    max_render_bytes: u64,
 }
 
 impl PreviewPolicy {
+    /// A policy with the given buffered preview limit and the default
+    /// render limit, or the preview limit when that is larger.
     pub fn new(configured_max_bytes: u64) -> Result<Self, PreviewError> {
         if configured_max_bytes == 0 || configured_max_bytes > HARD_MAX_PREVIEW_BYTES {
             return Err(PreviewError::InvalidLimit);
         }
         Ok(Self {
             max_bytes: configured_max_bytes,
+            max_render_bytes: DEFAULT_MAX_RENDER_BYTES.max(configured_max_bytes),
         })
+    }
+
+    /// Sets the largest HTML file rendered and the largest SVG shown as an
+    /// image. It is never below the preview limit, since every whole
+    /// document renders, and never above [`HARD_MAX_RENDER_BYTES`].
+    pub fn with_max_render_bytes(
+        self,
+        configured_max_render_bytes: u64,
+    ) -> Result<Self, PreviewError> {
+        if configured_max_render_bytes < self.max_bytes
+            || configured_max_render_bytes > HARD_MAX_RENDER_BYTES
+        {
+            return Err(PreviewError::InvalidLimit);
+        }
+        Ok(Self {
+            max_render_bytes: configured_max_render_bytes,
+            ..self
+        })
+    }
+
+    /// Lowers the render limit to `cap` when that is smaller.
+    #[must_use]
+    const fn with_render_cap(self, cap: u64) -> Self {
+        Self {
+            max_render_bytes: if cap < self.max_render_bytes {
+                cap
+            } else {
+                self.max_render_bytes
+            },
+            ..self
+        }
     }
 
     #[must_use]
     pub const fn max_bytes(self) -> u64 {
         self.max_bytes
+    }
+
+    #[must_use]
+    pub const fn max_render_bytes(self) -> u64 {
+        self.max_render_bytes
     }
 }
 
@@ -151,6 +203,7 @@ impl Default for PreviewPolicy {
     fn default() -> Self {
         Self {
             max_bytes: 1024 * 1024,
+            max_render_bytes: DEFAULT_MAX_RENDER_BYTES,
         }
     }
 }
@@ -315,21 +368,74 @@ pub fn router() -> Router<AppState> {
         .route("/shares/{share_id}/open", get(open_inline))
 }
 
-/// Serves a complete SVG document as `image/svg+xml` for the panel's `<img>`.
+/// Serves a whole SVG document as `image/svg+xml` for the panel's `<img>`.
 ///
-/// The document is loaded through the buffered preview path, so it is bounded
-/// by the preview limit and validated as UTF-8 text whose root element is
-/// `<svg>` in the SVG namespace. A file above the limit is refused rather than
-/// rendered from a partial document.
+/// The file must be UTF-8 text whose 64 KiB header is an SVG document (see
+/// [`is_svg_document`]), and it must be within the render limit; a larger one
+/// is refused rather than drawn from a partial document. The exact bytes
+/// stream from the handle that was classified, under a download slot like
+/// `/preview/image`, so memory is bounded by the chunk size, not the file.
 async fn preview_svg(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
     ApiPath(raw_share_id): ApiPath<String>,
     ApiQuery(query): ApiQuery<PreviewQuery>,
 ) -> Result<Response, PreviewRequestError> {
-    let (document, _permit) =
-        request_document(&state, &identity, &raw_share_id, query.path.as_deref()).await?;
-    svg_image_response(document).map_err(Into::into)
+    let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
+    let raw_path = query.path.as_deref().ok_or(PreviewError::InvalidPath)?;
+    let path = VirtualPath::parse(raw_path).map_err(|error| PreviewError::from(error.code()))?;
+    let browse = state.browse();
+    let authorized = browse.authorize_owned(&identity, &share_id)?;
+    let max_bytes = render_limit(&state);
+    // The same slot discipline as `preview_image`: taken before the open,
+    // moved through the blocking work, and then held by the body stream.
+    let lease = browse.acquire_download(&identity)?;
+    let (opened, lease) = run_blocking(move || {
+        (
+            open_streamed_text(&authorized.view(), &path).and_then(|mut text| {
+                if !text.svg {
+                    return Err(PreviewError::UnsupportedEntry);
+                }
+                if text.size > max_bytes {
+                    return Err(PreviewError::TooLarge);
+                }
+                text.file
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|_| PreviewError::Unavailable)?;
+                Ok(text)
+            }),
+            lease,
+        )
+    })
+    .await?;
+    let opened = opened?;
+    let stream = ReaderStream::with_capacity(
+        tokio::fs::File::from_std(opened.file).take(opened.size),
+        IMAGE_STREAM_CHUNK_BYTES,
+    )
+    .map(move |chunk| {
+        let _lease = &lease;
+        chunk
+    });
+    Ok(image_response(
+        Body::from_stream(stream),
+        SVG_MIME_TYPE,
+        opened.size,
+    ))
+}
+
+/// The configured policy with its render limit kept within the download size
+/// cap every streamed response shares, so the JSON preview and the streaming
+/// routes agree on what renders.
+fn effective_policy(state: &AppState) -> PreviewPolicy {
+    state
+        .preview_policy()
+        .with_render_cap(state.browse().max_download_bytes())
+}
+
+/// The largest HTML file rendered and SVG shown as an image.
+fn render_limit(state: &AppState) -> u64 {
+    effective_policy(state).max_render_bytes()
 }
 
 async fn preview_json(
@@ -354,6 +460,16 @@ async fn preview_html_source(
     html_source_response(document).map_err(Into::into)
 }
 
+/// Serves uploaded HTML as a sandboxed document for the UI's doubly-sandboxed
+/// iframe. The response CSP forbids scripts, forms, same-origin access, network
+/// requests, plugins, and storage capabilities wherever the document loads; the
+/// route also refuses top-level loads from browsers that report one, because
+/// only the iframe sandbox stops the document navigating its own tab.
+///
+/// The file streams whole from the validated handle, with the validators,
+/// conditional requests, and single byte ranges of `/open`, so a document up
+/// to the render limit costs the server a chunk of memory, not its size. A
+/// larger file is `413`: a head is never rendered.
 async fn preview_html_rendered(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
@@ -364,9 +480,115 @@ async fn preview_html_rendered(
     if !rendered_destination_allowed(&headers) {
         return Ok(frame_only_response());
     }
-    let (document, _permit) =
-        request_document(&state, &identity, &raw_share_id, query.path.as_deref()).await?;
-    html_rendered_response(document).map_err(Into::into)
+    let share_id = ShareId::new(raw_share_id).map_err(|_| AppError::NotFound)?;
+    let raw_path = query.path.as_deref().ok_or(PreviewError::InvalidPath)?;
+    let path = VirtualPath::parse(raw_path).map_err(|error| PreviewError::from(error.code()))?;
+    let browse = state.browse();
+    let authorized = browse.authorize_owned(&identity, &share_id)?;
+    let max_bytes = render_limit(&state);
+    // The document streams in chunks like `/open`, so it takes a download
+    // slot, held by the body, rather than a buffered-read permit.
+    let lease = browse.acquire_download(&identity)?;
+    let open_path = path.clone();
+    let (opened, lease) = run_blocking(move || {
+        (
+            open_rendered_html(&authorized.view(), &open_path, max_bytes),
+            lease,
+        )
+    })
+    .await?;
+    let opened = opened?;
+    let etag = browse.file_etag(
+        &share_id,
+        &path,
+        opened.size,
+        opened.modified,
+        opened.file_id,
+    );
+    let file = StreamedFile {
+        file: opened.file,
+        total_len: opened.size,
+        etag,
+    };
+    let mut response = stream_file(
+        &headers,
+        file,
+        browse.stream_chunk_bytes(),
+        lease,
+        |response_headers| {
+            response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(HTML_UTF8));
+            response_headers.insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("inline"),
+            );
+            Ok(())
+        },
+    )
+    .await?;
+    apply_security_headers(response.headers_mut());
+    Ok(response)
+}
+
+/// Opens an HTML file for rendering on a blocking thread.
+///
+/// The checks are the buffered preview's, on the same 64 KiB header: a
+/// streamed signature, binary content, or invalid UTF-8 is `415`, as is a
+/// file whose extension is not HTML or whose content is an SVG document. Only
+/// then is a file above `max_bytes` refused with `413`. A document is never
+/// rendered from its head: within the limit it streams whole.
+fn open_rendered_html(
+    share: &AuthorizedShare<'_>,
+    path: &VirtualPath,
+    max_bytes: u64,
+) -> Result<StreamedText, PreviewError> {
+    let text = open_streamed_text(share, path)?;
+    if classify(path).0 != PreviewKind::HtmlSource || text.svg {
+        return Err(PreviewError::UnsupportedEntry);
+    }
+    if text.size > max_bytes {
+        return Err(PreviewError::TooLarge);
+    }
+    Ok(text)
+}
+
+/// A text file opened to stream whole, classified from its header.
+struct StreamedText {
+    file: std::fs::File,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    file_id: u64,
+    /// Whether the header is an SVG document.
+    svg: bool,
+}
+
+/// Opens a file and applies the text-preview rules to its bounded header: a
+/// streamed signature is unsupported, and binary controls or invalid UTF-8
+/// (other than a character cut by the header bound) are refused. Bytes after
+/// the header are not inspected; a browser decodes them as UTF-8, and an
+/// invalid sequence there becomes U+FFFD (HTML) or a parse error (SVG).
+fn open_streamed_text(
+    share: &AuthorizedShare<'_>,
+    path: &VirtualPath,
+) -> Result<StreamedText, PreviewError> {
+    let opened = share
+        .open_file(path)
+        .map_err(|error| PreviewError::from(error.code()))?;
+    let size = opened.len();
+    let modified = opened.modified();
+    let file_id = opened.file_id();
+    let mut file = opened.into_std();
+    let header = read_signature_header(&mut file, size)?;
+    if classify_streamed(&header)?.is_some() {
+        return Err(PreviewError::UnsupportedEntry);
+    }
+    let svg = is_svg_document(check_text_prefix(&header, header_reached_end(&header))?);
+    Ok(StreamedText {
+        file,
+        size,
+        modified,
+        file_id,
+        svg,
+    })
 }
 
 /// Rendered HTML is served only to frames.
@@ -478,7 +700,7 @@ async fn open_inline(
     let browse = state.browse();
     let authorized = browse.authorize_owned(&identity, &share_id)?;
     let max_bytes = browse.max_download_bytes();
-    let max_svg_bytes = state.preview_policy().max_bytes();
+    let max_svg_bytes = render_limit(&state);
     // The same slot discipline as `preview_image` and downloads.
     let lease = browse.acquire_download(&identity)?;
     let open_path = path.clone();
@@ -534,9 +756,9 @@ async fn open_inline(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InlineContent {
     Media(StreamedMedia),
-    /// An SVG document within the preview limit, `image/svg+xml`.
+    /// An SVG document within the render limit, `image/svg+xml`.
     Svg,
-    /// UTF-8 text, including HTML, XML, and SVG above the preview limit,
+    /// UTF-8 text, including HTML, XML, and SVG above the render limit,
     /// always `text/plain`.
     Text,
 }
@@ -563,7 +785,7 @@ struct InlineFile {
 /// Anything outside the allowlist is refused with the preview error codes.
 ///
 /// UTF-8 text whose header is an SVG document is served as an image only up
-/// to `max_svg_bytes`, the preview limit, like the panel's image view; a
+/// to `max_svg_bytes`, the render limit, like the panel's image view; a
 /// larger SVG opens as `text/plain` source.
 fn open_for_inline(
     share: &AuthorizedShare<'_>,
@@ -615,7 +837,7 @@ async fn request_document(
     // Returned to the caller, which holds it while building the response
     // so every buffered copy of the document stays within the bound.
     let permit = state.browse().acquire_buffered_read(identity)?;
-    let policy = state.preview_policy();
+    let policy = effective_policy(state);
     // The permit travels with the blocking work, so a cancelled request does
     // not release it while the read is still running.
     let (document, permit) =
@@ -689,6 +911,7 @@ pub fn load(
             shown_bytes: None,
             shown_lines: None,
             openable: media.opens_in_tab(),
+            renderable: false,
             thumbnailable,
         });
     }
@@ -712,13 +935,16 @@ pub fn load(
             shown_bytes: None,
             shown_lines: None,
             openable: false,
+            renderable: false,
             thumbnailable: true,
         });
     }
     // Binary and invalid UTF-8 are decided on the header before the size, so
     // an unrecognized binary file is never reported as too large to preview.
-    check_text_prefix(&header, header_reached_end(&header))?;
+    let header_text = check_text_prefix(&header, header_reached_end(&header))?;
     let (path_kind, path_language) = classify(path);
+    let renderable =
+        |kind: PreviewKind| kind == PreviewKind::HtmlSource && size <= policy.max_render_bytes();
     if size > policy.max_bytes() {
         // The head is a prefix of the header that was just validated, so it
         // is valid UTF-8 without binary controls once cut on a character
@@ -732,11 +958,18 @@ pub fn load(
             .map_err(|_| PreviewError::InvalidUtf8)?
             .to_owned();
         let shown_lines = line_count(&source);
-        // A head is never classified as SVG: the image view needs the whole
-        // document, so an oversized SVG previews as its source only.
+        // The image view streams the whole document from `/preview/svg`, so
+        // an SVG within the render limit keeps its kind and shows its head as
+        // source. A larger one previews as source only.
+        let (kind, language) = if size <= policy.max_render_bytes() && is_svg_document(header_text)
+        {
+            (PreviewKind::Svg, Some("xml"))
+        } else {
+            (path_kind, path_language)
+        };
         return Ok(PreviewDocument {
-            kind: path_kind,
-            language: path_language,
+            kind,
+            language,
             mime_type: None,
             width: None,
             height: None,
@@ -746,8 +979,11 @@ pub fn load(
             shown_lines: Some(shown_lines),
             source,
             // `/open` serves the whole file as `text/plain` within the
-            // download limit.
+            // download limit, or an SVG as a sandboxed image.
             openable: true,
+            // The full-window viewer streams the whole document; the panel
+            // shows the head as source only.
+            renderable: renderable(kind),
             thumbnailable: false,
         });
     }
@@ -785,6 +1021,7 @@ pub fn load(
         // Served by `/open` as `text/plain`, whatever the extension says, or
         // for SVG as a sandboxed image.
         openable: true,
+        renderable: renderable(kind),
         thumbnailable: false,
     })
 }
@@ -1102,9 +1339,8 @@ pub fn json_response(document: PreviewDocument) -> Response {
 /// subresource fetching, forms, redirects, and storage access. The CSP sandbox
 /// remains important defense in depth and applies when opened in a new tab.
 ///
-/// Like the rendered endpoint, it serves only a whole document: a file above
-/// the preview limit is `413`, and the panel shows its head from the JSON
-/// preview instead.
+/// It serves only a whole buffered document: a file above the preview limit
+/// is `413`, and the panel shows its head from the JSON preview instead.
 pub fn html_source_response(document: PreviewDocument) -> Result<Response, PreviewError> {
     if document.kind != PreviewKind::HtmlSource {
         return Err(PreviewError::UnsupportedEntry);
@@ -1124,55 +1360,6 @@ pub fn html_source_response(document: PreviewDocument) -> Result<Response, Previ
     );
     apply_security_headers(headers);
     Ok(response)
-}
-
-/// Returns uploaded HTML as a sandboxed document for the UI's doubly-sandboxed
-/// iframe. The response CSP forbids scripts, forms, same-origin access, network
-/// requests, plugins, and storage capabilities wherever the document loads; the
-/// route also refuses top-level loads from browsers that report one, because
-/// only the iframe sandbox stops the document navigating its own tab. A file
-/// above the preview limit is `413`: a head is never rendered.
-pub fn html_rendered_response(document: PreviewDocument) -> Result<Response, PreviewError> {
-    if document.kind != PreviewKind::HtmlSource {
-        return Err(PreviewError::UnsupportedEntry);
-    }
-    if document.truncated {
-        return Err(PreviewError::TooLarge);
-    }
-    let mut response = Response::new(Body::from(document.source));
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("inline"),
-    );
-    apply_security_headers(headers);
-    Ok(response)
-}
-
-/// Returns a complete SVG document as `image/svg+xml` with the exact bytes.
-///
-/// Only an `Svg` preview qualifies, which `load` produces only for a whole
-/// file within the preview limit; a head is never one. The sandboxed CSP
-/// keeps the document from running script, loading any resource, or
-/// submitting a form wherever it loads, and an `<img>` adds the browser's own
-/// image-mode restrictions.
-pub fn svg_image_response(document: PreviewDocument) -> Result<Response, PreviewError> {
-    if document.truncated {
-        return Err(PreviewError::TooLarge);
-    }
-    if document.kind != PreviewKind::Svg {
-        return Err(PreviewError::UnsupportedEntry);
-    }
-    let size = document.source.len() as u64;
-    Ok(image_response(
-        Body::from(document.source),
-        SVG_MIME_TYPE,
-        size,
-    ))
 }
 
 fn image_response(body: Body, mime_type: &'static str, size: u64) -> Response {
@@ -1632,6 +1819,10 @@ mod tests {
     }
 
     fn api_fixture(max_bytes: u64) -> ApiFixture {
+        api_fixture_with(PreviewPolicy::new(max_bytes).unwrap())
+    }
+
+    fn api_fixture_with(policy: PreviewPolicy) -> ApiFixture {
         let temporary = TempDir::new().expect("temporary directory");
         fs::write(temporary.path().join("main.rs"), b"fn main() {}\n").unwrap();
         fs::write(
@@ -1665,7 +1856,7 @@ mod tests {
         );
         let state = AppState::new(true)
             .with_browse(browse)
-            .with_preview_policy(PreviewPolicy::new(max_bytes).unwrap());
+            .with_preview_policy(policy);
         ApiFixture {
             _temporary: temporary,
             app: crate::app::router(state),
@@ -1702,6 +1893,46 @@ mod tests {
                 .max_bytes(),
             HARD_MAX_PREVIEW_BYTES
         );
+    }
+
+    #[test]
+    fn render_limit_is_at_least_the_preview_limit_and_at_most_the_download_cap() {
+        let policy = PreviewPolicy::new(1024).unwrap();
+        assert_eq!(policy.max_render_bytes(), DEFAULT_MAX_RENDER_BYTES);
+        assert_eq!(
+            PreviewPolicy::new(HARD_MAX_PREVIEW_BYTES)
+                .unwrap()
+                .max_render_bytes(),
+            DEFAULT_MAX_RENDER_BYTES
+        );
+        assert_eq!(
+            policy.with_max_render_bytes(1023),
+            Err(PreviewError::InvalidLimit)
+        );
+        assert_eq!(
+            policy.with_max_render_bytes(HARD_MAX_RENDER_BYTES + 1),
+            Err(PreviewError::InvalidLimit)
+        );
+        assert_eq!(
+            policy
+                .with_max_render_bytes(1024)
+                .unwrap()
+                .max_render_bytes(),
+            1024
+        );
+        assert_eq!(
+            policy
+                .with_max_render_bytes(HARD_MAX_RENDER_BYTES)
+                .unwrap()
+                .max_render_bytes(),
+            HARD_MAX_RENDER_BYTES
+        );
+        // The ceiling is the download cap every streamed response shares.
+        assert_eq!(
+            HARD_MAX_RENDER_BYTES,
+            BrowseLimits::default().max_download_bytes
+        );
+        assert_eq!(policy.with_render_cap(4096).max_render_bytes(), 4096);
     }
 
     #[test]
@@ -1874,16 +2105,27 @@ mod tests {
         assert_eq!(document.kind, PreviewKind::HtmlSource);
         assert!(document.truncated);
         assert_eq!(document.source, "<p>hello</p>\n".repeat(4));
-        // Neither HTML endpoint serves a head.
-        let source_document = head_of(html.as_bytes(), "page.html", 64);
+        // The rendered endpoint streams the whole file within the render
+        // limit, but the source endpoint never serves a head.
+        assert!(document.renderable);
         assert_eq!(
-            html_source_response(source_document).expect_err("truncated source"),
+            html_source_response(document).expect_err("truncated source"),
             PreviewError::TooLarge
         );
-        assert_eq!(
-            html_rendered_response(document).expect_err("truncated rendering"),
-            PreviewError::TooLarge
-        );
+        let (_temporary, share, grant, path) = fixture(html.as_bytes(), "page.html");
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("authorized");
+        let policy = PreviewPolicy::new(64).unwrap();
+        let at_limit = policy.with_max_render_bytes(html.len() as u64).unwrap();
+        assert!(load(&authorized, &path, at_limit).unwrap().renderable);
+        let below = policy.with_max_render_bytes(html.len() as u64 - 1).unwrap();
+        let document = load(&authorized, &path, below).unwrap();
+        assert_eq!(document.kind, PreviewKind::HtmlSource);
+        assert!(!document.renderable);
+        // Nothing but HTML renders.
+        assert!(!head_of(markdown.as_bytes(), "notes.md", 4096).renderable);
+        assert!(head_of(html.as_bytes(), "page.html", 4096).renderable);
     }
 
     #[test]
@@ -1972,12 +2214,10 @@ mod tests {
     async fn rendered_html_is_doubly_sandboxed_and_network_dark() {
         let hostile =
             "<style>body{color:red}</style><script>fetch('https://attacker.invalid')</script>";
-        let (_temporary, share, grant, path) = fixture(hostile.as_bytes(), "attack.html");
-        let authorized = share
-            .authorize(Some(&grant), GlobalPolicy::default())
-            .expect("authorized");
-        let document = load(&authorized, &path, PreviewPolicy::new(4096).unwrap()).unwrap();
-        let response = html_rendered_response(document).expect("rendered response");
+        let fixture = api_fixture(4096);
+        write_fixture(&fixture, "attack.html", hostile.as_bytes());
+        let response = rendered(&fixture, "attack.html", &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE).unwrap(),
             "text/html; charset=utf-8"
@@ -1993,6 +2233,229 @@ mod tests {
         assert!(csp.contains("navigate-to 'none'"));
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(body.as_ref(), hostile.as_bytes());
+    }
+
+    /// Requests the rendered endpoint as the UI's iframe does.
+    async fn rendered(fixture: &ApiFixture, name: &str, extra: &[(&str, &str)]) -> Response {
+        let mut request = Request::get(format!(
+            "/api/v1/shares/documents/preview/html/rendered?path={name}"
+        ))
+        .header("sec-fetch-dest", "iframe");
+        for (header_name, value) in extra {
+            request = request.header(*header_name, *value);
+        }
+        send(
+            &fixture.app,
+            Some(&fixture.identity),
+            request.body(Body::empty()).unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rendered_route_streams_documents_up_to_the_render_limit() {
+        let fixture = api_fixture_with(
+            PreviewPolicy::new(64)
+                .unwrap()
+                .with_max_render_bytes(4096)
+                .unwrap(),
+        );
+        let small = "\u{feff}<p>small</p>\n";
+        // Above the preview limit, within the render limit.
+        let large = format!("<!doctype html>\n{}", "<p>\u{e9}t\u{e9}</p>\n".repeat(200));
+        assert!(large.len() > 64 && large.len() <= 4096);
+        write_fixture(&fixture, "small.html", small.as_bytes());
+        write_fixture(&fixture, "large.html", large.as_bytes());
+        write_fixture(&fixture, "huge.html", "<p>x</p>\n".repeat(600).as_bytes());
+
+        let small_response = rendered(&fixture, "small.html", &[]).await;
+        let large_response = rendered(&fixture, "large.html", &[]).await;
+        for (response, body) in [(&small_response, small), (&large_response, large.as_str())] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let headers = response.headers();
+            assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+            assert_eq!(headers[header::CONTENT_DISPOSITION], "inline");
+            assert_eq!(headers[header::CONTENT_SECURITY_POLICY], PREVIEW_CSP);
+            assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
+            assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+            assert!(headers.contains_key(header::ETAG));
+            assert_preview_headers(response, "rendered");
+        }
+        // Whatever the size, the same headers, and only their values differ
+        // where the file does.
+        let names = |response: &Response| {
+            let mut names = response
+                .headers()
+                .keys()
+                .map(|name| name.as_str().to_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&small_response), names(&large_response));
+        for name in [
+            header::CONTENT_TYPE,
+            header::CONTENT_DISPOSITION,
+            header::CONTENT_SECURITY_POLICY,
+            header::CACHE_CONTROL,
+        ] {
+            assert_eq!(
+                small_response.headers()[&name],
+                large_response.headers()[&name]
+            );
+        }
+        // The exact bytes, a byte-order mark included.
+        let etag = large_response.headers()[header::ETAG].clone();
+        assert_eq!(
+            to_bytes(small_response.into_body(), 4096)
+                .await
+                .unwrap()
+                .as_ref(),
+            small.as_bytes()
+        );
+        assert_eq!(
+            to_bytes(large_response.into_body(), 8192)
+                .await
+                .unwrap()
+                .as_ref(),
+            large.as_bytes()
+        );
+
+        // Conditional requests and ranges behave as on `/open`.
+        let unchanged = rendered(
+            &fixture,
+            "large.html",
+            &[("if-none-match", etag.to_str().unwrap())],
+        )
+        .await;
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            unchanged.headers()[header::CONTENT_SECURITY_POLICY],
+            PREVIEW_CSP
+        );
+        let partial = rendered(&fixture, "large.html", &[("range", "bytes=0-14")]).await;
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            partial.headers()[header::CONTENT_RANGE],
+            format!("bytes 0-14/{}", large.len())
+        );
+        assert_eq!(
+            partial.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            partial.headers()[header::CONTENT_SECURITY_POLICY],
+            PREVIEW_CSP
+        );
+        assert_eq!(
+            to_bytes(partial.into_body(), 4096).await.unwrap().as_ref(),
+            b"<!doctype html>"
+        );
+
+        // The JSON preview says which documents render.
+        for (name, renderable) in [
+            ("small.html", true),
+            ("large.html", true),
+            ("huge.html", false),
+        ] {
+            let document = response_json(
+                send(
+                    &fixture.app,
+                    Some(&fixture.identity),
+                    Request::get(format!("/api/v1/shares/documents/preview?path={name}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(document["kind"], "html_source", "{name}");
+            assert_eq!(document["renderable"], renderable, "{name}");
+        }
+
+        // Above the render limit, and for anything but HTML text, the
+        // checks and refusals are those of the buffered route.
+        write_fixture(
+            &fixture,
+            "binary.html",
+            &[b"<p>".as_slice(), &[0; 200]].concat(),
+        );
+        write_fixture(&fixture, "latin1.html", &b"<p>caf\xe9</p>\n".repeat(20));
+        write_fixture(&fixture, "drawing.html", SVG.as_bytes());
+        write_fixture(&fixture, "page.txt", b"<p>text</p>");
+        for (name, status, code) in [
+            (
+                "huge.html",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "preview_too_large",
+            ),
+            (
+                "binary.html",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "binary_file",
+            ),
+            (
+                "latin1.html",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "invalid_utf8",
+            ),
+            (
+                "drawing.html",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_entry",
+            ),
+            (
+                "page.txt",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_entry",
+            ),
+            (
+                "pixel.png",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_entry",
+            ),
+            ("absent.html", StatusCode::NOT_FOUND, "not_found"),
+        ] {
+            let response = rendered(&fixture, name, &[]).await;
+            assert_eq!(response.status(), status, "{name}");
+            assert_eq!(
+                response.headers()[header::CONTENT_SECURITY_POLICY],
+                PREVIEW_CSP,
+                "{name}"
+            );
+            assert_eq!(response_json(response).await["code"], code, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unread_rendered_bodies_hold_a_download_slot_not_a_buffered_permit() {
+        use crate::browse::MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT;
+
+        let fixture = api_fixture(4096);
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_DOWNLOADS_PER_SUBJECT {
+            let response = rendered(&fixture, "hostile.html", &[]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        let busy = rendered(&fixture, "hostile.html", &[]).await;
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Buffered previews are admitted separately.
+        let preview = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/preview?path=hostile.html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        drop(held.pop());
+        assert_eq!(
+            rendered(&fixture, "hostile.html", &[]).await.status(),
+            StatusCode::OK
+        );
+        drop(held);
     }
 
     #[tokio::test]
@@ -2126,6 +2589,7 @@ mod tests {
             shown_bytes: None,
             shown_lines: None,
             openable: true,
+            renderable: false,
             thumbnailable: false,
         };
         assert_eq!(
@@ -2400,28 +2864,27 @@ mod tests {
         );
         assert_eq!(to_bytes(opened.into_body(), 4096).await.unwrap().len(), 128);
 
-        // The HTML endpoints refuse a head instead of serving it.
-        write_fixture(&fixture, "long.html", "<p>x</p>\n".repeat(10).as_bytes());
-        for (uri, destination) in [
-            ("/api/v1/shares/documents/preview/html?path=long.html", None),
-            (
-                "/api/v1/shares/documents/preview/html/rendered?path=long.html",
-                Some("iframe"),
-            ),
-        ] {
-            let mut request = Request::get(uri);
-            if let Some(destination) = destination {
-                request = request.header("sec-fetch-dest", destination);
-            }
-            let response = send(
-                &fixture.app,
-                Some(&fixture.identity),
-                request.body(Body::empty()).unwrap(),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
-            assert_eq!(response_json(response).await["code"], "preview_too_large");
-        }
+        // The HTML source endpoint refuses a head instead of serving it; the
+        // rendered endpoint streams the whole document within the render
+        // limit.
+        let long = "<p>x</p>\n".repeat(10);
+        write_fixture(&fixture, "long.html", long.as_bytes());
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/preview/html?path=long.html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response_json(response).await["code"], "preview_too_large");
+        let response = rendered(&fixture, "long.html", &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 4096).await.unwrap().as_ref(),
+            long.as_bytes()
+        );
     }
 
     fn pdf_bytes() -> Vec<u8> {
@@ -2775,7 +3238,12 @@ mod tests {
 
     #[tokio::test]
     async fn svg_image_route_serves_only_whole_svg_documents() {
-        let fixture = api_fixture(4096);
+        let fixture = api_fixture_with(
+            PreviewPolicy::new(4096)
+                .unwrap()
+                .with_max_render_bytes(16 * 1024)
+                .unwrap(),
+        );
         let hostile = concat!(
             "<?xml version=\"1.0\"?>\n",
             "<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"alert(1)\">",
@@ -2799,6 +3267,12 @@ mod tests {
             )
             .as_bytes(),
         );
+        let huge = format!(
+            "{}>\n{}</svg>\n",
+            &SVG[..SVG.len() - 2],
+            "<rect/>\n".repeat(3000)
+        );
+        write_fixture(&fixture, "huge.svg", huge.as_bytes());
 
         let get = |uri: String| {
             let app = fixture.app.clone();
@@ -2866,10 +3340,10 @@ mod tests {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "binary_file",
             ),
-            // Above the preview limit the image is refused, never rendered
-            // from a head.
+            // Above the render limit the image is refused, never drawn from
+            // a head.
             (
-                "large.svg",
+                "huge.svg",
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "preview_too_large",
             ),
@@ -2884,11 +3358,44 @@ mod tests {
             );
             assert_eq!(response_json(response).await["code"], code, "{name}");
         }
+        // Above the preview limit and within the render limit, the preview
+        // is an SVG head and the image streams the whole file.
+        let large_svg = format!(
+            "{}>\n{}</svg>\n",
+            &SVG[..SVG.len() - 2],
+            "<rect/>\n".repeat(1000)
+        );
         let large =
             response_json(get("/api/v1/shares/documents/preview?path=large.svg".into()).await)
                 .await;
-        assert_eq!(large["kind"], "code");
+        assert_eq!(large["kind"], "svg");
+        assert_eq!(large["language"], "xml");
         assert_eq!(large["truncated"], true);
+        assert_eq!(large["renderable"], false);
+        assert!(large["shownBytes"].as_u64().unwrap() <= 4096);
+        let image = get("/api/v1/shares/documents/preview/svg?path=large.svg".into()).await;
+        assert_eq!(image.status(), StatusCode::OK);
+        assert_eq!(image.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(
+            image.headers()[header::CONTENT_LENGTH],
+            large_svg.len().to_string()
+        );
+        assert_eq!(
+            image.headers()[header::CONTENT_SECURITY_POLICY],
+            PREVIEW_CSP
+        );
+        assert_preview_headers(&image, "large svg image");
+        assert_eq!(
+            to_bytes(image.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            large_svg.as_bytes()
+        );
+        let huge =
+            response_json(get("/api/v1/shares/documents/preview?path=huge.svg".into()).await).await;
+        assert_eq!(huge["kind"], "code");
+        assert_eq!(huge["truncated"], true);
 
         // The route is authenticated and non-disclosing like the others.
         let unauthenticated = send(
@@ -2912,8 +3419,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_route_serves_svg_as_a_sandboxed_image_within_the_preview_limit() {
-        let fixture = api_fixture(4096);
+    async fn open_route_serves_svg_as_a_sandboxed_image_within_the_render_limit() {
+        let fixture = api_fixture_with(
+            PreviewPolicy::new(4096)
+                .unwrap()
+                .with_max_render_bytes(16 * 1024)
+                .unwrap(),
+        );
+        write_fixture(
+            &fixture,
+            "huge.svg",
+            format!(
+                "{}>\n{}</svg>\n",
+                &SVG[..SVG.len() - 2],
+                "<rect/>\n".repeat(3000)
+            )
+            .as_bytes(),
+        );
         write_fixture(&fixture, "vector.svg", SVG.as_bytes());
         write_fixture(&fixture, "vector.txt", SVG.as_bytes());
         write_fixture(&fixture, "plain.svg", b"<svg><rect/></svg>");
@@ -2931,7 +3453,9 @@ mod tests {
             ("vector.svg", "image/svg+xml"),
             ("vector.txt", "image/svg+xml"),
             ("plain.svg", "text/plain; charset=utf-8"),
-            ("large.svg", "text/plain; charset=utf-8"),
+            // Above the preview limit, within the render limit.
+            ("large.svg", "image/svg+xml"),
+            ("huge.svg", "text/plain; charset=utf-8"),
         ] {
             let response = open(&fixture, name).await;
             assert_eq!(response.status(), StatusCode::OK, "{name}");
@@ -2991,14 +3515,25 @@ mod tests {
         let authorized = share
             .authorize(Some(&grant), GlobalPolicy::default())
             .expect("authorized");
-        // SVG named .pdf is never a streamed type. Within the limit it is
-        // recognized from its content; above it, only its head is returned,
-        // as text, and it is no longer SVG.
+        // SVG named .pdf is never a streamed type. Within the preview limit
+        // it is recognized from its content; above it, only its head is
+        // returned, still an SVG while the file is within the render limit
+        // and text beyond it.
         let document = load(&authorized, &path, PreviewPolicy::new(4096).unwrap()).unwrap();
         assert_eq!(document.kind, PreviewKind::Svg);
         assert_eq!(document.language, Some("xml"));
         assert!(document.openable);
+        assert!(!document.renderable);
         let head = load(&authorized, &path, PreviewPolicy::new(16).unwrap()).unwrap();
+        assert_eq!(head.kind, PreviewKind::Svg);
+        assert_eq!(head.language, Some("xml"));
+        assert!(head.truncated);
+        assert_eq!(head.source, "<svg xmlns='http");
+        let small_render = PreviewPolicy::new(16)
+            .unwrap()
+            .with_max_render_bytes(svg.len() as u64 - 1)
+            .unwrap();
+        let head = load(&authorized, &path, small_render).unwrap();
         assert_eq!(head.kind, PreviewKind::Text);
         assert!(head.truncated);
         assert_eq!(head.source, "<svg xmlns='http");
@@ -3035,7 +3570,13 @@ mod tests {
 
     #[tokio::test]
     async fn open_route_serves_signature_types_under_the_sandboxed_policy() {
-        let fixture = api_fixture(32);
+        // The 71-byte SVG is above the 64-byte render limit, so it is text.
+        let fixture = api_fixture_with(
+            PreviewPolicy::new(32)
+                .unwrap()
+                .with_max_render_bytes(64)
+                .unwrap(),
+        );
         write_fixture(&fixture, "report.pdf", &pdf_bytes());
         write_fixture(&fixture, "clip.mp4", &ftyp(b"isom", &[b"isom"]));
         write_fixture(&fixture, "song.mp3", &mp3_frames());

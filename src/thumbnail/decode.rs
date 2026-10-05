@@ -1121,6 +1121,59 @@ mod tests {
         assert_eq!(rendered.media_type, "image/jpeg");
     }
 
+    /// The sizes docs/operations.md gives for the default budget.
+    #[test]
+    fn default_budget_fits_the_documented_panel_decodes() {
+        let budget = crate::thumbnail::DEFAULT_MAX_DECODE_MEMORY;
+        let peak = |codec: Codec, width: u32, height: u32, window_len: u64| {
+            let (out_width, out_height) = output_size(width, height, 1600);
+            estimate(&Plan {
+                kind: SourceKind::Jpeg,
+                codec,
+                window_start: 0,
+                window_len,
+                width,
+                height,
+                out_width,
+                out_height,
+                orientation: 1,
+                long_edge: 1600,
+                estimate: 0,
+            })
+        };
+        // A 32-megapixel camera JPEG of 15 MB decodes at a quarter scale.
+        let (width, height) = (6960, 4640);
+        let (out_width, out_height) = output_size(width, height, 1600);
+        let scale = jpeg_scale(width, height, out_width, out_height);
+        assert_eq!(scale, 4);
+        let photo = Codec::Jpeg {
+            header: header(width, height, false),
+            scale,
+        };
+        assert!(peak(photo, width, height, 15_000_000) < budget / 2);
+        // Full-frame decodes of about 26, 22, 12, and 5 megapixels.
+        let interlaced = Codec::Png(PngHeader {
+            width: 6300,
+            height: 4200,
+            bits_per_pixel: 32,
+            interlaced: true,
+        });
+        let progressive = Codec::Jpeg {
+            header: header(4300, 2867, true),
+            scale: 2,
+        };
+        for (label, codec, width, height, window_len) in [
+            ("interlaced PNG", interlaced, 6300, 4200, 0),
+            ("GIF", Codec::Gif, 5700, 3800, 0),
+            ("progressive JPEG", progressive, 4300, 2867, 5_000_000),
+            ("WebP", Codec::WebP, 2700, 1800, 0),
+        ] {
+            let estimate = peak(codec, width, height, window_len);
+            assert!(estimate <= budget, "{label}: {estimate}");
+            assert!(estimate > budget * 3 / 4, "{label} is near the budget");
+        }
+    }
+
     #[test]
     fn output_sizes_keep_aspect_and_never_upscale() {
         assert_eq!(output_size(4000, 3000, 256), (256, 192));

@@ -197,8 +197,9 @@ export type PreviewKind =
   /** A camera RAW file, shown only through its server-rendered thumbnail. */
   | "raw"
   /**
-   * A complete SVG document, recognized by the server from its content: its
-   * source, plus an image view from `svgPreviewUrl`.
+   * An SVG document within the server's render limit, recognized from its
+   * content: its source (a head above the preview limit), plus an image view
+   * of the whole file from `svgPreviewUrl`.
    */
   | "svg";
 
@@ -237,6 +238,12 @@ export interface PreviewDocument {
   shownLines?: number;
   /** The open route serves this file inline in a new tab. */
   openable?: boolean;
+  /**
+   * The rendered-HTML route renders the whole file, also when `source` is
+   * only its head. Only `html_source` documents within the server's render
+   * limit are renderable.
+   */
+  renderable?: boolean;
   /** The thumbnail route can render this file (see `thumbnailUrl`). */
   thumbnailable?: boolean;
 }
@@ -989,8 +996,6 @@ function previewHeadIsValid(
   const { shownBytes, shownLines } = value;
   return (
     !streamed &&
-    // An SVG preview is always a whole document.
-    value.kind !== "svg" &&
     typeof value.source === "string" &&
     typeof value.size === "number" &&
     typeof shownBytes === "number" &&
@@ -1031,6 +1036,9 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
       new TextEncoder().encode(value.source).byteLength !== value.size) ||
     !previewHeadIsValid(value, streamed) ||
     (value.openable !== undefined && typeof value.openable !== "boolean") ||
+    (value.renderable !== undefined && typeof value.renderable !== "boolean") ||
+    // Only HTML renders.
+    (value.renderable === true && value.kind !== "html_source") ||
     (value.thumbnailable !== undefined &&
       typeof value.thumbnailable !== "boolean") ||
     // Thumbnails exist only for images and RAW files, and a RAW file is
@@ -1065,6 +1073,9 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
       : {}),
     ...(typeof value.openable === "boolean"
       ? { openable: value.openable }
+      : {}),
+    ...(typeof value.renderable === "boolean"
+      ? { renderable: value.renderable }
       : {}),
     ...(typeof value.thumbnailable === "boolean"
       ? { thumbnailable: value.thumbnailable }

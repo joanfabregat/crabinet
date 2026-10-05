@@ -213,6 +213,8 @@ jobs:
           mkdir -p "${package}"
           install -m 0555 "${binary}" "${package}/crabinet"
           install -m 0444 README.md LICENSE THIRD_PARTY_LICENSES.md config.example.toml "${package}/"
+          # README links the operator guide by this relative path.
+          install -D -m 0444 docs/operations.md "${package}/docs/operations.md"
           "${package}/crabinet" print-config-schema > "${package}/config.schema.json"
           "${package}/crabinet" --help >/dev/null
           tar -C release -czf "release/crabinet-${VERSION}-linux-${ARCH}.tar.gz" "crabinet-linux-${ARCH}"
