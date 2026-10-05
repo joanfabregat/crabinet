@@ -12,6 +12,11 @@ export interface BrowserRoute {
   /** A virtual file path selected for preview, or null when browsing only. */
   previewPath?: string | null;
   previewMode?: "side" | "full";
+  /**
+   * The path was read from a URL without a saved route, so it may name a
+   * file as well as a folder. The app looks it up before listing it.
+   */
+  unresolved?: boolean;
 }
 
 export interface BrowserNavigation {
@@ -120,6 +125,7 @@ export function routeFromUrl(url: URL): BrowserRoute {
     // Without ?preview= the last segment may still name a file; the app
     // resolves that and keeps the requested full-screen mode.
     if (url.searchParams.get("view") === "full") route.previewMode = "full";
+    if (route.path && route.previewPath === undefined) route.unresolved = true;
     return route;
   } catch {
     return { shareId: null, path: "" };

@@ -37,6 +37,7 @@ describe("browser navigation", () => {
     expect(at(href)).toEqual({
       shareId: "équipe/a",
       path: "Designs/東京 🚀",
+      unresolved: true,
     });
   });
 
@@ -83,7 +84,11 @@ describe("browser navigation", () => {
     ]) {
       expect(at(href)).toEqual({ shareId: "docs", path: "" });
     }
-    expect(at("/docs/one/two/")).toEqual({ shareId: "docs", path: "one/two" });
+    expect(at("/docs/one/two/")).toEqual({
+      shareId: "docs",
+      path: "one/two",
+      unresolved: true,
+    });
   });
 
   it("builds parent paths without escaping the share route", () => {
@@ -125,6 +130,7 @@ describe("browser navigation", () => {
       shareId: "docs",
       path: "projects/README.md",
       previewMode: "full",
+      unresolved: true,
     });
   });
 
@@ -163,7 +169,11 @@ describe("browser navigation", () => {
   it("ignores an ambiguous preview path while keeping the directory route", () => {
     const url = new URL("https://crabinet.test/docs/projects");
     url.searchParams.set("preview", "../secret");
-    expect(routeFromUrl(url)).toEqual({ shareId: "docs", path: "projects" });
+    expect(routeFromUrl(url)).toEqual({
+      shareId: "docs",
+      path: "projects",
+      unresolved: true,
+    });
     expect(previewRouteUrl("docs", "projects", "../secret")).toBe(
       "/docs/projects",
     );
@@ -211,7 +221,9 @@ describe("browser navigation", () => {
     window.history.pushState(null, "", "/docs/one/two");
     window.dispatchEvent(new PopStateEvent("popstate"));
 
-    expect(routes).toEqual([{ shareId: "docs", path: "one/two" }]);
+    expect(routes).toEqual([
+      { shareId: "docs", path: "one/two", unresolved: true },
+    ]);
     unsubscribe();
   });
 });

@@ -1538,3 +1538,102 @@ describe("image thumbnails", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("media the browser cannot play", () => {
+  const spinner = (panel: HTMLElement) =>
+    within(panel).queryByRole("status", { name: "Loading preview" });
+  const webm: PreviewDocument = {
+    kind: "video",
+    source: "",
+    mimeType: "video/webm",
+    codecs: "vp9, opus",
+    size: 100,
+    truncated: false,
+    openable: false,
+  };
+  const download = "/api/v1/shares/docs/download?path=test-pattern.webm";
+
+  function answerCanPlayType(answer: CanPlayTypeResult) {
+    return vi
+      .spyOn(HTMLMediaElement.prototype, "canPlayType")
+      .mockReturnValue(answer);
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("offers the download when canPlayType rules the codecs out", async () => {
+    const canPlayType = answerCanPlayType("");
+    const panel = await renderFile(webm, "test-pattern.webm");
+
+    const alert = await within(panel).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "This browser can't play this WebM video (VP9/Opus). Download it to play it in another app.",
+    );
+    expect(
+      within(alert).getByRole("link", { name: "Download video" }),
+    ).toHaveAttribute("href", download);
+    expect(
+      within(panel).queryByLabelText("Video preview of test-pattern.webm"),
+    ).toBeNull();
+    expect(canPlayType).toHaveBeenCalledWith('video/webm; codecs="vp9, opus"');
+  });
+
+  it.each(["maybe", "probably"] as const)(
+    "shows the player when canPlayType answers %s",
+    async (answer) => {
+      answerCanPlayType(answer);
+      const panel = await renderFile(webm, "test-pattern.webm");
+      const video = await within(panel).findByLabelText(
+        "Video preview of test-pattern.webm",
+      );
+      expect(video).toHaveAttribute(
+        "src",
+        "/api/v1/shares/docs/open?path=test-pattern.webm&v=0-0",
+      );
+      expect(within(panel).getByText("video/webm · vp9, opus")).toBeVisible();
+      expect(within(panel).queryByRole("alert")).toBeNull();
+    },
+  );
+
+  it("does not ask without codecs, and falls back on a decode error", async () => {
+    const canPlayType = answerCanPlayType("");
+    const panel = await renderFile(
+      {
+        kind: "audio",
+        source: "",
+        mimeType: "audio/ogg",
+        size: 100,
+        truncated: false,
+        openable: false,
+      },
+      "song.ogg",
+    );
+    const audio = await within(panel).findByLabelText(
+      "Audio preview of song.ogg",
+    );
+    expect(canPlayType).not.toHaveBeenCalled();
+    Object.defineProperty(audio, "error", { value: { code: 4 } });
+    fireEvent.error(audio);
+
+    const alert = await within(panel).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "This browser can't play this Ogg audio. Download it to play it in another app.",
+    );
+    expect(
+      within(alert).getByRole("link", { name: "Download audio" }),
+    ).toHaveAttribute("href", "/api/v1/shares/docs/download?path=song.ogg");
+  });
+
+  it("keeps the player after a network error, which says nothing about codecs", async () => {
+    answerCanPlayType("probably");
+    const panel = await renderFile(webm, "test-pattern.webm");
+    const video = await within(panel).findByLabelText(
+      "Video preview of test-pattern.webm",
+    );
+    Object.defineProperty(video, "error", { value: { code: 2 } });
+    fireEvent.error(video);
+    await waitFor(() => expect(spinner(panel)).not.toBeInTheDocument());
+    expect(within(panel).queryByRole("alert")).toBeNull();
+    expect(video).toBeInTheDocument();
+  });
+});

@@ -107,6 +107,13 @@ pub struct PreviewDocument {
     pub language: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<&'static str>,
+    /// For audio and video, the codecs named in the container header as an
+    /// RFC 6381 `codecs` parameter (`vp9, opus`), so the panel can ask the
+    /// browser whether it decodes them before showing a player. Absent when
+    /// the header does not describe them or names a codec without a mapping
+    /// (see [`media_codecs`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codecs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -905,6 +912,7 @@ pub fn load(
             source: String::new(),
             language: None,
             mime_type: Some(media.mime_type()),
+            codecs: media_codecs(media, &header),
             width,
             height,
             size,
@@ -938,6 +946,7 @@ pub fn load(
             openable: false,
             renderable: false,
             thumbnailable: true,
+            codecs: None,
         });
     }
     // Binary and invalid UTF-8 are decided on the header before the size, so
@@ -986,6 +995,7 @@ pub fn load(
             // shows the head as source only.
             renderable: renderable(kind),
             thumbnailable: false,
+            codecs: None,
         });
     }
     file.seek(SeekFrom::Start(0))
@@ -1024,6 +1034,7 @@ pub fn load(
         openable: true,
         renderable: renderable(kind),
         thumbnailable: false,
+        codecs: None,
     })
 }
 
@@ -1719,6 +1730,459 @@ fn classify_ogg(header: &[u8]) -> Option<StreamedMedia> {
     }
 }
 
+/// The most distinct codecs reported for one file.
+const MAX_MEDIA_CODECS: usize = 8;
+
+/// The codecs of an audio or video file as an RFC 6381 `codecs` parameter
+/// (`vp9, opus`), read from the signature header already in memory and never
+/// from beyond it.
+///
+/// `None` when the header does not reach the track descriptions (an MP4 whose
+/// `moov` box follows its media data), when they are malformed, or when an
+/// audio or video track uses a codec with no mapping here. The panel then
+/// offers the player as it would without codecs. A track cut by the header
+/// bound is left out, so the list may name fewer codecs than the file uses;
+/// a browser that cannot decode one that is named cannot play the file.
+fn media_codecs(media: StreamedMedia, header: &[u8]) -> Option<String> {
+    match media {
+        StreamedMedia::Video("video/webm") => matroska_codecs(header),
+        StreamedMedia::Video("video/mp4") | StreamedMedia::Audio("audio/mp4") => {
+            iso_bmff_codecs(header)
+        }
+        _ => None,
+    }
+}
+
+/// Distinct codecs in track order, and whether any track had a codec that
+/// cannot be named.
+#[derive(Default)]
+struct CodecList {
+    codecs: Vec<String>,
+    unknown: bool,
+}
+
+impl CodecList {
+    fn push(&mut self, codec: Option<String>) {
+        match codec {
+            None => self.unknown = true,
+            Some(codec) => {
+                if self.codecs.len() < MAX_MEDIA_CODECS && !self.codecs.contains(&codec) {
+                    self.codecs.push(codec);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Option<String> {
+        (!self.unknown && !self.codecs.is_empty()).then(|| self.codecs.join(", "))
+    }
+}
+
+const EBML_HEADER_ID: u32 = 0x1a45_dfa3;
+const MATROSKA_SEGMENT_ID: u32 = 0x1853_8067;
+const MATROSKA_TRACKS_ID: u32 = 0x1654_ae6b;
+const MATROSKA_CLUSTER_ID: u32 = 0x1f43_b675;
+const MATROSKA_TRACK_ENTRY_ID: u32 = 0xae;
+const MATROSKA_CODEC_ID_ID: u32 = 0x86;
+const MATROSKA_CODEC_PRIVATE_ID: u32 = 0x63a2;
+
+/// The EBML element at `offset`: its ID (with its length marker, as the
+/// Matroska specification writes IDs), its data size (`None` when the size
+/// is the reserved unknown value), and the offset of its data.
+fn ebml_element(bytes: &[u8], offset: usize) -> Option<(u32, Option<usize>, usize)> {
+    let first = *bytes.get(offset)?;
+    let id_len = first.leading_zeros() as usize + 1;
+    if id_len > 4 {
+        return None;
+    }
+    let size_offset = offset.checked_add(id_len)?;
+    let id = bytes
+        .get(offset..size_offset)?
+        .iter()
+        .fold(0_u32, |id, &byte| id << 8 | u32::from(byte));
+    let first = *bytes.get(size_offset)?;
+    let size_len = first.leading_zeros() as usize + 1;
+    if size_len > 8 {
+        return None;
+    }
+    let data = size_offset.checked_add(size_len)?;
+    let marker_mask = u8::try_from(0xff_u16 >> size_len).ok()?;
+    let size = bytes
+        .get(size_offset + 1..data)?
+        .iter()
+        .fold(u64::from(first & marker_mask), |size, &byte| {
+            size << 8 | u64::from(byte)
+        });
+    let unknown = (1_u64 << (7 * size_len)) - 1;
+    let size = if size == unknown {
+        None
+    } else {
+        Some(usize::try_from(size).ok()?)
+    };
+    Some((id, size, data))
+}
+
+/// The codecs of a Matroska or WebM file's `Tracks`, which must start within
+/// the header and before the first `Cluster`.
+fn matroska_codecs(header: &[u8]) -> Option<String> {
+    let (id, size, data) = ebml_element(header, 0)?;
+    if id != EBML_HEADER_ID {
+        return None;
+    }
+    let (id, size, mut offset) = ebml_element(header, data.checked_add(size?)?)?;
+    if id != MATROSKA_SEGMENT_ID {
+        return None;
+    }
+    let end = size
+        .and_then(|size| offset.checked_add(size))
+        .map_or(header.len(), |end| end.min(header.len()));
+    let segment = &header[..end];
+    while let Some((id, size, data)) = ebml_element(segment, offset) {
+        match id {
+            MATROSKA_TRACKS_ID => {
+                let tracks_end = data.checked_add(size?)?.min(end);
+                return matroska_track_codecs(segment.get(data..tracks_end)?);
+            }
+            MATROSKA_CLUSTER_ID => return None,
+            _ => offset = data.checked_add(size?)?,
+        }
+    }
+    None
+}
+
+fn matroska_track_codecs(tracks: &[u8]) -> Option<String> {
+    let mut codecs = CodecList::default();
+    let mut offset = 0;
+    while let Some((id, size, data)) = ebml_element(tracks, offset) {
+        let entry_end = data.checked_add(size?)?;
+        // A track entry cut by the header bound is left out.
+        let Some(entry) = tracks.get(data..entry_end) else {
+            break;
+        };
+        if id == MATROSKA_TRACK_ENTRY_ID {
+            match matroska_track_fields(entry) {
+                None => codecs.push(None),
+                // Subtitle, button, and other tracks are not decoded by the
+                // media element's codecs.
+                Some(MatroskaTrack {
+                    codec_id: Some(codec_id),
+                    private,
+                }) if codec_id.starts_with(b"V_") || codec_id.starts_with(b"A_") => {
+                    codecs.push(matroska_codec(codec_id, private));
+                }
+                Some(_) => {}
+            }
+        }
+        offset = entry_end;
+    }
+    codecs.finish()
+}
+
+/// A track entry's `CodecID`, without the zero padding EBML strings allow,
+/// and its `CodecPrivate`.
+struct MatroskaTrack<'a> {
+    codec_id: Option<&'a [u8]>,
+    private: Option<&'a [u8]>,
+}
+
+fn matroska_track_fields(entry: &[u8]) -> Option<MatroskaTrack<'_>> {
+    let (mut codec_id, mut private) = (None, None);
+    let mut offset = 0;
+    while offset < entry.len() {
+        let (id, size, data) = ebml_element(entry, offset)?;
+        offset = data.checked_add(size?)?;
+        let value = entry.get(data..offset)?;
+        match id {
+            MATROSKA_CODEC_ID_ID => {
+                let len = value
+                    .iter()
+                    .rposition(|&byte| byte != 0)
+                    .map_or(0, |last| last + 1);
+                codec_id = Some(&value[..len]);
+            }
+            MATROSKA_CODEC_PRIVATE_ID => private = Some(value),
+            _ => {}
+        }
+    }
+    Some(MatroskaTrack { codec_id, private })
+}
+
+/// The codecs browsers accept under `video/webm`. Any other audio or video
+/// codec, such as H.264 in a Matroska file, gets no name.
+fn matroska_codec(codec_id: &[u8], private: Option<&[u8]>) -> Option<String> {
+    match codec_id {
+        b"V_VP8" => Some("vp8".to_owned()),
+        b"V_VP9" => Some("vp9".to_owned()),
+        b"V_AV1" => av1_codec(private?),
+        b"A_OPUS" => Some("opus".to_owned()),
+        b"A_VORBIS" => Some("vorbis".to_owned()),
+        _ => None,
+    }
+}
+
+/// `av01.P.LLT.DD` from an AV1 codec configuration record (`av1C`), which
+/// is also Matroska's `CodecPrivate` for AV1.
+fn av1_codec(config: &[u8]) -> Option<String> {
+    let [0x81, profile_level, flags, ..] = *config else {
+        return None;
+    };
+    let profile = profile_level >> 5;
+    let level = profile_level & 0x1f;
+    let tier = if flags & 0x80 == 0 { 'M' } else { 'H' };
+    let depth = match (flags & 0x40 != 0, flags & 0x20 != 0) {
+        (false, _) => 8,
+        (true, false) => 10,
+        (true, true) => 12,
+    };
+    Some(format!("av01.{profile}.{level:02}{tier}.{depth:02}"))
+}
+
+/// The boxes of one ISO base media region in order: each box's type, its
+/// content clamped to the region, and whether the content is complete. The
+/// walk stops at a malformed box and after one cut by the region's end.
+struct IsoBoxes<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> IsoBoxes<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+}
+
+impl<'a> Iterator for IsoBoxes<'a> {
+    type Item = (&'a [u8; 4], &'a [u8], bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.offset;
+        let head = self.bytes.get(start..start.checked_add(8)?)?;
+        let kind: &[u8; 4] = head[4..8].try_into().ok()?;
+        let (content, end) = match u32::from_be_bytes(head[0..4].try_into().ok()?) {
+            // Size 0 runs to the end of the file.
+            0 => (start + 8, usize::MAX),
+            1 => {
+                let large = self.bytes.get(start + 8..start + 16)?;
+                let size = u64::from_be_bytes(large.try_into().ok()?);
+                if size < 16 {
+                    self.offset = usize::MAX;
+                    return None;
+                }
+                let size = usize::try_from(size).unwrap_or(usize::MAX);
+                (start + 16, start.saturating_add(size))
+            }
+            size if size < 8 => {
+                self.offset = usize::MAX;
+                return None;
+            }
+            size => (start + 8, start.saturating_add(size as usize)),
+        };
+        let complete = end <= self.bytes.len();
+        self.offset = end;
+        let content = self.bytes.get(content..end.min(self.bytes.len()))?;
+        Some((kind, content, complete))
+    }
+}
+
+/// The content of the first child box of this type, possibly cut short.
+fn iso_child<'a>(region: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    IsoBoxes::new(region)
+        .find(|(child, _, _)| *child == kind)
+        .map(|(_, content, _)| content)
+}
+
+/// The content of the first child box of this type, only when complete.
+fn iso_complete_child<'a>(region: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+    IsoBoxes::new(region)
+        .find(|(child, _, _)| *child == kind)
+        .and_then(|(_, content, complete)| complete.then_some(content))
+}
+
+/// The codecs of an MP4 file's sample descriptions, from a `moov` box that
+/// starts within the header.
+fn iso_bmff_codecs(header: &[u8]) -> Option<String> {
+    let moov = IsoBoxes::new(header)
+        .find_map(|(kind, content, _)| (kind == b"moov").then_some(content))?;
+    let mut codecs = CodecList::default();
+    for (kind, trak, _) in IsoBoxes::new(moov) {
+        if kind == b"trak" {
+            iso_track_codecs(trak, &mut codecs);
+        }
+    }
+    codecs.finish()
+}
+
+/// The sample entries of one video or audio track. Other handlers, such as
+/// text, timecode, and metadata, are not decoded by the media element.
+fn iso_track_codecs(trak: &[u8], codecs: &mut CodecList) {
+    let Some(mdia) = iso_child(trak, b"mdia") else {
+        return;
+    };
+    let handler = iso_complete_child(mdia, b"hdlr").and_then(|hdlr| hdlr.get(8..12));
+    if handler != Some(b"vide") && handler != Some(b"soun") {
+        return;
+    }
+    let Some(stsd) = iso_child(mdia, b"minf")
+        .and_then(|minf| iso_child(minf, b"stbl"))
+        .and_then(|stbl| iso_child(stbl, b"stsd"))
+    else {
+        return;
+    };
+    let Some(count) = stsd
+        .get(4..8)
+        .and_then(|count| count.try_into().ok())
+        .map(u32::from_be_bytes)
+    else {
+        return;
+    };
+    let count = usize::try_from(count)
+        .unwrap_or(usize::MAX)
+        .min(MAX_MEDIA_CODECS);
+    for (kind, entry, complete) in IsoBoxes::new(&stsd[8..]).take(count) {
+        if !complete {
+            break;
+        }
+        codecs.push(iso_sample_entry_codec(kind, entry));
+    }
+}
+
+/// The bytes of a visual sample entry before its child boxes.
+const VISUAL_SAMPLE_ENTRY_BYTES: usize = 78;
+
+/// A complete child box of a sample entry whose fixed fields take `fixed`
+/// bytes.
+fn sample_entry_child<'a>(entry: &'a [u8], fixed: usize, kind: &[u8; 4]) -> Option<&'a [u8]> {
+    iso_complete_child(entry.get(fixed..)?, kind)
+}
+
+/// The bytes of an audio sample entry before its child boxes: QuickTime's
+/// version 1 and 2 entries add fields after the ISO ones.
+fn audio_sample_entry_bytes(entry: &[u8]) -> Option<usize> {
+    match u16::from_be_bytes(entry.get(8..10)?.try_into().ok()?) {
+        0 => Some(28),
+        1 => Some(44),
+        2 => Some(64),
+        _ => None,
+    }
+}
+
+fn iso_sample_entry_codec(kind: &[u8; 4], entry: &[u8]) -> Option<String> {
+    let fourcc = std::str::from_utf8(kind).ok()?;
+    match kind {
+        b"avc1" | b"avc3" => {
+            let config = sample_entry_child(entry, VISUAL_SAMPLE_ENTRY_BYTES, b"avcC")?;
+            let [_, profile, compatibility, level, ..] = *config else {
+                return None;
+            };
+            Some(format!(
+                "{fourcc}.{profile:02X}{compatibility:02X}{level:02X}"
+            ))
+        }
+        b"hvc1" | b"hev1" => hevc_codec(
+            fourcc,
+            sample_entry_child(entry, VISUAL_SAMPLE_ENTRY_BYTES, b"hvcC")?,
+        ),
+        b"av01" => av1_codec(sample_entry_child(
+            entry,
+            VISUAL_SAMPLE_ENTRY_BYTES,
+            b"av1C",
+        )?),
+        b"vp09" => {
+            let config = sample_entry_child(entry, VISUAL_SAMPLE_ENTRY_BYTES, b"vpcC")?;
+            let [_, _, _, _, profile, level, depth, ..] = *config else {
+                return None;
+            };
+            Some(format!("vp09.{profile:02}.{level:02}.{:02}", depth >> 4))
+        }
+        b"mp4a" => mp4a_codec(sample_entry_child(
+            entry,
+            audio_sample_entry_bytes(entry)?,
+            b"esds",
+        )?),
+        b"Opus" => Some("opus".to_owned()),
+        b"fLaC" => Some("flac".to_owned()),
+        b"ac-3" | b"ec-3" => Some(fourcc.to_owned()),
+        _ => None,
+    }
+}
+
+/// `hvc1.1.6.L93.B0`-style names from an HEVC decoder configuration record
+/// (`hvcC`), as ISO/IEC 14496-15 Annex E defines them.
+fn hevc_codec(fourcc: &str, config: &[u8]) -> Option<String> {
+    use std::fmt::Write as _;
+
+    let config = config.get(..13)?;
+    let space = ["", "A", "B", "C"][usize::from(config[1] >> 6)];
+    let tier = if config[1] & 0x20 == 0 { 'L' } else { 'H' };
+    let profile = config[1] & 0x1f;
+    let compatibility = u32::from_be_bytes(config[2..6].try_into().ok()?).reverse_bits();
+    let level = config[12];
+    let mut codec = format!("{fourcc}.{space}{profile}.{compatibility:X}.{tier}{level}");
+    let constraints = &config[6..12];
+    let len = constraints
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |last| last + 1);
+    for byte in &constraints[..len] {
+        let _ = write!(codec, ".{byte:X}");
+    }
+    Some(codec)
+}
+
+/// `mp4a.40.2`-style names from an elementary stream descriptor (`esds`):
+/// the object type indication and, for MPEG-4 audio, the audio object type.
+fn mp4a_codec(esds: &[u8]) -> Option<String> {
+    let (3, stream) = mpeg4_descriptor(esds.get(4..)?)? else {
+        return None;
+    };
+    let flags = *stream.get(2)?;
+    let mut skip = 3;
+    if flags & 0x80 != 0 {
+        skip += 2;
+    }
+    if flags & 0x40 != 0 {
+        skip += 1 + usize::from(*stream.get(skip)?);
+    }
+    if flags & 0x20 != 0 {
+        skip += 2;
+    }
+    let (4, decoder) = mpeg4_descriptor(stream.get(skip..)?)? else {
+        return None;
+    };
+    let object_type = *decoder.first()?;
+    if object_type != 0x40 {
+        return Some(format!("mp4a.{object_type:02X}"));
+    }
+    let (5, specific) = mpeg4_descriptor(decoder.get(13..)?)? else {
+        return None;
+    };
+    let first = *specific.first()?;
+    let audio_object_type = match first >> 3 {
+        31 => 32 + ((first & 0x07) << 3 | specific.get(1)? >> 5),
+        audio_object_type => audio_object_type,
+    };
+    Some(format!("mp4a.40.{audio_object_type}"))
+}
+
+/// An MPEG-4 descriptor's tag and body, with its one-to-four-byte size.
+fn mpeg4_descriptor(bytes: &[u8]) -> Option<(u8, &[u8])> {
+    let tag = *bytes.first()?;
+    let mut len = 0_usize;
+    let mut offset = 1;
+    loop {
+        let byte = *bytes.get(offset)?;
+        offset += 1;
+        len = len << 7 | usize::from(byte & 0x7f);
+        if byte & 0x80 == 0 {
+            break;
+        }
+        if offset > 4 {
+            return None;
+        }
+    }
+    Some((tag, bytes.get(offset..offset.checked_add(len)?)?))
+}
+
 /// `fLaC` followed by the mandatory 34-byte STREAMINFO metadata block.
 fn is_flac(header: &[u8]) -> bool {
     header.len() >= 8
@@ -1861,6 +2325,27 @@ fn code_language(extension: &str) -> Option<&'static str> {
         "yaml" | "yml" => "yaml",
         _ => return None,
     })
+}
+
+/// Runs both codec walks over arbitrary bytes, and the classification path
+/// the preview takes. Every name stays a short, quote-free `codecs` value.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_media_codecs(header: &[u8]) {
+    let classified = classify_streamed(header)
+        .ok()
+        .flatten()
+        .and_then(|media| media_codecs(media, header));
+    for codecs in [matroska_codecs(header), iso_bmff_codecs(header), classified]
+        .into_iter()
+        .flatten()
+    {
+        assert!(codecs.split(", ").count() <= MAX_MEDIA_CODECS);
+        assert!(
+            codecs
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"., -".contains(&byte))
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2677,6 +3162,7 @@ mod tests {
             openable: true,
             renderable: false,
             thumbnailable: false,
+            codecs: None,
         };
         assert_eq!(
             html_source_response(document).expect_err("not HTML"),
@@ -3949,6 +4435,359 @@ mod tests {
                 Err(PreviewError::UnsupportedEntry),
                 "linked entry {name:?} must be rejected"
             );
+        }
+    }
+
+    /// An EBML element with an eight-byte data size.
+    fn ebml(id: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut element = id.to_vec();
+        element.push(0x01);
+        element.extend_from_slice(&(data.len() as u64).to_be_bytes()[1..]);
+        element.extend_from_slice(data);
+        element
+    }
+
+    fn track_entry(codec_id: &str, private: Option<&[u8]>) -> Vec<u8> {
+        let mut fields = ebml(&[0xd7], &[1]);
+        fields.extend(ebml(&[0x86], codec_id.as_bytes()));
+        if let Some(private) = private {
+            fields.extend(ebml(&[0x63, 0xa2], private));
+        }
+        ebml(&[0xae], &fields)
+    }
+
+    /// A WebM header whose unknown-size segment holds `Info`, then the given
+    /// segment children, then the start of a cluster.
+    fn webm(children: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = ebml(&[0x1a, 0x45, 0xdf, 0xa3], b"\x42\x82\x84webm");
+        bytes.extend_from_slice(&[
+            0x18, 0x53, 0x80, 0x67, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]);
+        bytes.extend(ebml(
+            &[0x15, 0x49, 0xa9, 0x66],
+            &ebml(&[0x2a, 0xd7, 0xb1], &[0x0f, 0x42, 0x40]),
+        ));
+        for child in children {
+            bytes.extend_from_slice(child);
+        }
+        bytes.extend_from_slice(&[
+            0x1f, 0x43, 0xb6, 0x75, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]);
+        bytes.extend(ebml(&[0xe7], &[0]));
+        bytes
+    }
+
+    fn tracks(entries: &[Vec<u8>]) -> Vec<u8> {
+        ebml(&[0x16, 0x54, 0xae, 0x6b], &entries.concat())
+    }
+
+    fn codecs_of(header: &[u8]) -> Option<String> {
+        let media = classify_streamed(header).expect("no dimension error")?;
+        media_codecs(media, header)
+    }
+
+    #[test]
+    fn webm_codecs_come_from_the_track_entries() {
+        let header = webm(&[tracks(&[
+            track_entry("V_VP9", None),
+            track_entry("A_OPUS", Some(b"OpusHead")),
+        ])]);
+        assert_eq!(codecs_of(&header).as_deref(), Some("vp9, opus"));
+
+        // AV1 is named from its configuration record: profile 0, level 8,
+        // main tier, 10-bit.
+        let header = webm(&[tracks(&[
+            track_entry("V_AV1", Some(&[0x81, 0x08, 0x40, 0x00])),
+            track_entry("A_VORBIS", Some(&[2, 0, 0])),
+        ])]);
+        assert_eq!(codecs_of(&header).as_deref(), Some("av01.0.08M.10, vorbis"));
+
+        // Subtitles are not decoded by the media element, the same codec is
+        // named once, and zero padding after a codec ID is ignored.
+        let header = webm(&[tracks(&[
+            track_entry("V_VP8", None),
+            track_entry("S_TEXT/UTF8", None),
+            track_entry("A_VORBIS", None),
+            track_entry("A_VORBIS\0\0", None),
+        ])]);
+        assert_eq!(codecs_of(&header).as_deref(), Some("vp8, vorbis"));
+
+        // A Matroska DocType is served as WebM and named the same way.
+        let webm_header = ebml(&[0x1a, 0x45, 0xdf, 0xa3], b"\x42\x82\x84webm");
+        let mut header = ebml(&[0x1a, 0x45, 0xdf, 0xa3], b"\x42\x82\x88matroska");
+        header.extend_from_slice(
+            &webm(&[tracks(&[track_entry("V_VP9", None)])])[webm_header.len()..],
+        );
+        assert_eq!(codecs_of(&header).as_deref(), Some("vp9"));
+    }
+
+    #[test]
+    fn webm_without_nameable_codecs_reports_none() {
+        // A codec browsers do not play under video/webm, or AV1 without its
+        // configuration record, leaves the whole list unnamed.
+        for entries in [
+            vec![
+                track_entry("V_MPEG4/ISO/AVC", Some(&[1, 0x42, 0xe0, 0x1e])),
+                track_entry("A_OPUS", None),
+            ],
+            vec![track_entry("V_AV1", None)],
+            vec![track_entry("V_AV1", Some(&[0x01, 0x08, 0x40]))],
+            vec![track_entry("A_AAC", None)],
+            vec![track_entry("S_TEXT/UTF8", None)],
+            vec![],
+        ] {
+            assert_eq!(codecs_of(&webm(&[tracks(&entries)])), None);
+        }
+        // No Tracks before the first cluster.
+        assert_eq!(codecs_of(&webm(&[])), None);
+        // Tracks of unknown size.
+        let mut unknown = vec![0x16, 0x54, 0xae, 0x6b, 0xff];
+        unknown.extend(track_entry("V_VP9", None));
+        assert_eq!(codecs_of(&webm(&[unknown])), None);
+        // A malformed element inside a track entry.
+        let broken = ebml(&[0xae], &[0x86, 0x00, 0x01]);
+        assert_eq!(
+            codecs_of(&webm(&[tracks(&[track_entry("V_VP9", None), broken])])),
+            None
+        );
+        // The bare EBML header of the classification tests.
+        assert_eq!(codecs_of(b"\x1a\x45\xdf\xa3\x9f\x42\x82\x84webm"), None);
+    }
+
+    #[test]
+    fn a_recorded_webm_names_its_codecs() {
+        // A real file: Chromium's MediaRecorder output, as the end-to-end
+        // tests serve it.
+        let header = include_bytes!("../web/e2e/fixtures/read-only/media/test-pattern.webm");
+        assert_eq!(codecs_of(header).as_deref(), Some("vp9, opus"));
+    }
+
+    #[test]
+    fn webm_track_entries_cut_by_the_header_are_left_out() {
+        let full = webm(&[tracks(&[
+            track_entry("V_VP9", None),
+            track_entry("A_OPUS", None),
+        ])]);
+        let opus_start = full
+            .windows(6)
+            .position(|window| window == b"A_OPUS")
+            .unwrap();
+        // Cut inside the Opus entry: only VP9 is named.
+        assert_eq!(codecs_of(&full[..opus_start + 2]).as_deref(), Some("vp9"));
+        // Every prefix is handled without a panic.
+        for end in 0..full.len() {
+            let _ = matroska_codecs(&full[..end]);
+        }
+    }
+
+    fn mp4_box(kind: &[u8; 4], content: &[u8]) -> Vec<u8> {
+        let mut bytes = u32::try_from(8 + content.len())
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(content);
+        bytes
+    }
+
+    fn visual_entry(kind: &[u8; 4], config_kind: &[u8; 4], config: &[u8]) -> Vec<u8> {
+        let mut content = vec![0; VISUAL_SAMPLE_ENTRY_BYTES];
+        content.extend(mp4_box(config_kind, config));
+        mp4_box(kind, &content)
+    }
+
+    fn audio_entry(kind: &[u8; 4], children: &[u8]) -> Vec<u8> {
+        let mut content = vec![0; 28];
+        content.extend_from_slice(children);
+        mp4_box(kind, &content)
+    }
+
+    fn trak(handler: &[u8; 4], entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut hdlr = vec![0; 8];
+        hdlr.extend_from_slice(handler);
+        hdlr.extend_from_slice(&[0; 13]);
+        let mut stsd = vec![0, 0, 0, 0];
+        stsd.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_be_bytes());
+        stsd.extend(entries.concat());
+        let stbl = mp4_box(b"stbl", &mp4_box(b"stsd", &stsd));
+        let mut mdia = mp4_box(b"mdhd", &[0; 24]);
+        mdia.extend(mp4_box(b"hdlr", &hdlr));
+        mdia.extend(mp4_box(b"minf", &stbl));
+        mp4_box(b"trak", &mp4_box(b"mdia", &mdia))
+    }
+
+    /// AAC-LC: an MPEG-4 audio decoder configuration with audio object type 2.
+    fn esds() -> Vec<u8> {
+        let specific = [0x05, 0x02, 0x12, 0x10];
+        let mut decoder = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        decoder.extend_from_slice(&specific);
+        let mut stream = vec![0x00, 0x01, 0x00, 0x04];
+        // A four-byte descriptor size.
+        stream.extend_from_slice(&[0x80, 0x80, 0x80, u8::try_from(decoder.len()).unwrap()]);
+        stream.extend_from_slice(&decoder);
+        let mut content = vec![0, 0, 0, 0, 0x03, u8::try_from(stream.len()).unwrap()];
+        content.extend_from_slice(&stream);
+        mp4_box(b"esds", &content)
+    }
+
+    fn mp4(major: &[u8; 4], traks: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = ftyp(major, &[major]);
+        let mut moov = mp4_box(b"mvhd", &[0; 100]);
+        moov.extend(traks.concat());
+        bytes.extend(mp4_box(b"moov", &moov));
+        bytes.extend(mp4_box(b"mdat", &[0; 64]));
+        bytes
+    }
+
+    #[test]
+    fn mp4_codecs_come_from_the_sample_descriptions() {
+        let video = trak(
+            b"vide",
+            &[visual_entry(b"avc1", b"avcC", &[1, 0x42, 0xe0, 0x1e, 0xff])],
+        );
+        let audio = trak(b"soun", &[audio_entry(b"mp4a", &esds())]);
+        let text = trak(b"text", &[mp4_box(b"tx3g", &[0; 40])]);
+        let header = mp4(b"isom", &[video, text, audio.clone()]);
+        assert_eq!(
+            codecs_of(&header).as_deref(),
+            Some("avc1.42E01E, mp4a.40.2")
+        );
+        assert_eq!(
+            codecs_of(&mp4(b"M4A ", &[audio])).as_deref(),
+            Some("mp4a.40.2")
+        );
+
+        for (entry, codec) in [
+            (
+                visual_entry(
+                    b"hvc1",
+                    b"hvcC",
+                    &[1, 0x01, 0x60, 0, 0, 0, 0xb0, 0, 0, 0, 0, 0, 93, 0xf0],
+                ),
+                "hvc1.1.6.L93.B0",
+            ),
+            (
+                visual_entry(
+                    b"hev1",
+                    b"hvcC",
+                    &[1, 0x62, 0x40, 0, 0, 0, 0x90, 0x80, 0, 0, 0, 0, 120],
+                ),
+                "hev1.A2.2.H120.90.80",
+            ),
+            (
+                visual_entry(b"av01", b"av1C", &[0x81, 0x04, 0x00, 0x00]),
+                "av01.0.04M.08",
+            ),
+            (
+                visual_entry(b"vp09", b"vpcC", &[1, 0, 0, 0, 0, 31, 0x80, 0]),
+                "vp09.00.31.08",
+            ),
+            (
+                visual_entry(b"avc3", b"avcC", &[1, 0x64, 0x00, 0x28]),
+                "avc3.640028",
+            ),
+            (audio_entry(b"Opus", &mp4_box(b"dOps", &[0; 11])), "opus"),
+            (audio_entry(b"fLaC", &[]), "flac"),
+            (audio_entry(b"ec-3", &[]), "ec-3"),
+        ] {
+            let header = mp4(b"isom", &[trak(b"vide", &[entry])]);
+            assert_eq!(codecs_of(&header).as_deref(), Some(codec));
+        }
+    }
+
+    #[test]
+    fn mp4_without_nameable_codecs_reports_none() {
+        let video = || {
+            trak(
+                b"vide",
+                &[visual_entry(b"avc1", b"avcC", &[1, 0x42, 0xe0, 0x1e])],
+            )
+        };
+        for entry in [
+            // Unmapped and encrypted sample entries.
+            visual_entry(b"mp4v", b"esds", &[0; 8]),
+            visual_entry(b"encv", b"sinf", &[0; 8]),
+            // A configuration record that is missing or too short.
+            visual_entry(b"avc1", b"free", &[1, 0x42, 0xe0, 0x1e]),
+            visual_entry(b"avc1", b"avcC", &[1, 0x42]),
+            visual_entry(b"hvc1", b"hvcC", &[1, 0x01, 0x60]),
+            audio_entry(b"mp4a", &[]),
+        ] {
+            let header = mp4(b"isom", &[video(), trak(b"soun", &[entry])]);
+            assert_eq!(codecs_of(&header), None);
+        }
+
+        // The movie box after the media data is beyond the header.
+        let mut moov_at_end = ftyp(b"isom", &[b"isom"]);
+        moov_at_end.extend_from_slice(&1_000_000_u32.to_be_bytes());
+        moov_at_end.extend_from_slice(b"mdat");
+        moov_at_end.resize(SIGNATURE_HEADER_BYTES as usize, 0);
+        assert_eq!(codecs_of(&moov_at_end), None);
+        // The bare file type box of the classification tests.
+        assert_eq!(codecs_of(&ftyp(b"isom", &[b"isom", b"mp41"])), None);
+    }
+
+    #[test]
+    fn mp4_sample_entries_cut_by_the_header_are_left_out() {
+        let video = trak(
+            b"vide",
+            &[visual_entry(b"avc1", b"avcC", &[1, 0x42, 0xe0, 0x1e])],
+        );
+        let audio = trak(b"soun", &[audio_entry(b"mp4a", &esds())]);
+        let full = mp4(b"isom", &[video, audio]);
+        let mp4a = full
+            .windows(4)
+            .position(|window| window == b"mp4a")
+            .unwrap();
+        assert_eq!(
+            codecs_of(&full[..mp4a + 10]).as_deref(),
+            Some("avc1.42E01E")
+        );
+        for end in 0..full.len() {
+            let _ = iso_bmff_codecs(&full[..end]);
+        }
+        // Sizes of zero, one (a 64-bit size), and below the box header.
+        for size in [0_u32, 1, 4] {
+            let mut header = ftyp(b"isom", &[b"isom"]);
+            header.extend_from_slice(&size.to_be_bytes());
+            header.extend_from_slice(b"moov");
+            header.extend_from_slice(&[0xff; 8]);
+            assert_eq!(iso_bmff_codecs(&header), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_json_names_media_codecs_when_the_header_does() {
+        let fixture = api_fixture(32);
+        write_fixture(
+            &fixture,
+            "test-pattern.webm",
+            &webm(&[tracks(&[
+                track_entry("V_VP9", None),
+                track_entry("A_OPUS", None),
+            ])]),
+        );
+        write_fixture(
+            &fixture,
+            "bare.webm",
+            b"\x1a\x45\xdf\xa3\x9f\x42\x82\x84webm",
+        );
+        for (name, codecs) in [
+            ("test-pattern.webm", serde_json::json!("vp9, opus")),
+            ("bare.webm", serde_json::Value::Null),
+        ] {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get(format!("/api/v1/shares/documents/preview?path={name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let document = response_json(response).await;
+            assert_eq!(document["kind"], "video", "{name}");
+            assert_eq!(document["codecs"], codecs, "{name}");
         }
     }
 }

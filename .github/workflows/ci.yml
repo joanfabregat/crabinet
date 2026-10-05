@@ -33,6 +33,10 @@ jobs:
           -v "${PWD}:/repo"
           -w /repo
           docker.io/rhysd/actionlint@sha256:9d36088643581e728c969f35141f88139fec77280b2be23c1f66f8e40e1025e7
+      # The release archive ships README and the docs; the release workflow
+      # runs the same check against the packaged tree.
+      - name: Check relative documentation links
+        run: sh .github/scripts/check-doc-links.sh .
       # The read-only token enables zizmor's online audits, such as impostor
       # commits and pinned SHAs that do not match their version comment.
       - name: Audit GitHub Actions workflow security
@@ -508,6 +512,6 @@ jobs:
         run: cargo +"${NIGHTLY_VERSION}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Fuzz each security boundary briefly
         run: |
-          for target in config_toml phc_policy virtual_path multipart markdown_classification content_disposition zip_archive thumbnail_raw_preview thumbnail_decode; do
+          for target in config_toml phc_policy virtual_path multipart markdown_classification content_disposition zip_archive thumbnail_raw_preview thumbnail_decode media_codecs; do
             cargo +"${NIGHTLY_VERSION}" fuzz run "${target}" -- -max_total_time=20 -timeout=10
           done
