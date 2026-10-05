@@ -20,7 +20,7 @@ Crabinet started as a small project to replace File Browser. Ideas, feature sugg
 
 ## What you can do
 
-- **Browse your existing files.** Files remain in normal server directories. Navigate a folder tree, see folder sizes as they are counted in the background, show hidden files when needed, and download files with range support, or whole folders and any selection of files and folders as streamed ZIP archives.
+- **Browse your existing files.** Files remain in normal server directories. Navigate a folder tree, see folder sizes as they are counted in the background, show hidden files when needed, and download files with range support, or whole folders and any selection of files and folders as streamed ZIP archives that compress text automatically.
 - **Upload and organize.** Drag and drop uploads, create folders, rename and move entries within a share, edit UTF-8 text, and move files or folders to Trash with restore support.
 - **Preview before downloading.** Read highlighted code and text, rendered GitHub Flavored Markdown, HTML with rendered/source views, and SVG with image/source views. Large text files preview their first lines. See the first page of a PDF, play audio, video, and animated GIF and WebP, and view photos as server-rendered thumbnails, including the embedded previews of camera RAW files such as DNG, NEF, and CR2; AVIF and HEIC photos show as the original where the browser decodes them (HEIC in Safari). Open images, SVG, PDFs, and text in a new tab in the browser's own viewer, or download them. Preview sizes are bounded; HTML and SVG previews block scripts and network requests.
 - **Choose who gets access.** Configure users and per-share read or write grants. Sign in with a password or OpenID Connect, and optionally enroll passkeys.

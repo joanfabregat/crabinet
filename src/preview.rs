@@ -1580,6 +1580,49 @@ fn classify_streamed(header: &[u8]) -> Result<Option<StreamedMedia>, PreviewErro
     Ok(classify_audio_video(header))
 }
 
+/// Leading bytes of compressed containers that previews do not classify:
+/// ZIP (and the formats built on it, such as DOCX, ODT, EPUB, JAR, and APK),
+/// gzip, xz, Zstandard, LZ4, 7-Zip, RAR, and WOFF fonts. bzip2 is checked
+/// separately, since its three-byte magic alone is too weak.
+const COMPRESSED_MAGIC: [&[u8]; 10] = [
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"\x1f\x8b",
+    b"\xfd7zXZ\x00",
+    b"\x28\xb5\x2f\xfd",
+    b"7z\xbc\xaf\x27\x1c",
+    b"Rar!\x1a\x07",
+    b"wOFF",
+    b"wOF2",
+    b"\x04\x22\x4d\x18",
+];
+
+/// Whether a file's leading bytes name an already-compressed format: a
+/// raster image, PDF, or compressed audio or video recognized by the same
+/// signature rules as previews, or a compressed container. Archives store
+/// such a file rather than deflating it again.
+pub(crate) fn has_compressed_signature(header: &[u8]) -> bool {
+    let bzip2 = header.len() >= 10
+        && header.starts_with(b"BZh")
+        && header[3].is_ascii_digit()
+        && header[4..10] == *b"\x31\x41\x59\x26\x53\x59";
+    bzip2
+        || COMPRESSED_MAGIC
+            .iter()
+            .any(|magic| header.starts_with(magic))
+        || classify_image(header).is_some()
+        || is_pdf(header)
+        || classify_audio_video(header)
+            .is_some_and(|media| media != StreamedMedia::Audio("audio/wav"))
+}
+
+/// Whether a bounded prefix reads as text under the text-preview rules:
+/// UTF-8 without binary control characters, tolerating a multibyte
+/// character cut by the bound unless the prefix is the whole file.
+pub(crate) fn is_text_prefix(header: &[u8], at_end: bool) -> bool {
+    check_text_prefix(header, at_end).is_ok()
+}
+
 /// `%PDF-` at the start, or later in the first kilobyte as browsers accept.
 ///
 /// A late marker counts only when the prefix is not clean UTF-8 text, so a

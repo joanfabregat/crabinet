@@ -605,7 +605,11 @@ test.describe("writable share operations", () => {
   }) => {
     await openSignedIn(page, "/writable", "writer");
     await chooseFiles(page.getByLabel("Choose files to upload"), [
-      { name: "select-a.txt", mimeType: "text/plain", contents: "first\n" },
+      {
+        name: "select-a.txt",
+        mimeType: "text/plain",
+        contents: "first\n".repeat(400),
+      },
       { name: "select-b.txt", mimeType: "text/plain", contents: "second\n" },
       { name: "select-c.txt", mimeType: "text/plain", contents: "third\n" },
     ]);
@@ -669,7 +673,11 @@ test.describe("writable share operations", () => {
     expect(await download.failure()).toBeNull();
     const archive = await readFile((await download.path())!);
     // The selected files sit at the top level, with no folder around them.
-    expect(zipEntryNames(archive)).toEqual(["select-a.txt", "select-b.txt"]);
+    // Text of at least 1 KiB is deflated; a shorter file is stored.
+    expect(zipEntries(archive)).toEqual([
+      { name: "select-a.txt", method: 8 },
+      { name: "select-b.txt", method: 0 },
+    ]);
 
     await bar.getByRole("button", { name: "Delete" }).click();
     const confirm = page.getByRole("dialog", {
@@ -734,16 +742,26 @@ async function readText(page: Page, shareId: string, path: string) {
   return body.text as string;
 }
 
-/** The entry names in a ZIP archive's central directory, in order. */
-function zipEntryNames(archive: Buffer): string[] {
-  const names: string[] = [];
-  let at = archive.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
-  while (at !== -1 && archive.readUInt32LE(at) === 0x02014b50) {
+/**
+ * The entries in a small ZIP archive's central directory, in order, with
+ * their compression methods (0 stored, 8 deflated). The directory is found
+ * through the end record, which has no comment.
+ */
+function zipEntries(archive: Buffer): { name: string; method: number }[] {
+  const end = archive.length - 22;
+  expect(archive.readUInt32LE(end)).toBe(0x06054b50);
+  const count = archive.readUInt16LE(end + 10);
+  let at = archive.readUInt32LE(end + 16);
+  const entries: { name: string; method: number }[] = [];
+  for (let index = 0; index < count; index++) {
+    expect(archive.readUInt32LE(at)).toBe(0x02014b50);
+    const method = archive.readUInt16LE(at + 10);
     const nameLength = archive.readUInt16LE(at + 28);
     const extraLength = archive.readUInt16LE(at + 30);
     const commentLength = archive.readUInt16LE(at + 32);
-    names.push(archive.toString("utf8", at + 46, at + 46 + nameLength));
+    const name = archive.toString("utf8", at + 46, at + 46 + nameLength);
+    entries.push({ name, method });
     at += 46 + nameLength + extraLength + commentLength;
   }
-  return names;
+  return entries;
 }
