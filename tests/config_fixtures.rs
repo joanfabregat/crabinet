@@ -125,6 +125,7 @@ fn every_invalid_fixture_is_rejected() {
         include_str!("fixtures/config/invalid/unknown-proxy-header.toml"),
         include_str!("fixtures/config/invalid/share-id-leading-dot.toml"),
         include_str!("fixtures/config/invalid/oidc-subject-without-email.toml"),
+        include_str!("fixtures/config/invalid/folder-sizes-type.toml"),
     ];
     for (index, template) in fixtures.into_iter().enumerate() {
         let temp = tempfile::tempdir().unwrap();

@@ -698,6 +698,39 @@ test("a folder downloads as a ZIP of its files", async ({ page }) => {
   await expect(page).toHaveURL(/\/read-only\/nested$/);
 });
 
+test("a folder row shows its size once the server has walked it", async ({
+  page,
+}) => {
+  const walked = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+      "/api/v1/shares/read-only/folder-size",
+  );
+  await openSignedIn(page, "/read-only");
+
+  const row = page
+    .getByRole("list", { name: "Folder contents" })
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("link", { name: "nested", exact: true }) });
+  // The Size column stays visible on narrow screens, so phones ask too.
+  await expect(row.locator(".entry-meta")).toBeVisible();
+  await expect(row.locator(".entry-meta")).toHaveText("64 B");
+  const response = await walked;
+  expect(await response.json()).toEqual({
+    shareId: "read-only",
+    path: "nested",
+    size: 64,
+    complete: true,
+  });
+  await expect(page.getByRole("img", { name: "Calculating size" })).toHaveCount(
+    0,
+  );
+  const results = await new AxeBuilder({ page })
+    .include(".entry-list")
+    .analyze();
+  expect(results.violations).toEqual([]);
+});
+
 test("an iPad in portrait shows two columns", async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 1180 });
   await openSignedIn(page);

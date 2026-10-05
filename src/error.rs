@@ -37,6 +37,8 @@ pub enum AppError {
     Busy,
     #[error("resource is not valid UTF-8 text")]
     UnsupportedMedia,
+    #[error("feature is disabled by the server configuration")]
+    FeatureDisabled,
     #[error("internal service error")]
     Internal,
 }
@@ -124,6 +126,13 @@ impl AppError {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_media_type",
                 "Resource is not supported as text",
+            ),
+            // Like an unknown route, but named, so a client that ignored the
+            // session's settings can tell the feature is switched off.
+            Self::FeatureDisabled => (
+                StatusCode::NOT_FOUND,
+                "feature_disabled",
+                "This feature is disabled on this server",
             ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,

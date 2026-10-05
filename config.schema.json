@@ -167,6 +167,11 @@
           "description": "SQLite file. Relative paths are resolved from the configuration directory.",
           "type": "string"
         },
+        "folder_sizes": {
+          "description": "Show folder sizes in listings. Each shown folder is walked in the background, within a budget of 200,000 entries or 2 seconds.",
+          "type": "boolean",
+          "default": true
+        },
         "header_read_timeout_seconds": {
           "description": "Seconds to send a complete request head, also bounding keep-alive idle time.",
           "type": "integer",

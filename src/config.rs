@@ -185,6 +185,9 @@ struct RawServerConfig {
     /// cache.
     #[serde(default = "default_max_thumbnail_cache_size")]
     max_thumbnail_cache_size: String,
+    /// Show folder sizes in listings. Each shown folder is walked in the background, within a budget of 200,000 entries or 2 seconds.
+    #[serde(default = "default_true")]
+    folder_sizes: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -336,6 +339,7 @@ pub struct ServerConfig {
     max_image_decode_memory: u64,
     thumbnail_cache_path: Option<PathBuf>,
     max_thumbnail_cache_size: u64,
+    folder_sizes: bool,
 }
 
 #[derive(Clone)]
@@ -766,6 +770,7 @@ impl Config {
                 max_image_decode_memory,
                 thumbnail_cache_path,
                 max_thumbnail_cache_size,
+                folder_sizes: raw.server.folder_sizes,
             },
             users,
             shares,
@@ -887,6 +892,11 @@ impl ServerConfig {
 
     pub fn max_thumbnail_cache_size(&self) -> u64 {
         self.max_thumbnail_cache_size
+    }
+
+    /// Whether listings show folder sizes, walked in the background.
+    pub fn folder_sizes(&self) -> bool {
+        self.folder_sizes
     }
 }
 
@@ -1711,6 +1721,27 @@ permission = "write"
             let error = tree.load(&with(setting)).expect_err(setting).to_string();
             assert!(error.contains(message), "{setting}: {error}");
         }
+    }
+
+    #[test]
+    fn folder_sizes_default_on_and_can_be_switched_off() {
+        let tree = TestTree::new();
+        assert!(
+            tree.load(&tree.valid_text())
+                .unwrap()
+                .server()
+                .folder_sizes()
+        );
+        let off = tree.valid_text().replace(
+            "max_preview_size = \"1 MiB\"",
+            "max_preview_size = \"1 MiB\"\nfolder_sizes = false",
+        );
+        assert!(!tree.load(&off).unwrap().server().folder_sizes());
+        let invalid = off.replace("folder_sizes = false", "folder_sizes = \"off\"");
+        assert!(matches!(
+            tree.load(&invalid),
+            Err(ConfigError::Schema { .. })
+        ));
     }
 
     #[test]

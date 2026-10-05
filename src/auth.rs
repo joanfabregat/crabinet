@@ -315,6 +315,8 @@ struct SessionResponse {
     csrf_token: String,
     /// The running server release, shown to signed-in users only.
     version: &'static str,
+    /// Whether listings may request folder sizes (`server.folder_sizes`).
+    folder_sizes: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -976,6 +978,7 @@ impl AuthService {
             preferences,
             csrf_token,
             version: env!("CARGO_PKG_VERSION"),
+            folder_sizes: browse.folder_sizes_enabled(),
         })
     }
 
@@ -2273,6 +2276,8 @@ mod tests {
         let session_json: serde_json::Value = serde_json::from_slice(&session_body).unwrap();
         assert_eq!(session_json["csrfToken"], csrf);
         assert_eq!(session_json["version"], env!("CARGO_PKG_VERSION"));
+        // AppState::with_auth carries the default browse limits.
+        assert_eq!(session_json["folderSizes"], true);
 
         let rejected_logout = app_router(AppState::with_auth(true, auth.service.clone()))
             .oneshot(post("/api/v1/auth/logout", ""))

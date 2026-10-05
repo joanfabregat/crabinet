@@ -32,6 +32,11 @@ export interface Session {
   csrfToken: string;
   /** The running server release, e.g. "0.3.0". */
   version?: string;
+  /**
+   * Whether listings may request folder sizes. Servers that predate the
+   * setting leave it out, which means no.
+   */
+  folderSizes?: boolean;
 }
 
 export interface DefaultFolder {
@@ -96,6 +101,15 @@ export interface EntryMetadata {
   accessedAtMs?: number;
   createdAtMs?: number;
   etag: string;
+}
+
+/** The total size of the files beneath one folder. */
+export interface FolderSize {
+  shareId: string;
+  path: string;
+  size: number;
+  /** False when the server stopped counting early: `size` is a lower bound. */
+  complete: boolean;
 }
 
 export interface TextDocument {
@@ -345,6 +359,12 @@ export interface ApiClient {
     path: string,
     signal?: AbortSignal,
   ): Promise<EntryMetadata>;
+  /** Walks one folder on the server, within its budget, for its size. */
+  folderSize(
+    shareId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<FolderSize>;
   /**
    * Starts an archive of a folder, a file, or a selection of one folder's
    * entries (see {@link archiveUrl}) and cancels it as soon as the server
@@ -687,6 +707,16 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
           {
             signal,
           },
+          true,
+        ),
+        shareId,
+        path,
+      ),
+    folderSize: async (shareId, path, signal) =>
+      parseFolderSize(
+        await request<unknown>(
+          fileApiUrl(shareId, path, "folder-size"),
+          { signal },
           true,
         ),
         shareId,
@@ -1301,6 +1331,8 @@ function parseSession(value: unknown): Session {
       typeof value.user.pictureUrl !== "string") ||
     typeof value.csrfToken !== "string" ||
     (value.version !== undefined && typeof value.version !== "string") ||
+    (value.folderSizes !== undefined &&
+      typeof value.folderSizes !== "boolean") ||
     !Array.isArray(value.shares) ||
     !value.shares.every(isShare) ||
     !isOptionalDefaultFolder(value.defaultFolder) ||
@@ -1547,6 +1579,30 @@ function parseMetadata(
     throw invalidResponse();
   }
   return value as unknown as EntryMetadata;
+}
+
+function parseFolderSize(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): FolderSize {
+  if (
+    !isRecord(value) ||
+    value.shareId !== expectedShareId ||
+    value.path !== expectedPath ||
+    typeof value.size !== "number" ||
+    !Number.isSafeInteger(value.size) ||
+    value.size < 0 ||
+    typeof value.complete !== "boolean"
+  ) {
+    throw invalidResponse();
+  }
+  return {
+    shareId: expectedShareId,
+    path: expectedPath,
+    size: value.size,
+    complete: value.complete,
+  };
 }
 
 function isOptionalTimestamp(value: unknown): boolean {

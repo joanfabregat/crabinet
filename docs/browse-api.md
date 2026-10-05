@@ -88,13 +88,30 @@ At most 4 archives run concurrently across the process and 2 per authenticated u
 
 The browser client first requests the archive with `fetch`, cancels it once the response headers show it was admitted, and then hands the same URL to the browser as a download. A refusal is shown in the app instead of replacing the page with a JSON error. The extra request repeats the walk once.
 
-Every browse response, including share discovery, listings, metadata, text, downloads, and archives, sets `Cache-Control: no-store, private` so authenticated content does not remain in the browser disk cache after sign-out. ETags remain available for explicit `If-None-Match`, `If-Range`, and mutation `If-Match` requests.
+Every browse response, including share discovery, listings, metadata, folder sizes, text, downloads, and archives, sets `Cache-Control: no-store, private` so authenticated content does not remain in the browser disk cache after sign-out. ETags remain available for explicit `If-None-Match`, `If-Range`, and mutation `If-Match` requests.
 
 ### Selection archives
 
 The same route archives a selection when `path` names a file or repeats: `GET /api/v1/shares/{shareId}/archive?path=reports/a.pdf&path=reports/2024`. Each value is decoded once and parsed with the virtual path grammar, like every other `path` parameter; other parameters are ignored. One empty or absent `path` is still the share root, and one `path` naming a folder is still the folder archive above. Otherwise the archive has no wrapping folder: every selected entry sits at the top level, a file as `name` and a folder as `name/` followed by its contents, in name order. The attachment is named after the selected file for a single file (`a.pdf.zip`), and after the selection's directory for several entries (`reports.zip`, or the share ID at the share root).
 
 Every selected path must have the same parent directory, so a selection cannot overlap itself (a folder together with an entry inside it) and its top-level names cannot collide; mixed parents, a duplicate path, the share root inside a selection, or an invalid path return `400` (`invalid_request`). A query string longer than 256 KiB or naming more than 1,000 paths returns `413` (`too_large`) before any path is parsed. Reverse proxies often cap the request line well below that (8 KiB is a common default), which bounds a selection of long names first; such a proxy answers `414`, and the client shows a generic archive error. A missing selected path, or one naming a link, special file, or hard-link alias, returns the same `404` as a missing folder, so a selection discloses nothing that single requests would not. One walk budget covers the whole selection: each selected entry counts as one scanned entry, and file sizes, entry counts, and name bytes (each name including its selected top-level component) accumulate across all selected entries against the same limits as a folder, with the same depth limit. The same archive gate applies, and files are reopened and checked while streaming exactly as for a folder.
+
+## Folder size
+
+`GET /api/v1/shares/{shareId}/folder-size?path=relative/folder` returns the total size of the files beneath one folder; an absent or empty `path` measures the share root. Any grant on the share, read or read-write, may ask. The listing never includes folder sizes, so a client asks separately for the folders it shows.
+
+```json
+{
+  "shareId": "documents",
+  "path": "reports",
+  "size": 1234567,
+  "complete": true
+}
+```
+
+`size` is the sum of the file lengths counted, in bytes. The walk uses the [folder archive](#folder-archive)'s entry policy through the share capability: links are never followed, and links, special files, hard-link aliases, invalid names, and Crabinet's internal entries (including Trash) are not counted, while hidden files are. Each walk stops after 200,000 scanned entries or 2 seconds, whichever comes first. A walk cut short, or one that skipped a subfolder it could not read or that lies below the 64-component depth limit, returns what it counted with `complete: false`; `size` is then a lower bound. Only the folder itself must exist and be readable: a missing path, a file, a link, an ungranted share, and an unreadable folder return the same `404` as the listing, and an invalid path returns `400`.
+
+Walks run on the blocking pool behind their own gate: at most 8 across the process and 4 per authenticated user, refused beyond it with `429` (`busy`) and `Retry-After`. Results are cached in memory for 60 seconds, keyed by share and folder and shared by every user granted the share, with at most 2,048 entries; the grant is checked on every request before the cache is read, and a cached answer takes no gate slot. A successful mutation in a share forgets that share's cached sizes. While a [directory event stream](frontend-api-contract.md#directory-browsing) is open, each change its watch reports forgets the size of the changed entry and everything beneath it, and of the watched folder and each of its ancestors. A change made outside Crabinet that no open stream observes, such as one deeper than the watched folder, shows after the cached size expires. When `server.folder_sizes` is `false`, the route returns `404` with code `feature_disabled` to every signed-in user, before the share is checked.
 
 ## Default resource limits
 
@@ -110,5 +127,7 @@ Every selected path must have the same parent directory, so a selection cannot o
 | Paths in one selection archive | 1,000 |
 | Selection archive query string | 256 KiB |
 | Streaming read chunk | 64 KiB |
+| Folder-size walk | 200,000 scanned entries or 2 seconds |
+| Cached folder sizes | 2,048 entries for 60 seconds |
 
-All values except the archive name, selection path, and query-string limits, which are fixed, are startup configuration inputs through `BrowseLimits`; invalid zero or internally inconsistent limits prevent browse-state construction. Startup must also provide a non-zero 32-byte cursor HMAC secret from the authenticated application configuration; it is never accepted from a request.
+All values except the archive name, selection path, query-string, and folder-size limits, which are fixed, are startup configuration inputs through `BrowseLimits`; invalid zero or internally inconsistent limits prevent browse-state construction. Startup must also provide a non-zero 32-byte cursor HMAC secret from the authenticated application configuration; it is never accepted from a request.

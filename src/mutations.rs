@@ -509,7 +509,7 @@ async fn create_directory(
         create_directory_inner(&state, &identity, &raw_share_id, body).await
     }
     .await;
-    audited(&identity, &raw_share_id, "create_directory", result)
+    audited(&state, &identity, &raw_share_id, "create_directory", result)
 }
 
 async fn create_directory_inner(
@@ -553,7 +553,7 @@ async fn create_file(
         create_file_inner(&state, &identity, &raw_share_id, body).await
     }
     .await;
-    audited(&identity, &raw_share_id, "create_file", result)
+    audited(&state, &identity, &raw_share_id, "create_file", result)
 }
 
 async fn create_file_inner(
@@ -600,7 +600,7 @@ async fn save_text(
         save_text_inner(&state, &identity, &raw_share_id, query, &headers, body).await
     }
     .await;
-    audited(&identity, &raw_share_id, "save_text", result)
+    audited(&state, &identity, &raw_share_id, "save_text", result)
 }
 
 async fn save_text_inner(
@@ -678,7 +678,7 @@ async fn move_entry(
         move_entry_inner(&state, &identity, &raw_share_id, &headers, body).await
     }
     .await;
-    audited(&identity, &raw_share_id, "move", result)
+    audited(&state, &identity, &raw_share_id, "move", result)
 }
 
 async fn move_entry_inner(
@@ -735,7 +735,7 @@ async fn delete_entry(
         delete_entry_inner(&state, &identity, &raw_share_id, query, &headers).await
     }
     .await;
-    audited(&identity, &raw_share_id, "delete", result)
+    audited(&state, &identity, &raw_share_id, "delete", result)
 }
 
 async fn delete_entry_inner(
@@ -929,7 +929,7 @@ async fn restore_trash_item(
         restore_trash_item_inner(&state, &identity, &raw_share_id, &item_id, body).await
     }
     .await;
-    audited(&identity, &raw_share_id, "restore_trash", result)
+    audited(&state, &identity, &raw_share_id, "restore_trash", result)
 }
 
 async fn restore_trash_item_inner(
@@ -985,7 +985,7 @@ async fn purge_trash_item(
     ApiPath((raw_share_id, item_id)): ApiPath<(String, String)>,
 ) -> Result<Response, AppError> {
     let result = purge_trash_item_inner(&state, &identity, &raw_share_id, &item_id).await;
-    audited(&identity, &raw_share_id, "purge_trash", result)
+    audited(&state, &identity, &raw_share_id, "purge_trash", result)
 }
 
 async fn purge_trash_item_inner(
@@ -1028,7 +1028,7 @@ async fn empty_trash(
     ApiPath(raw_share_id): ApiPath<String>,
 ) -> Result<Response, AppError> {
     let result = empty_trash_inner(&state, &identity, &raw_share_id).await;
-    audited(&identity, &raw_share_id, "empty_trash", result)
+    audited(&state, &identity, &raw_share_id, "empty_trash", result)
 }
 
 /// Permanently removes every published item in the share's Trash, in
@@ -1104,7 +1104,7 @@ async fn upload_files(
         upload_files_inner(&state, &identity, &raw_share_id, query, &headers, multipart).await
     }
     .await;
-    audited(&identity, &raw_share_id, "upload", result)
+    audited(&state, &identity, &raw_share_id, "upload", result)
 }
 
 async fn upload_files_inner(
@@ -1556,13 +1556,20 @@ fn finish_mutation(
 }
 
 /// Emits the rejection audit event for any failed mutation, then returns
-/// the public error.
+/// the public error. A successful mutation forgets the share's cached
+/// folder sizes, since the sizes of the changed entries' ancestors are stale.
 fn audited(
+    state: &AppState,
     identity: &AuthenticatedIdentity,
     raw_share_id: &str,
     operation: &'static str,
     result: MutationResult<Response>,
 ) -> Result<Response, AppError> {
+    if result.is_ok()
+        && let Ok(share_id) = ShareId::new(raw_share_id.to_owned())
+    {
+        state.browse().invalidate_folder_sizes(&share_id);
+    }
     result.map_err(|rejection| {
         // Only a syntactically valid share ID is logged verbatim.
         let share_id = if ShareId::new(raw_share_id.to_owned()).is_ok() {
@@ -1603,6 +1610,7 @@ fn app_reason(error: &AppError) -> &'static str {
         AppError::ShareTooDeepToMeasure => "share_too_deep_to_measure",
         AppError::Busy | AppError::TooManyRequests => "busy",
         AppError::UnsupportedMedia => "unsupported_media",
+        AppError::FeatureDisabled => "feature_disabled",
         AppError::Unauthorized
         | AppError::AuthenticationFailed
         | AppError::ReauthenticationRequired => "unauthenticated",

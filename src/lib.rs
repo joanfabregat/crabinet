@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 mod extract;
 pub mod filesystem;
+pub(crate) mod folder_sizes;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
