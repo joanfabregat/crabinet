@@ -195,7 +195,12 @@ export type PreviewKind =
   | "audio"
   | "video"
   /** A camera RAW file, shown only through its server-rendered thumbnail. */
-  | "raw";
+  | "raw"
+  /**
+   * A complete SVG document, recognized by the server from its content: its
+   * source, plus an image view from `svgPreviewUrl`.
+   */
+  | "svg";
 
 export type PreviewMimeType =
   | "image/png"
@@ -221,8 +226,15 @@ export interface PreviewDocument {
   mimeType?: PreviewMimeType;
   width?: number;
   height?: number;
+  /** The whole file's size, also when `source` is only its head. */
   size: number;
+  /**
+   * A text-like file above the server's preview limit: `source` is only its
+   * head, described by `shownBytes` and `shownLines`.
+   */
   truncated: boolean;
+  shownBytes?: number;
+  shownLines?: number;
   /** The open route serves this file inline in a new tab. */
   openable?: boolean;
   /** The thumbnail route can render this file (see `thumbnailUrl`). */
@@ -928,6 +940,7 @@ const previewKinds = new Set<PreviewKind>([
   "audio",
   "video",
   "raw",
+  "svg",
 ]);
 
 /**
@@ -947,6 +960,52 @@ export function isStreamedPreviewKind(kind: PreviewKind): boolean {
 }
 
 const maxPreviewBytes = 16 * 1024 * 1024;
+/** The server returns at most this head of a file above its preview limit. */
+const maxHeadBytes = 64 * 1024;
+const maxHeadLines = 1000;
+
+/** Lines in `text`, counting a final line without a line feed. */
+export function countLines(text: string): number {
+  let lines = 0;
+  for (let index = text.indexOf("\n"); index !== -1;) {
+    lines += 1;
+    index = text.indexOf("\n", index + 1);
+  }
+  return text === "" || text.endsWith("\n") ? lines : lines + 1;
+}
+
+/**
+ * A whole document carries no head fields; a head is a text-like source no
+ * longer than the server's head bounds, shorter than the file, and exactly
+ * as long as its `shownBytes` and `shownLines` say.
+ */
+function previewHeadIsValid(
+  value: Record<string, unknown>,
+  streamed: boolean,
+): boolean {
+  if (value.truncated !== true) {
+    return value.shownBytes === undefined && value.shownLines === undefined;
+  }
+  const { shownBytes, shownLines } = value;
+  return (
+    !streamed &&
+    // An SVG preview is always a whole document.
+    value.kind !== "svg" &&
+    typeof value.source === "string" &&
+    typeof value.size === "number" &&
+    typeof shownBytes === "number" &&
+    Number.isSafeInteger(shownBytes) &&
+    shownBytes >= 0 &&
+    shownBytes <= maxHeadBytes &&
+    shownBytes < value.size &&
+    new TextEncoder().encode(value.source).byteLength === shownBytes &&
+    typeof shownLines === "number" &&
+    Number.isSafeInteger(shownLines) &&
+    shownLines >= 0 &&
+    shownLines <= maxHeadLines &&
+    countLines(value.source) === shownLines
+  );
+}
 
 function parsePreviewDocument(value: unknown): PreviewDocument {
   if (!isRecord(value)) throw invalidResponse();
@@ -962,12 +1021,15 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     typeof value.size !== "number" ||
     !Number.isSafeInteger(value.size) ||
     value.size < 0 ||
-    // Only buffered text is bound by the preview limit; streamed kinds are
-    // metadata about a file of any size.
-    (!streamed && value.size > maxPreviewBytes) ||
-    (!streamed &&
-      new TextEncoder().encode(value.source).byteLength !== value.size) ||
     typeof value.truncated !== "boolean" ||
+    // Only whole buffered text is bound by the preview limit; streamed kinds
+    // are metadata about a file of any size, and a head describes a larger
+    // file.
+    (!streamed && !value.truncated && value.size > maxPreviewBytes) ||
+    (!streamed &&
+      !value.truncated &&
+      new TextEncoder().encode(value.source).byteLength !== value.size) ||
+    !previewHeadIsValid(value, streamed) ||
     (value.openable !== undefined && typeof value.openable !== "boolean") ||
     (value.thumbnailable !== undefined &&
       typeof value.thumbnailable !== "boolean") ||
@@ -995,6 +1057,12 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     source: value.source as string,
     size: value.size as number,
     truncated: value.truncated as boolean,
+    ...(typeof value.shownBytes === "number"
+      ? { shownBytes: value.shownBytes }
+      : {}),
+    ...(typeof value.shownLines === "number"
+      ? { shownLines: value.shownLines }
+      : {}),
     ...(typeof value.openable === "boolean"
       ? { openable: value.openable }
       : {}),
@@ -1016,6 +1084,7 @@ function previewLanguageMatchesKind(
 ): boolean {
   if (kind === "html_source") return language === "html";
   if (kind === "markdown_source") return language === "markdown";
+  if (kind === "svg") return language === "xml";
   if (kind === "text") return language === undefined;
   if (streamedPreviewKinds.has(kind)) return language === undefined;
   return language !== "html" && language !== "markdown";
@@ -1104,6 +1173,14 @@ export function imagePreviewUrl(shareId: string, path: string): string {
   return fileApiUrl(shareId, path, "preview/image");
 }
 
+/**
+ * A whole SVG document as `image/svg+xml` under the sandboxed preview CSP,
+ * for an `<img>` only.
+ */
+export function svgPreviewUrl(shareId: string, path: string): string {
+  return fileApiUrl(shareId, path, "preview/svg");
+}
+
 export function directoryEventsUrl(shareId: string, path: string): string {
   if (!isValidVirtualPath(path)) {
     throw new ApiError("invalid-request", "The virtual path is invalid");
@@ -1141,7 +1218,8 @@ export function archiveUrl(
 
 /**
  * The inline view of a file whose signature the server allowlists: images,
- * PDF, audio, video, and text served as `text/plain`.
+ * PDF, audio, video, SVG as a sandboxed image, and text served as
+ * `text/plain`.
  */
 export function openUrl(shareId: string, path: string): string {
   return fileApiUrl(shareId, path, "open");

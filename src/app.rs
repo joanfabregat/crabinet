@@ -542,6 +542,14 @@ pub(crate) mod tests {
             .query("path=pixel.png"),
             Route::new(
                 "GET",
+                "/api/v1/shares/{share_id}/preview/svg",
+                Share,
+                Safe,
+                BUFFERED_READS,
+            )
+            .query("path=image.svg"),
+            Route::new(
+                "GET",
                 "/api/v1/shares/{share_id}/thumbnail",
                 Share,
                 Safe,
@@ -944,6 +952,11 @@ pub(crate) mod tests {
             png.extend_from_slice(&3_u32.to_be_bytes());
             fs::write(root.path().join("pixel.png"), png).expect("image fixture");
             fs::write(root.path().join("page.html"), b"<p>page</p>").expect("HTML fixture");
+            fs::write(
+                root.path().join("image.svg"),
+                b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+            )
+            .expect("SVG fixture");
             fs::write(
                 root.path().join("photo.png"),
                 crate::thumbnail::tests::png_fixture(4, 3, false),

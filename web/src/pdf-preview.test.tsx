@@ -73,9 +73,9 @@ describe("PdfFirstPage", () => {
     pdfjs.getDocument.mockReturnValue(pdf.task);
 
     render(<PdfFirstPage url="/api/pdf?path=a.pdf" filename="a.pdf" />);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Loading the first page",
-    );
+    expect(
+      screen.getByRole("status", { name: "Loading preview" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("img")).toBeNull();
 
     await waitFor(() => expect(pdfjs.getDocument).toHaveBeenCalledOnce());
@@ -262,9 +262,9 @@ describe("PdfFirstPage", () => {
     await Promise.resolve();
 
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Loading the first page",
-    );
+    expect(
+      screen.getByRole("status", { name: "Loading preview" }),
+    ).toBeInTheDocument();
     expect(first.getPage).not.toHaveBeenCalled();
   });
 });

@@ -110,7 +110,7 @@ struct RawServerConfig {
     session_secret_file: PathBuf,
     /// Maximum request upload size, for example "100 MiB".
     max_upload_size: String,
-    /// Maximum size of a file previewed as text, code, Markdown, or HTML, for example "2 MiB". Streamed images, PDF, audio, and video are not bound by it.
+    /// Largest text, code, Markdown, HTML, or SVG file previewed whole, for example "2 MiB"; a larger one previews only its first 64 KiB and 1,000 lines. Streamed images, PDF, audio, and video are not bound by it.
     max_preview_size: String,
     /// Maximum simultaneous Argon2 password verifications.
     #[serde(default = "default_auth_max_concurrent")]

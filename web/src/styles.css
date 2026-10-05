@@ -1781,6 +1781,41 @@ html.preview-fullscreen-open body {
   width: auto;
 }
 
+/* Positions the loading spinner over an image, PDF page, or media element
+   until it loads. While nothing has loaded yet, it reserves an area. */
+.preview-loading-frame {
+  position: relative;
+}
+
+.preview-loading-frame.is-loading {
+  min-height: 10rem;
+}
+
+/* A ring with an accent arc; with reduced motion it stays still. */
+.preview-spinner {
+  display: grid;
+  inset: 0;
+  place-items: center;
+  pointer-events: none;
+  position: absolute;
+}
+
+.preview-spinner::before {
+  animation: preview-spin 0.9s linear infinite;
+  border: 3px solid var(--line);
+  border-radius: 50%;
+  border-top-color: var(--accent);
+  content: "";
+  height: 2.25rem;
+  width: 2.25rem;
+}
+
+@keyframes preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .image-preview figcaption {
   color: var(--muted);
   font-size: 0.8rem;
@@ -2723,7 +2758,8 @@ html.preview-fullscreen-open body {
 @media (prefers-reduced-motion: reduce) {
   .directory-skeleton span,
   .selection-bar,
-  .toast {
+  .toast,
+  .preview-spinner::before {
     animation: none;
   }
 

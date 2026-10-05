@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   archiveUrl,
+  countLines,
   createApiClient,
   directoryEventsUrl,
   downloadUrl,
@@ -12,6 +13,7 @@ import {
   thumbnailStatus,
   thumbnailUrl,
   renderedHtmlPreviewUrl,
+  svgPreviewUrl,
   withCsrfRetry,
 } from "./api";
 
@@ -546,6 +548,65 @@ describe("API client", () => {
     );
   });
 
+  it("accepts the head of a large text file with its shown size and lines", async () => {
+    const source = "line\r\n".repeat(1000);
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "markdown_source",
+        source,
+        language: "markdown",
+        size: 40_000_000,
+        truncated: true,
+        shownBytes: 6000,
+        shownLines: 1000,
+        openable: true,
+      }),
+    );
+
+    await expect(
+      createApiClient({ fetch }).preview("docs", "big.md"),
+    ).resolves.toEqual({
+      kind: "markdown_source",
+      source,
+      language: "markdown",
+      size: 40_000_000,
+      truncated: true,
+      shownBytes: 6000,
+      shownLines: 1000,
+      openable: true,
+    });
+  });
+
+  it("accepts a whole SVG document as its own kind", async () => {
+    const source = "<svg xmlns='http://www.w3.org/2000/svg'/>";
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "svg",
+        source,
+        language: "xml",
+        size: source.length,
+        truncated: false,
+        openable: true,
+        thumbnailable: false,
+      }),
+    );
+
+    await expect(
+      createApiClient({ fetch }).preview("docs", "logo.svg"),
+    ).resolves.toMatchObject({ kind: "svg", language: "xml", source });
+    expect(svgPreviewUrl("docs", "art/logo.svg")).toBe(
+      "/api/v1/shares/docs/preview/svg?path=art%2Flogo.svg",
+    );
+  });
+
+  it("counts lines like the server, including a final line without a feed", () => {
+    expect(countLines("")).toBe(0);
+    expect(countLines("a")).toBe(1);
+    expect(countLines("a\n")).toBe(1);
+    expect(countLines("a\r\nb")).toBe(2);
+    expect(countLines("\n\n")).toBe(2);
+  });
+
   it("normalizes the backend's null language for plain text", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       Response.json({
@@ -615,6 +676,84 @@ describe("API client", () => {
     },
     { kind: "text", source: "bad\u0000text", size: 8, truncated: false },
     { kind: "text", source: "bad\u0085text", size: 9, truncated: false },
+    // Head fields on a whole document, or a head that misdescribes itself.
+    {
+      kind: "text",
+      source: "x",
+      size: 1,
+      truncated: false,
+      shownBytes: 1,
+      shownLines: 1,
+    },
+    { kind: "text", source: "a\n", size: 900, truncated: true },
+    {
+      kind: "text",
+      source: "a\n",
+      size: 900,
+      truncated: true,
+      shownBytes: 3,
+      shownLines: 1,
+    },
+    {
+      kind: "text",
+      source: "a\nb",
+      size: 900,
+      truncated: true,
+      shownBytes: 3,
+      shownLines: 1,
+    },
+    {
+      kind: "text",
+      source: "a\n",
+      size: 2,
+      truncated: true,
+      shownBytes: 2,
+      shownLines: 1,
+    },
+    {
+      kind: "text",
+      source: "a\n".repeat(1001),
+      size: 1_000_000,
+      truncated: true,
+      shownBytes: 2002,
+      shownLines: 1001,
+    },
+    {
+      kind: "text",
+      source: "a".repeat(64 * 1024 + 1),
+      size: 1_000_000,
+      truncated: true,
+      shownBytes: 64 * 1024 + 1,
+      shownLines: 1,
+    },
+    // Streamed kinds and SVG are never heads; SVG is always XML.
+    {
+      kind: "pdf",
+      source: "",
+      mimeType: "application/pdf",
+      size: 900,
+      truncated: true,
+      shownBytes: 0,
+      shownLines: 0,
+    },
+    {
+      kind: "svg",
+      source: "<svg/>\n",
+      language: "xml",
+      size: 900,
+      truncated: true,
+      shownBytes: 7,
+      shownLines: 1,
+    },
+    { kind: "svg", source: "<svg/>", size: 6, truncated: false },
+    {
+      kind: "svg",
+      source: "<svg/>",
+      language: "xml",
+      size: 6,
+      truncated: false,
+      thumbnailable: true,
+    },
     null,
     [],
   ])("rejects a malformed preview document %#", async (body) => {

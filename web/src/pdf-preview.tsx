@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type { PDFDocumentLoadingTask, RenderTask } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
+import { LoadingSpinner } from "./loading-spinner";
+
 /** Upper bound on the page canvas backing store, in device pixels. */
 export const MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
 /** pdf.js skips embedded images larger than this many pixels. */
@@ -191,9 +193,9 @@ export function PdfFirstPage({
   return (
     <div class="pdf-first-page" ref={containerRef}>
       {state.status === "loading" && (
-        <p class="status-message" role="status" aria-live="polite">
-          Loading the first page…
-        </p>
+        <div class="preview-loading-frame is-loading">
+          <LoadingSpinner />
+        </div>
       )}
       {state.status === "failed" && (
         <div class="preview-error" role="alert">
