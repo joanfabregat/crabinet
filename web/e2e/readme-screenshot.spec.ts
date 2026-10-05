@@ -17,6 +17,10 @@ test("capture the deterministic authenticated browser", async ({ page }) => {
     page.getByRole("heading", { name: "README.md", level: 2 }),
   ).toBeFocused();
   await expect(page.getByTestId("markdown-document")).toBeVisible();
+  // Folder sizes load in the background; capture them, not their spinners.
+  await expect(page.getByRole("img", { name: "Calculating size" })).toHaveCount(
+    0,
+  );
   await page.mouse.move(650, 700);
 
   await page.screenshot({
