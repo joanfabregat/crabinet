@@ -292,6 +292,7 @@ describe("secure file previews", () => {
           kind: "html_source",
           language: "html",
           openable: true,
+          renderable: true,
         }),
       ),
     });
@@ -381,6 +382,7 @@ describe("secure file previews", () => {
       previewDocument('<a href="https://example.com/">away</a>', {
         kind: "html_source",
         language: "html",
+        renderable: true,
       }),
     );
     const directory = vi.fn(async () => files);
@@ -1014,12 +1016,13 @@ describe("head-only previews of large text files", () => {
     expect(within(panel).getByText(notice(3, "22 B", "2.0 MB"))).toBeVisible();
   });
 
-  it("shows only the source of large HTML, never a rendered frame", async () => {
+  it("shows only the source of large HTML above the render limit, never a rendered frame", async () => {
     const source = "<script>window.__large = true</script>\n<p>hi</p>\n";
     const panel = await renderFile(
       headDocument(source, 2, 3_000_000, {
         kind: "html_source",
         language: "html",
+        renderable: false,
       }),
       "page.html",
     );
@@ -1038,7 +1041,71 @@ describe("head-only previews of large text files", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not frame a large HTML file in the rendered viewer", async () => {
+  it("shows the head of renderable large HTML as source with a link to the full-window viewer", async () => {
+    const source = "<script>window.__large = true</script>\n<p>hi</p>\n";
+    const panel = await renderFile(
+      headDocument(source, 2, 3_000_000, {
+        kind: "html_source",
+        language: "html",
+        renderable: true,
+      }),
+      "page.html",
+    );
+    expect(
+      await within(panel).findByText(notice(2, "49 B", "3.0 MB")),
+    ).toBeVisible();
+    expect(within(panel).getByLabelText("File source")).toHaveTextContent(
+      "<script>window.__large = true</script>",
+    );
+    // The panel never frames a head; the viewer renders the whole file.
+    expect(panel.querySelector("iframe")).toBeNull();
+    expect(within(panel).queryByRole("tab")).not.toBeInTheDocument();
+    const viewer = within(panel).getByRole("link", {
+      name: "Open rendered HTML in new tab",
+    });
+    expect(viewer).toHaveAttribute("href", "/docs/page.html?view=rendered");
+    expect(viewer).toHaveAttribute("target", "_blank");
+    expect(viewer).toHaveAttribute("rel", "noopener noreferrer");
+    expect(
+      within(panel).getByRole("button", {
+        name: /Scripts, forms, navigation, storage, popups, and network requests are disabled/,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("button", { name: "Edit page.html" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not frame an HTML file the server will not render", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "page.html",
+      view: "rendered",
+    });
+    render(
+      <App
+        api={fakeApi({
+          preview: vi.fn(async () =>
+            headDocument("<p>x</p>\n", 1, 300_000_000, {
+              kind: "html_source",
+              language: "html",
+              renderable: false,
+            }),
+          ),
+        })}
+        navigation={navigation}
+      />,
+    );
+    expect(
+      await screen.findByText("File is too large to render"),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Only HTML files within the render limit are rendered/),
+    ).toBeVisible();
+    expect(document.querySelector("iframe")).toBeNull();
+  });
+
+  it("frames a large HTML file in the rendered viewer when the server renders it", async () => {
     const navigation = new MemoryNavigation({
       shareId: "docs",
       path: "page.html",
@@ -1051,16 +1118,24 @@ describe("head-only previews of large text files", () => {
             headDocument("<p>x</p>\n", 1, 3_000_000, {
               kind: "html_source",
               language: "html",
+              renderable: true,
             }),
           ),
         })}
         navigation={navigation}
       />,
     );
+    const frame = await screen.findByTitle(
+      "Sandboxed HTML preview for page.html",
+    );
+    expect(frame).toHaveAttribute("sandbox", "");
+    expect(frame).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/html/rendered?path=page.html",
+    );
     expect(
-      await screen.findByText("File is too large to render"),
-    ).toBeVisible();
-    expect(document.querySelector("iframe")).toBeNull();
+      screen.queryByText("File is too large to render"),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -1127,6 +1202,32 @@ describe("SVG previews", () => {
     );
     fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
     expect(within(panel).getByLabelText("File source")).toBeVisible();
+  });
+
+  it("draws a large SVG whole from the SVG route and shows its head as source", async () => {
+    const head = "<svg xmlns='http://www.w3.org/2000/svg'>\n<rect/>\n";
+    const panel = await renderFile(
+      headDocument(head, 2, 5_000_000, { kind: "svg", language: "xml" }),
+      "map.svg",
+    );
+    expect(
+      await within(panel).findByRole("img", { name: "Preview of map.svg" }),
+    ).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/svg?path=map.svg&v=0-0",
+    );
+    expect(
+      within(panel).queryByRole("button", { name: "Edit map.svg" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
+    expect(
+      within(panel).getByText(
+        "Showing the first 2 lines (49 B) of 5.0 MB. Open in new tab or download for the full file.",
+      ),
+    ).toBeVisible();
+    expect(within(panel).getByLabelText("File source")).toHaveTextContent(
+      "<rect/>",
+    );
   });
 });
 

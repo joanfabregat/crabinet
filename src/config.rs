@@ -112,6 +112,12 @@ struct RawServerConfig {
     max_upload_size: String,
     /// Largest text, code, Markdown, HTML, or SVG file previewed whole, for example "2 MiB"; a larger one previews only its first 64 KiB and 1,000 lines. Streamed images, PDF, audio, and video are not bound by it.
     max_preview_size: String,
+    /// Largest HTML file rendered and largest SVG shown as an image, for
+    /// example "32 MiB", from `max_preview_size` up to "1 GiB". Both stream
+    /// from the file, so this bounds the work handed to the reader's browser,
+    /// not server memory.
+    #[serde(default = "default_max_render_size")]
+    max_render_size: String,
     /// Maximum simultaneous Argon2 password verifications.
     #[serde(default = "default_auth_max_concurrent")]
     #[schemars(range(min = 1, max = 16))]
@@ -163,7 +169,7 @@ struct RawServerConfig {
     #[serde(default = "default_header_read_timeout_seconds")]
     #[schemars(range(min = 5, max = 3_600))]
     header_read_timeout_seconds: u64,
-    /// Total memory, for example "256 MiB", that image thumbnail decodes may
+    /// Total memory, for example "128 MiB", that image thumbnail decodes may
     /// reserve at once, at most "4 GiB". Each decode reserves its estimated
     /// peak first; an image whose estimate exceeds the whole budget is not
     /// thumbnailed.
@@ -314,6 +320,7 @@ pub struct ServerConfig {
     session_secret_file: PathBuf,
     max_upload_size: u64,
     max_preview_size: u64,
+    max_render_size: u64,
     auth_max_concurrent: usize,
     session_idle_timeout_seconds: u64,
     session_absolute_timeout_seconds: u64,
@@ -410,6 +417,19 @@ impl Config {
         if max_preview_size > max_upload_size {
             return Err(ConfigError::Validation(
                 "server.max_preview_size must not exceed server.max_upload_size".into(),
+            ));
+        }
+        let max_render_size = parse_size(&raw.server.max_render_size).map_err(|reason| {
+            ConfigError::Validation(format!("server.max_render_size {reason}"))
+        })?;
+        if max_render_size < max_preview_size {
+            return Err(ConfigError::Validation(
+                "server.max_render_size must not be less than server.max_preview_size".into(),
+            ));
+        }
+        if max_render_size > crate::preview::HARD_MAX_RENDER_BYTES {
+            return Err(ConfigError::Validation(
+                "server.max_render_size must not exceed 1 GiB".into(),
             ));
         }
         if !(1..=16).contains(&raw.server.auth_max_concurrent) {
@@ -728,6 +748,7 @@ impl Config {
                 session_secret_file,
                 max_upload_size,
                 max_preview_size,
+                max_render_size,
                 auth_max_concurrent: raw.server.auth_max_concurrent,
                 session_idle_timeout_seconds: raw.server.session_idle_timeout_seconds,
                 session_absolute_timeout_seconds: raw.server.session_absolute_timeout_seconds,
@@ -800,6 +821,11 @@ impl ServerConfig {
 
     pub fn max_preview_size(&self) -> u64 {
         self.max_preview_size
+    }
+
+    /// The largest HTML file rendered and SVG shown as an image.
+    pub fn max_render_size(&self) -> u64 {
+        self.max_render_size
     }
 
     pub fn auth_max_concurrent(&self) -> usize {
@@ -995,8 +1021,12 @@ const fn default_header_read_timeout_seconds() -> u64 {
     300
 }
 
+fn default_max_render_size() -> String {
+    "32 MiB".into()
+}
+
 fn default_max_image_decode_memory() -> String {
-    "256 MiB".into()
+    "128 MiB".into()
 }
 
 fn default_max_thumbnail_cache_size() -> String {
@@ -1640,11 +1670,55 @@ permission = "write"
     }
 
     #[test]
+    fn render_size_defaults_and_is_bounded_by_the_preview_size_and_download_cap() {
+        let tree = TestTree::new();
+        assert_eq!(
+            tree.load(&tree.valid_text())
+                .unwrap()
+                .server()
+                .max_render_size(),
+            32 * 1024 * 1024
+        );
+        let with = |setting: &str| {
+            tree.valid_text().replace(
+                "max_preview_size = \"1 MiB\"",
+                &format!("max_preview_size = \"1 MiB\"\n{setting}"),
+            )
+        };
+        for (setting, bytes) in [
+            ("max_render_size = \"1 MiB\"", 1024 * 1024),
+            ("max_render_size = \"64 MiB\"", 64 * 1024 * 1024),
+            ("max_render_size = \"1 GiB\"", 1024 * 1024 * 1024),
+        ] {
+            assert_eq!(
+                tree.load(&with(setting))
+                    .unwrap()
+                    .server()
+                    .max_render_size(),
+                bytes,
+                "{setting}"
+            );
+        }
+        for (setting, message) in [
+            (
+                "max_render_size = \"1023 KiB\"",
+                "less than server.max_preview_size",
+            ),
+            ("max_render_size = \"1025 MiB\"", "must not exceed 1 GiB"),
+            ("max_render_size = \"0 B\"", "max_render_size"),
+            ("max_render_size = \"lots\"", "max_render_size"),
+        ] {
+            let error = tree.load(&with(setting)).expect_err(setting).to_string();
+            assert!(error.contains(message), "{setting}: {error}");
+        }
+    }
+
+    #[test]
     fn thumbnail_settings_have_defaults_and_bounds() {
         let tree = TestTree::new();
         let base = tree.config.parent().unwrap().canonicalize().unwrap();
         let config = tree.load(&tree.valid_text()).unwrap();
-        assert_eq!(config.server().max_image_decode_memory(), 256 * 1024 * 1024);
+        assert_eq!(config.server().max_image_decode_memory(), 128 * 1024 * 1024);
         assert_eq!(
             config.server().max_thumbnail_cache_size(),
             256 * 1024 * 1024

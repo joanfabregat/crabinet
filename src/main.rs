@@ -85,7 +85,9 @@ async fn main() -> Result<()> {
     // listening socket is created. Invalid policy must never result in a partially started app.
     let config = Config::load(&cli.config).context("startup configuration is invalid")?;
     let preview_policy = PreviewPolicy::new(config.server().max_preview_size())
-        .context("configured preview limit is unsafe")?;
+        .context("configured preview limit is unsafe")?
+        .with_max_render_bytes(config.server().max_render_size())
+        .context("configured render limit is unsafe")?;
     let mutation_state = MutationState::from_max_upload_bytes(config.server().max_upload_size())
         .context("configured upload limit is unsafe")?;
     let browse = browse_state(&config).context("cannot initialize configured shares")?;

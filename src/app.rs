@@ -529,7 +529,7 @@ pub(crate) mod tests {
                 "/api/v1/shares/{share_id}/preview/html/rendered",
                 Share,
                 Safe,
-                BUFFERED_READS,
+                DOWNLOADS,
             )
             .query("path=page.html"),
             Route::new(
@@ -545,7 +545,7 @@ pub(crate) mod tests {
                 "/api/v1/shares/{share_id}/preview/svg",
                 Share,
                 Safe,
-                BUFFERED_READS,
+                DOWNLOADS,
             )
             .query("path=image.svg"),
             Route::new(

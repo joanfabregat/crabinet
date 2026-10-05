@@ -204,13 +204,18 @@
           "minimum": 1
         },
         "max_image_decode_memory": {
-          "description": "Total memory, for example \"256 MiB\", that image thumbnail decodes may\nreserve at once, at most \"4 GiB\". Each decode reserves its estimated\npeak first; an image whose estimate exceeds the whole budget is not\nthumbnailed.",
+          "description": "Total memory, for example \"128 MiB\", that image thumbnail decodes may\nreserve at once, at most \"4 GiB\". Each decode reserves its estimated\npeak first; an image whose estimate exceeds the whole budget is not\nthumbnailed.",
           "type": "string",
-          "default": "256 MiB"
+          "default": "128 MiB"
         },
         "max_preview_size": {
           "description": "Largest text, code, Markdown, HTML, or SVG file previewed whole, for example \"2 MiB\"; a larger one previews only its first 64 KiB and 1,000 lines. Streamed images, PDF, audio, and video are not bound by it.",
           "type": "string"
+        },
+        "max_render_size": {
+          "description": "Largest HTML file rendered and largest SVG shown as an image, for\nexample \"32 MiB\", from `max_preview_size` up to \"1 GiB\". Both stream\nfrom the file, so this bounds the work handed to the reader's browser,\nnot server memory.",
+          "type": "string",
+          "default": "32 MiB"
         },
         "max_sessions_per_user": {
           "description": "Maximum simultaneously active sessions retained for one user.",

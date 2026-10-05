@@ -38,6 +38,14 @@ mv \
 # A synthetic log above the 256 KiB preview limit: 6,000 lines of 52 bytes.
 awk 'BEGIN { for (i = 1; i <= 6000; i++) printf "2026-01-01T00:00:00Z entry %05d synthetic log line\n", i }' \
   >"$state_dir/read-only/server.log"
+# Synthetic HTML (294 kB) and SVG (437 kB) above the preview limit and within
+# the 1 MiB render limit, and HTML (1.15 MB) above the render limit.
+awk 'BEGIN { print "<!doctype html><title>Large page</title>"; for (i = 1; i <= 6000; i++) printf "<p>synthetic paragraph %05d of a large page</p>\n", i; print "<p id=\"last\">End of the large page</p>" }' \
+  >"$state_dir/read-only/large.html"
+awk 'BEGIN { for (i = 1; i <= 24000; i++) printf "<p>synthetic paragraph %05d of a huge page</p>\n", i }' \
+  >"$state_dir/read-only/huge.html"
+awk 'BEGIN { print "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\">"; for (i = 1; i <= 8000; i++) printf "<rect x=\"%d\" y=\"0\" width=\"1\" height=\"1\" fill=\"none\"/>\n", i % 320; print "<circle cx=\"160\" cy=\"100\" r=\"80\" fill=\"teal\"/></svg>" }' \
+  >"$state_dir/read-only/large.svg"
 cp -R "$script_dir/fixtures/writable" "$state_dir/writable"
 printf '%s' 'crabinet-e2e-only-session-secret-000000000000000000000000' >"$state_dir/session.key"
 chmod 600 "$state_dir/session.key"

@@ -57,7 +57,7 @@ use crate::{
 /// The long-edge sizes a client may request. Anything else is `400`.
 pub const SIZES: [u32; 2] = [256, 1600];
 /// The default `max_image_decode_memory`.
-pub const DEFAULT_MAX_DECODE_MEMORY: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_MAX_DECODE_MEMORY: u64 = 128 * 1024 * 1024;
 /// The ceiling for `max_image_decode_memory`. One image at the pixel cap
 /// (100 megapixels) needs at most about 1 GiB on its worst decode path
 /// (progressive JPEG coefficients plus planes, or a WebP frame and canvas),

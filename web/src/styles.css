@@ -1517,6 +1517,14 @@ html.preview-fullscreen-open body {
   color: var(--accent);
 }
 
+/* A single view's name where a tab list would otherwise stand. */
+.preview-tabs-label {
+  flex: 1;
+  font-weight: 750;
+  margin: 0;
+  padding: 0.65rem 0.9rem;
+}
+
 .markdown-document {
   line-height: 1.65;
   overflow-wrap: anywhere;

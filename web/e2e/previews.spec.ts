@@ -207,3 +207,104 @@ test("a hostile SVG renders as an inert image in the panel and in a new tab", as
   expect(effects.dialogs).toEqual([]);
   expect(effects.foreign).toEqual([]);
 });
+
+test("HTML above the preview limit shows its head in the panel and renders whole in the viewer", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const origin = new URL(baseURL!).origin;
+  const effects = watchHostileEffects(context, origin);
+
+  await openSignedIn(page, "/read-only");
+  await page.getByRole("link", { name: "large.html", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "large.html" });
+  await expect(panel.getByText(/^Showing the first 1000 lines/)).toBeVisible();
+  await expect(panel.getByLabel("File source")).toContainText(
+    "synthetic paragraph 00001 of a large page",
+  );
+  // The panel never frames a head.
+  await expect(panel.locator("iframe")).toHaveCount(0);
+
+  const response = await page.request.get(
+    "/api/v1/shares/read-only/preview?path=large.html",
+  );
+  expect(await response.json()).toMatchObject({
+    kind: "html_source",
+    truncated: true,
+    size: 294_080,
+    renderable: true,
+  });
+
+  const [viewer] = await Promise.all([
+    page.waitForEvent("popup"),
+    panel
+      .getByRole("link", { name: "Open rendered HTML in new tab", exact: true })
+      .click(),
+  ]);
+  await expect(viewer).toHaveURL(/\/read-only\/large\.html\?view=rendered$/);
+  const frame = viewer.getByTitle("Sandboxed HTML preview for large.html");
+  await expect(frame).toHaveAttribute("sandbox", "");
+  await expect(frame).toHaveAttribute(
+    "src",
+    "/api/v1/shares/read-only/preview/html/rendered?path=large.html",
+  );
+  // The whole document streams in, not only the head the panel shows.
+  await expect(frame.contentFrame().locator("#last")).toHaveText(
+    "End of the large page",
+  );
+  await viewer.close();
+
+  // Under the same headers as a small document.
+  const rendered = await page.request.get(
+    "/api/v1/shares/read-only/preview/html/rendered?path=large.html",
+  );
+  expect(rendered.status()).toBe(200);
+  expect(rendered.headers()["content-type"]).toBe("text/html; charset=utf-8");
+  expect(rendered.headers()["content-security-policy"]).toMatch(
+    /^sandbox; default-src 'none'/,
+  );
+  expect(rendered.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(rendered.headers()["content-length"]).toBe("294080");
+
+  // Above the render limit, the viewer refuses and the route answers 413.
+  const huge = await page.request.get(
+    "/api/v1/shares/read-only/preview/html/rendered?path=huge.html",
+  );
+  expect(huge.status()).toBe(413);
+  await page.goto("/read-only/huge.html?view=rendered");
+  await expect(page.getByText("File is too large to render")).toBeVisible();
+  await expect(page.locator("iframe")).toHaveCount(0);
+
+  expect(effects.dialogs).toEqual([]);
+  expect(effects.foreign).toEqual([]);
+});
+
+test("an SVG above the preview limit is drawn whole and opens as an image", async ({
+  page,
+}) => {
+  await openSignedIn(page, "/read-only");
+  await page.getByRole("link", { name: "large.svg", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "large.svg" });
+  const image = panel.getByRole("img", { name: "Preview of large.svg" });
+  await expect(image).toHaveAttribute(
+    "src",
+    "/api/v1/shares/read-only/preview/svg?path=large.svg&v=0-0",
+  );
+  await expect
+    .poll(() =>
+      image.evaluate((element: HTMLImageElement) => element.naturalWidth),
+    )
+    .toBe(320);
+  await panel.getByRole("tab", { name: "Source" }).click();
+  await expect(panel.getByText(/^Showing the first 1000 lines/)).toBeVisible();
+
+  const opened = await page.request.get(
+    "/api/v1/shares/read-only/open?path=large.svg",
+  );
+  expect(opened.headers()["content-type"]).toBe("image/svg+xml");
+  expect(opened.headers()["content-security-policy"]).toMatch(
+    /^sandbox; default-src 'none'/,
+  );
+  expect(opened.headers()["content-length"]).toBe("437369");
+});

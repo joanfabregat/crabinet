@@ -2465,10 +2465,16 @@ function PreviewContent({
   inlineUrl: string;
   filename: string;
 }) {
-  // Only the head of a large HTML file arrived, and the server renders only
-  // whole documents, so it shows as source alone.
+  // Only the head of a large HTML file arrived, so the panel shows it as
+  // source alone. Within the server's render limit, the full-window viewer
+  // still renders the whole file.
   if (document.kind === "html_source" && document.truncated) {
-    return <SourcePreview document={document} />;
+    return (
+      <HtmlHeadPreview
+        document={document}
+        renderedViewUrl={htmlRenderedViewUrl}
+      />
+    );
   }
 
   if (document.kind === "html_source") {
@@ -2871,6 +2877,43 @@ function SvgPreview({
   );
 }
 
+/**
+ * The head of an HTML file above the preview limit, as source. When the
+ * server reports the file renderable, Crabinet's full-window viewer renders
+ * the whole document in the same empty-sandbox iframe as the panel.
+ */
+function HtmlHeadPreview({
+  document,
+  renderedViewUrl,
+}: {
+  document: PreviewDocument;
+  /** Crabinet's full-window viewer, never the rendered endpoint itself. */
+  renderedViewUrl: string;
+}) {
+  return (
+    <div class="html-preview">
+      {document.renderable === true && (
+        <div class="preview-tabs-row">
+          <p class="preview-tabs-label">Source</p>
+          <TooltipLink
+            href={renderedViewUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            label="Open rendered HTML in new tab"
+          >
+            <ExternalLink size={18} aria-hidden="true" />
+          </TooltipLink>
+          <SecurityNote>
+            Rendered HTML runs in an isolated sandbox. Scripts, forms,
+            navigation, storage, popups, and network requests are disabled.
+          </SecurityNote>
+        </div>
+      )}
+      <SourcePreview document={document} />
+    </div>
+  );
+}
+
 function HtmlPreview({
   filename,
   source,
@@ -3002,14 +3045,15 @@ function RenderedHtmlView({
     api.preview(shareId, path, controller.signal).then(
       (document) => {
         if (controller.signal.aborted) return;
-        // A head is never rendered: the server refuses to render a file
-        // above the preview limit.
+        // The server decides what renders: the whole file streams within
+        // its render limit, even when the preview is only a head, and a
+        // larger file is refused rather than rendered from its head.
         setState(
           document.kind !== "html_source"
             ? { status: "not-html" }
-            : document.truncated
-              ? { status: "too-large" }
-              : { status: "ready" },
+            : document.renderable === true
+              ? { status: "ready" }
+              : { status: "too-large" },
         );
       },
       (cause: unknown) => {
@@ -3078,8 +3122,8 @@ function RenderedHtmlView({
           <div class="preview-error" role="alert">
             <h2>File is too large to render</h2>
             <p>
-              Only HTML files within the preview limit are rendered. Download
-              the file to view it.
+              Only HTML files within the render limit are rendered. Download the
+              file to view it.
             </p>
           </div>
         ) : (
