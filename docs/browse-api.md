@@ -27,6 +27,11 @@ Entries are sorted deterministically with directories first and then by normaliz
   "entries": [
     {
       "name": "archive",
+      "kind": "directory",
+      "folderSize": { "size": 1234567, "complete": true }
+    },
+    {
+      "name": "drafts",
       "kind": "directory"
     },
     {
@@ -39,7 +44,7 @@ Entries are sorted deterministically with directories first and then by normaliz
 }
 ```
 
-The cursor contains no host path. Its HMAC binds the authenticated subject, effective access grant, share ID, virtual path, offset, and a fingerprint of the sorted listing structure (each entry's kind, name, and file identity). Tampering, use by another user or grant, use for another directory, or an entry being added, removed, renamed, or replaced between pages rejects the cursor with `409`; clients should restart from the first page. Size and modification-time changes, such as a file still being written, do not invalidate the cursor. `nextCursor` is omitted on the final page. File entries include `size`; directory entries omit it. Modification time remains optional in the frontend contract and is omitted until a lightweight RFC 3339 formatter is part of the reviewed dependency set.
+The cursor contains no host path. Its HMAC binds the authenticated subject, effective access grant, share ID, virtual path, offset, and a fingerprint of the sorted listing structure (each entry's kind, name, and file identity). Tampering, use by another user or grant, use for another directory, or an entry being added, removed, renamed, or replaced between pages rejects the cursor with `409`; clients should restart from the first page. Size and modification-time changes, such as a file still being written, do not invalidate the cursor. `nextCursor` is omitted on the final page. File entries include `size`; directory entries omit it. A directory entry carries `folderSize` (`size` and `complete`, as from the [folder-size route](#folder-size)) only when the server's folder-size cache already holds a fresh size for it; the listing never walks a folder, takes no folder-size gate slot, and omits `folderSize` for every other folder and whenever `server.folder_sizes` is `false`. The cache is read only after the listing's own grant check, the same rule the folder-size route follows. Modification time remains optional in the frontend contract and is omitted until a lightweight RFC 3339 formatter is part of the reviewed dependency set.
 
 ## Single-entry metadata
 
@@ -98,7 +103,7 @@ Every selected path must have the same parent directory, so a selection cannot o
 
 ## Folder size
 
-`GET /api/v1/shares/{shareId}/folder-size?path=relative/folder` returns the total size of the files beneath one folder; an absent or empty `path` measures the share root. Any grant on the share, read or read-write, may ask. The listing never includes folder sizes, so a client asks separately for the folders it shows.
+`GET /api/v1/shares/{shareId}/folder-size?path=relative/folder` returns the total size of the files beneath one folder; an absent or empty `path` measures the share root. Any grant on the share, read or read-write, may ask. The listing never walks a folder: it carries a folder's size only when this route's cache already holds a fresh one (see [directory listing](#directory-listing)), so a client asks here for the other folders it shows.
 
 ```json
 {

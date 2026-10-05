@@ -428,6 +428,13 @@ impl BrowseState {
         }
     }
 
+    /// Replaces the folder-size cache, so a test can fill it or age it.
+    #[cfg(test)]
+    fn with_folder_size_cache(mut self, cache: Arc<FolderSizeCache>) -> Self {
+        self.folder_sizes = cache;
+        self
+    }
+
     /// Owned variant of [`Self::authorize`] for work moved to the blocking
     /// pool. The grant check is identical and runs for every request.
     pub(crate) fn authorize_owned(
@@ -722,6 +729,16 @@ struct EntryResponse {
     size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     modified_at_ms: Option<u64>,
+    /// A folder's size, only when the folder-size cache already holds a
+    /// fresh one; the listing never walks a folder to find it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder_size: Option<ListedFolderSize>,
+}
+
+#[derive(Serialize)]
+struct ListedFolderSize {
+    size: u64,
+    complete: bool,
 }
 
 async fn list_directory(
@@ -785,7 +802,26 @@ async fn list_directory(
             &fingerprint,
         )
     });
-    let entries = entries[offset..end].iter().map(entry_response).collect();
+    // Sizes already cached for this share go out with the page, so the
+    // client asks only for the rest. This reads the cache under the same
+    // grant check as the folder-size route; it never walks or takes the
+    // folder-size gate.
+    let entries = entries[offset..end]
+        .iter()
+        .map(|entry| {
+            let mut response = entry_response(entry);
+            if entry.kind == EntryKind::Directory && browse.limits.folder_sizes {
+                response.folder_size = browse
+                    .folder_sizes
+                    .get(&share_id, &path.join(entry.name.clone()))
+                    .map(|size| ListedFolderSize {
+                        size: size.bytes,
+                        complete: size.complete,
+                    });
+            }
+            response
+        })
+        .collect();
 
     Ok(inert_json(DirectoryPage {
         share_id: share_id.as_str().to_owned(),
@@ -1706,6 +1742,7 @@ fn entry_response(entry: &DirectoryEntry) -> EntryResponse {
         kind: kind_name(entry.kind),
         size: (entry.kind == EntryKind::File).then_some(entry.size),
         modified_at_ms: system_time_millis(entry.modified),
+        folder_size: None,
     }
 }
 
@@ -2130,6 +2167,7 @@ mod tests {
     use crate::{
         app,
         filesystem::{EntryName, ShareId},
+        folder_sizes::FOLDER_SIZE_TTL,
     };
 
     struct Fixture {
@@ -2144,6 +2182,18 @@ mod tests {
     }
 
     fn fixture_with_policy(limits: BrowseLimits, policy: GlobalPolicy) -> Fixture {
+        fixture_with(limits, policy, None)
+    }
+
+    fn fixture_with_cache(limits: BrowseLimits, cache: Arc<FolderSizeCache>) -> Fixture {
+        fixture_with(limits, GlobalPolicy::default(), Some(cache))
+    }
+
+    fn fixture_with(
+        limits: BrowseLimits,
+        policy: GlobalPolicy,
+        cache: Option<Arc<FolderSizeCache>>,
+    ) -> Fixture {
         let root = TempDir::new().expect("temporary share");
         fs::create_dir(root.path().join("a-directory")).expect("directory fixture");
         fs::write(root.path().join("a.txt"), b"abcdef").expect("text fixture");
@@ -2160,8 +2210,11 @@ mod tests {
             share_id: id,
             access: AccessLevel::ReadWrite,
         };
-        let browse =
+        let mut browse =
             BrowseState::new(vec![share], limits, policy, [0x5a; 32]).expect("browse state");
+        if let Some(cache) = cache {
+            browse = browse.with_folder_size_cache(cache);
+        }
         let app = app::router(AppState::new(true).with_browse(browse));
         let identity = AuthenticatedIdentity::new("user-1", vec![grant.clone()]);
         Fixture {
@@ -3789,6 +3842,103 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(json(response).await["error"]["code"], "feature_disabled");
+    }
+
+    async fn listed_folder_sizes(fixture: &Fixture, path: &str) -> Vec<(String, Value)> {
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get(format!("/api/v1/shares/documents/directory?path={path}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        json(response).await["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter_map(|entry| {
+                let size = entry.get("folderSize")?;
+                Some((entry["name"].as_str()?.to_owned(), size.clone()))
+            })
+            .collect()
+    }
+
+    fn cache_with(entries: &[(&str, u64, bool)], ttl: Duration) -> Arc<FolderSizeCache> {
+        let cache = Arc::new(FolderSizeCache::new(ttl, 16));
+        let share = ShareId::new("documents").expect("share id");
+        for (path, bytes, complete) in entries {
+            let path = VirtualPath::parse(path).expect("path");
+            let size = crate::filesystem::FolderSize {
+                bytes: *bytes,
+                complete: *complete,
+            };
+            cache.insert(&share, &path, size, cache.generation());
+        }
+        cache
+    }
+
+    #[tokio::test]
+    async fn listings_carry_only_fresh_cached_folder_sizes() {
+        let cache = cache_with(
+            &[("a-directory", 5, false), ("a-directory/nested", 7, true)],
+            FOLDER_SIZE_TTL,
+        );
+        let fixture = fixture_with_cache(BrowseLimits::default(), Arc::clone(&cache));
+        fs::create_dir(fixture._root.path().join("b-directory")).expect("uncached folder");
+        fs::create_dir(fixture._root.path().join("a-directory/nested")).expect("nested");
+        // Only the cached folder has a size; files and the uncached folder
+        // have none, and the cached size is not recomputed.
+        assert_eq!(
+            listed_folder_sizes(&fixture, "").await,
+            vec![(
+                "a-directory".to_owned(),
+                serde_json::json!({ "size": 5, "complete": false })
+            )]
+        );
+        assert_eq!(
+            listed_folder_sizes(&fixture, "a-directory").await,
+            vec![(
+                "nested".to_owned(),
+                serde_json::json!({ "size": 7, "complete": true })
+            )]
+        );
+        // The listing never walks or caches a folder itself.
+        assert_eq!(cache.len(), 2);
+
+        // A size walked by the folder-size route shows in the next listing.
+        assert_eq!(folder_size_json(&fixture, "b-directory").await["size"], 0);
+        let listed = listed_folder_sizes(&fixture, "").await;
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].0, "b-directory");
+    }
+
+    #[tokio::test]
+    async fn listings_omit_stale_folder_sizes_and_never_walk() {
+        // An expired entry is never listed.
+        let stale = cache_with(&[("a-directory", 5, true)], Duration::ZERO);
+        let fixture = fixture_with_cache(BrowseLimits::default(), stale);
+        assert!(listed_folder_sizes(&fixture, "").await.is_empty());
+
+        let cache = Arc::new(FolderSizeCache::default());
+        let fixture = fixture_with_cache(BrowseLimits::default(), Arc::clone(&cache));
+        assert!(listed_folder_sizes(&fixture, "").await.is_empty());
+        assert!(listed_folder_sizes(&fixture, "").await.is_empty());
+        assert_eq!(cache.len(), 0, "a listing walks no folder");
+    }
+
+    #[tokio::test]
+    async fn listings_carry_no_folder_sizes_when_switched_off() {
+        let cache = cache_with(&[("a-directory", 5, true)], FOLDER_SIZE_TTL);
+        let fixture = fixture_with_cache(
+            BrowseLimits {
+                folder_sizes: false,
+                ..BrowseLimits::default()
+            },
+            cache,
+        );
+        assert!(listed_folder_sizes(&fixture, "").await.is_empty());
     }
 
     #[tokio::test]

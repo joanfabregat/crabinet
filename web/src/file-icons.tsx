@@ -41,7 +41,16 @@ const codeExtensions = new Set([
 ]);
 
 const textExtensions = new Set(["md", "markdown", "rst", "txt"]);
-const imageExtensions = new Set(["avif", "gif", "jpeg", "jpg", "png", "webp"]);
+const imageExtensions = new Set([
+  "avif",
+  "gif",
+  "heic",
+  "heif",
+  "jpeg",
+  "jpg",
+  "png",
+  "webp",
+]);
 
 export type EntryIconKind =
   "folder" | "hidden-folder" | "file" | "code" | "json" | "text" | "image";

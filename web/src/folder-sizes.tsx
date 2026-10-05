@@ -1,7 +1,7 @@
 import type { RefObject } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import { ApiError, type ApiClient } from "./api";
+import { ApiError, type ApiClient, type ListedFolderSize } from "./api";
 
 /** A folder's size as the Size column shows it. */
 export type FolderSizeState =
@@ -45,10 +45,12 @@ interface Run {
  * hidden column) never intersects and is never fetched. Without
  * `IntersectionObserver`, every listed folder counts as on screen.
  *
- * At most {@link folderSizeConcurrency} requests run at once. A size, once
- * known, stays on screen while the listing reloads (`revision` changes); the
- * reload asks again for the folders on screen, and the server answers from
- * its cache unless a change invalidated the size. Changing share or folder
+ * A folder whose size the listing already carried (`listed`, from the
+ * server's cache) is shown at once and never asked for. At most
+ * {@link folderSizeConcurrency} requests run at once. A size, once known,
+ * stays on screen while the listing reloads (`revision` changes); the
+ * reloaded listing carries the sizes the server still has cached, and the
+ * folders on screen without one are asked for again. Changing share or folder
  * cancels the requests in flight and starts over.
  */
 export function useFolderSizes({
@@ -56,6 +58,7 @@ export function useFolderSizes({
   shareId,
   path,
   folders,
+  listed,
   enabled,
   revision,
   container,
@@ -66,7 +69,13 @@ export function useFolderSizes({
   path: string;
   /** Names of the folders in the listing, in listing order. */
   folders: readonly string[];
+  /**
+   * Sizes the listing already carried, by folder name. These folders are
+   * never asked for. Keep the map stable between renders of one listing.
+   */
+  listed?: ReadonlyMap<string, ListedFolderSize>;
   enabled: boolean;
+  /** Changes when a reloaded listing arrives. */
   revision: number;
   container: RefObject<HTMLElement>;
   onSessionExpired: () => void;
@@ -75,8 +84,8 @@ export function useFolderSizes({
     () => new Map(),
   );
   const run = useRef<Run>();
-  const latest = useRef({ api, onSessionExpired });
-  latest.current = { api, onSessionExpired };
+  const latest = useRef({ api, onSessionExpired, listed });
+  latest.current = { api, onSessionExpired, listed };
   const folderKey = folders.join("/");
 
   const pump = (current: Run) => {
@@ -84,6 +93,7 @@ export function useFolderSizes({
       const next = [...current.visible].find(
         (name) =>
           current.folders.has(name) &&
+          !latest.current.listed?.has(name) &&
           !current.requested.has(name) &&
           !current.inFlight.has(name),
       );
@@ -171,13 +181,36 @@ export function useFolderSizes({
     };
   }, [enabled, path, shareId]);
 
-  // A reload asks again for the folders on screen.
+  // A listed size is kept like a fetched one, so it stays on screen if a
+  // later reload no longer lists it and the folder is asked for instead.
+  useEffect(() => {
+    if (!enabled || !listed?.size) return;
+    setSizes((previous) => {
+      let next: Map<string, FolderSizeState> | undefined;
+      for (const [name, size] of listed) {
+        const shown = previous.get(name);
+        if (
+          shown?.status === "known" &&
+          shown.size === size.size &&
+          shown.complete === size.complete
+        ) {
+          continue;
+        }
+        next ??= new Map(previous);
+        next.set(name, knownSize(size));
+      }
+      return next ?? previous;
+    });
+  }, [enabled, listed]);
+
+  // A reload asks again for the folders on screen that it lists no size for.
   const lastRevision = useRef(revision);
   useEffect(() => {
     if (lastRevision.current === revision) return;
     lastRevision.current = revision;
     const current = run.current;
     if (!current) return;
+    current.folders = new Set(folders);
     current.requested.clear();
     pump(current);
   }, [revision]);
@@ -210,7 +243,18 @@ export function useFolderSizes({
     return () => observer.disconnect();
   }, [folderKey, enabled, path, shareId]);
 
-  return sizes;
+  // Listed sizes show from the first render, before the effect above keeps
+  // them; a fresher listed size wins over an older fetched one.
+  return useMemo(() => {
+    if (!enabled || !listed?.size) return sizes;
+    const merged = new Map(sizes);
+    for (const [name, size] of listed) merged.set(name, knownSize(size));
+    return merged;
+  }, [enabled, listed, sizes]);
+}
+
+function knownSize(size: ListedFolderSize): FolderSizeState {
+  return { status: "known", size: size.size, complete: size.complete };
 }
 
 /**

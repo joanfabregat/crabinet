@@ -868,10 +868,14 @@ pub(crate) mod tests {
         let mut avif = 24_u32.to_be_bytes().to_vec();
         avif.extend_from_slice(b"ftypavif\0\0\0\0avifmif1");
         fixture.write("picture.avif", &avif);
+        let mut heic = 24_u32.to_be_bytes().to_vec();
+        heic.extend_from_slice(b"ftypheic\0\0\0\0mif1heic");
+        fixture.write("picture.heic", &heic);
         for (name, expected) in [
             ("photo.png", true),
             ("notes.txt", false),
             ("picture.avif", false),
+            ("picture.heic", false),
         ] {
             let document = json(
                 fixture
@@ -885,6 +889,12 @@ pub(crate) mod tests {
             .get("/api/v1/shares/documents/thumbnail?path=picture.avif&size=256")
             .await;
         assert_eq!(avif.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // HEIC gets the same answer, so the panel shows the original.
+        let heic = fixture
+            .get("/api/v1/shares/documents/thumbnail?path=picture.heic&size=256")
+            .await;
+        assert_eq!(heic.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(json(heic).await["code"], "unsupported_entry");
     }
 
     #[tokio::test]

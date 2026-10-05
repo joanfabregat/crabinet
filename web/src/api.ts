@@ -82,6 +82,18 @@ export interface DirectoryEntry {
   kind: "directory" | "file";
   size?: number;
   modifiedAtMs?: number;
+  /**
+   * A folder's size, sent only when the server already had a fresh one
+   * cached; otherwise the client asks `folderSize` for it.
+   */
+  folderSize?: ListedFolderSize;
+}
+
+/** A folder size carried by a directory listing. */
+export interface ListedFolderSize {
+  size: number;
+  /** False when the server stopped counting early: `size` is a lower bound. */
+  complete: boolean;
 }
 
 export interface DirectoryPage {
@@ -223,6 +235,8 @@ export type PreviewMimeType =
   | "image/gif"
   | "image/webp"
   | "image/avif"
+  | "image/heic"
+  | "image/heif"
   | "application/pdf"
   | "audio/mp4"
   | "audio/ogg"
@@ -1139,6 +1153,8 @@ const previewMimeTypes: Record<string, ReadonlySet<string>> = {
     "image/gif",
     "image/webp",
     "image/avif",
+    "image/heic",
+    "image/heif",
   ]),
   pdf: new Set(["application/pdf"]),
   audio: new Set([
@@ -1745,7 +1761,19 @@ function isDirectoryEntry(value: unknown): boolean {
       (typeof value.size === "number" &&
         Number.isFinite(value.size) &&
         value.size >= 0)) &&
-    isOptionalTimestamp(value.modifiedAtMs)
+    isOptionalTimestamp(value.modifiedAtMs) &&
+    (value.folderSize === undefined ||
+      (value.kind === "directory" && isListedFolderSize(value.folderSize)))
+  );
+}
+
+function isListedFolderSize(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.size === "number" &&
+    Number.isSafeInteger(value.size) &&
+    value.size >= 0 &&
+    typeof value.complete === "boolean"
   );
 }
 

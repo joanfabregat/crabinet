@@ -308,3 +308,45 @@ test("an SVG above the preview limit is drawn whole and opens as an image", asyn
   );
   expect(opened.headers()["content-length"]).toBe("437369");
 });
+
+test("a HEIC image is served as the original and explains when the browser cannot show it", async ({
+  page,
+}) => {
+  await openSignedIn(page, "/read-only");
+  await page.getByRole("link", { name: "photo.heic", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "photo.heic" });
+
+  const response = await page.request.get(
+    "/api/v1/shares/read-only/preview?path=photo.heic",
+  );
+  expect(await response.json()).toMatchObject({
+    kind: "image",
+    mimeType: "image/heic",
+    openable: true,
+    thumbnailable: false,
+  });
+  const thumbnail = await page.request.get(
+    "/api/v1/shares/read-only/thumbnail?path=photo.heic&size=1600",
+  );
+  expect(thumbnail.status()).toBe(415);
+  const opened = await page.request.get(
+    "/api/v1/shares/read-only/open?path=photo.heic",
+  );
+  expect(opened.headers()["content-type"]).toBe("image/heic");
+  expect(opened.headers()["content-security-policy"]).toMatch(
+    /^sandbox; default-src 'none'/,
+  );
+
+  // Chromium does not decode HEIC (Safari does), so the panel says so and
+  // offers the download instead of a generic error.
+  const fallback = panel.getByRole("alert");
+  await expect(fallback).toContainText(
+    "This browser can't display HEIC images. Download it to view.",
+  );
+  await expect(
+    fallback.getByRole("link", { name: "Download image" }),
+  ).toHaveAttribute(
+    "href",
+    "/api/v1/shares/read-only/download?path=photo.heic",
+  );
+});

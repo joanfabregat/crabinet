@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Response } from "@playwright/test";
 
 import { csrfToken, openFolders, openSignedIn, signIn } from "./helpers";
 
@@ -698,33 +698,56 @@ test("a folder downloads as a ZIP of its files", async ({ page }) => {
   await expect(page).toHaveURL(/\/read-only\/nested$/);
 });
 
-test("a folder row shows its size once the server has walked it", async ({
+test("a folder row shows its size, from the listing once the server has it cached", async ({
   page,
 }) => {
-  const walked = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname ===
-      "/api/v1/shares/read-only/folder-size",
-  );
-  await openSignedIn(page, "/read-only");
+  const sizeRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/v1/shares/read-only/folder-size") {
+      sizeRequests.push(url.searchParams.get("path") ?? "");
+    }
+  });
+  const rootListing = () =>
+    page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/v1/shares/read-only/directory" &&
+        url.searchParams.get("path") === ""
+      );
+    });
+  const listedSize = async (listing: Promise<Response>) => {
+    const body = (await (await listing).json()) as {
+      entries: Array<{ name: string; folderSize?: unknown }>;
+    };
+    return body.entries.find((entry) => entry.name === "nested")?.folderSize;
+  };
 
+  const first = rootListing();
+  await openSignedIn(page, "/read-only");
   const row = page
     .getByRole("list", { name: "Folder contents" })
     .getByRole("listitem")
     .filter({ has: page.getByRole("link", { name: "nested", exact: true }) });
-  // The Size column stays visible on narrow screens, so phones ask too.
+  // The Size column stays visible on narrow screens, so phones get it too.
   await expect(row.locator(".entry-meta")).toBeVisible();
   await expect(row.locator(".entry-meta")).toHaveText("64 B");
-  const response = await walked;
-  expect(await response.json()).toEqual({
-    shareId: "read-only",
-    path: "nested",
-    size: 64,
-    complete: true,
-  });
+  // An earlier test may have had the folder walked within the cache's
+  // minute; otherwise the client asked for it.
+  if ((await listedSize(first)) === undefined) {
+    expect(sizeRequests).toEqual(["nested"]);
+  }
+
+  // Now cached, the size comes with the listing and nothing is asked.
+  sizeRequests.length = 0;
+  const second = rootListing();
+  await page.reload();
+  expect(await listedSize(second)).toEqual({ size: 64, complete: true });
+  await expect(row.locator(".entry-meta")).toHaveText("64 B");
   await expect(page.getByRole("img", { name: "Calculating size" })).toHaveCount(
     0,
   );
+  expect(sizeRequests).toEqual([]);
   const results = await new AxeBuilder({ page })
     .include(".entry-list")
     .analyze();
@@ -759,6 +782,146 @@ test("an iPad in portrait shows two columns", async ({ page }) => {
     content: document.documentElement.scrollWidth,
   }));
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
+});
+
+test("file rows keep room for their names on desktops, tablets, and phones", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop-chromium",
+    "each layout below sets its own viewport and input",
+  );
+  // The name the iPad screenshot wrapped as "test-" / "pattern.m" / "p4".
+  const longName = "test-pattern.mp4";
+  const layouts = [
+    // label, viewport, touch, preview open, inline actions, menu
+    ["desktop", 1440, 960, false, false, 5, false],
+    ["desktop with a preview", 1440, 960, false, true, 5, false],
+    ["iPad landscape", 1180, 820, true, false, 5, false],
+    ["iPad landscape with a preview", 1180, 820, true, true, 2, true],
+    ["iPad portrait", 820, 1180, true, false, 2, true],
+    ["iPad portrait with a preview", 820, 1180, true, true, 0, true],
+    ["phone", 390, 844, true, false, 0, true],
+  ] as const;
+  for (const [label, width, height, touch, preview, inline, menu] of layouts) {
+    const context = await browser.newContext({
+      viewport: { width, height },
+      hasTouch: touch,
+    });
+    const page = await context.newPage();
+    try {
+      await openSignedIn(
+        page,
+        preview ? "/writable/README.md" : "/writable",
+        "writer",
+      );
+      if (preview) {
+        await expect(
+          page.getByRole("heading", { name: "README.md", level: 2 }),
+        ).toBeVisible();
+      }
+      expect(
+        await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
+        label,
+      ).toBe(touch);
+      const row = page
+        .getByRole("list", { name: "Folder contents" })
+        .getByRole("listitem")
+        .filter({
+          has: page.getByRole("link", { name: "README.md", exact: true }),
+        });
+      await expect(row).toBeVisible();
+
+      const actions = row.getByRole("group", { name: "Actions for README.md" });
+      const shown = actions.locator(".entry-actions-inline .entry-action");
+      const visible = await shown.evaluateAll(
+        (elements) =>
+          elements.filter((element) => element.checkVisibility()).length,
+      );
+      expect(visible, label).toBe(inline);
+      const more = row.getByRole("button", {
+        name: "More actions for README.md",
+      });
+      if (menu) await expect(more, label).toBeVisible();
+      else await expect(more, label).toBeHidden();
+      if (inline === 2) {
+        // Download and Delete stay; the rarer actions wait in the menu.
+        await expect(
+          row.getByRole("link", { name: "Download README.md" }),
+        ).toBeVisible();
+        await expect(
+          row.getByRole("button", { name: "Delete README.md" }),
+        ).toBeVisible();
+        await expect(
+          row.getByRole("button", { name: "Rename README.md" }),
+        ).toBeHidden();
+      }
+
+      const layout = await row.evaluate((element, name) => {
+        const link = element.querySelector<HTMLElement>(".entry-name")!;
+        const primary = element.querySelector<HTMLElement>(".entry-primary")!;
+        const context = document.createElement("canvas").getContext("2d")!;
+        context.font = getComputedStyle(link).font;
+        const buttons = Array.from(
+          element.querySelectorAll<HTMLElement>(".entry-action"),
+        )
+          .filter((button) => button.checkVisibility())
+          .map((button) => button.getBoundingClientRect());
+        return {
+          nameWidth: context.measureText(name).width,
+          room: primary.clientWidth,
+          overflow: element.scrollWidth > element.clientWidth,
+          smallestTarget: Math.min(
+            ...buttons.map((box) => Math.min(box.width, box.height)),
+          ),
+          widestStep: Math.max(
+            0,
+            ...buttons
+              .slice(1)
+              .map((box, index) => box.left - buttons[index]!.left),
+          ),
+          listWidth: element.closest(".entry-list")!.clientWidth,
+        };
+      }, longName);
+      expect(layout.overflow, label).toBe(false);
+      expect(layout.nameWidth, label).toBeLessThanOrEqual(layout.room);
+      if (touch) {
+        expect(layout.smallestTarget, label).toBeGreaterThanOrEqual(44);
+      }
+      // In a narrower list the buttons sit side by side; only Delete keeps a
+      // small gap.
+      if (layout.listWidth <= 704) {
+        expect(layout.widestStep, label).toBeLessThanOrEqual(touch ? 49 : 35);
+      }
+
+      if (menu && inline === 2) {
+        // The menu still opens beside its button inside the list's
+        // size container, and holds the rarer actions.
+        await more.click();
+        const list = page.getByRole("menu", { name: "Actions for README.md" });
+        await expect(
+          list.getByRole("menuitem", { name: "Rename" }),
+        ).toBeVisible();
+        const trigger = (await more.boundingBox())!;
+        const opened = (await list.boundingBox())!;
+        expect(
+          Math.abs(opened.y - (trigger.y + trigger.height)),
+          label,
+        ).toBeLessThan(12);
+        expect(
+          Math.abs(opened.x + opened.width - (trigger.x + trigger.width)),
+          label,
+        ).toBeLessThan(2);
+        await page.keyboard.press("Escape");
+        const results = await new AxeBuilder({ page })
+          .include(".entry-list")
+          .analyze();
+        expect(results.violations, label).toEqual([]);
+      }
+    } finally {
+      await context.close();
+    }
+  }
 });
 
 test("night mode follows the system, can be pinned, and passes axe", async ({

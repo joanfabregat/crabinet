@@ -327,6 +327,38 @@ describe("API client", () => {
     });
   });
 
+  it("accepts a listed folder size and rejects a malformed one", async () => {
+    const listing = (entry: Record<string, unknown>) =>
+      vi
+        .fn<typeof globalThis.fetch>()
+        .mockResolvedValue(
+          Response.json({ shareId: "docs", path: "", entries: [entry] }),
+        );
+    const page = await createApiClient({
+      fetch: listing({
+        name: "photos",
+        kind: "directory",
+        folderSize: { size: 42, complete: false },
+      }),
+    }).directory("docs", "");
+    expect(page.entries[0]!.folderSize).toEqual({ size: 42, complete: false });
+
+    for (const entry of [
+      { name: "a.txt", kind: "file", folderSize: { size: 1, complete: true } },
+      { name: "photos", kind: "directory", folderSize: { size: -1 } },
+      {
+        name: "photos",
+        kind: "directory",
+        folderSize: { size: 1.5, complete: true },
+      },
+      { name: "photos", kind: "directory", folderSize: 42 },
+    ]) {
+      await expect(
+        createApiClient({ fetch: listing(entry) }).directory("docs", ""),
+      ).rejects.toMatchObject({ kind: "invalid-response" });
+    }
+  });
+
   it.each([
     ".",
     "..",
