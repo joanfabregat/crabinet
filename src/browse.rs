@@ -38,6 +38,7 @@ use tokio_util::io::ReaderStream;
 use crate::{
     app::AppState,
     auth::AuthService,
+    config::ArchiveCompression,
     error::AppError,
     extract::{ApiPath, ApiQuery},
     filesystem::{
@@ -46,7 +47,7 @@ use crate::{
         ShareFs, ShareGrant, ShareId, VirtualPath,
     },
     folder_sizes::FolderSizeCache,
-    zip::{Crc32, ZipPlan, ZipSource},
+    zip::{EntryEncoder, ZipPlan, ZipSource, entry_changed},
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -194,6 +195,8 @@ pub struct BrowseLimits {
     pub stream_chunk_bytes: usize,
     /// Whether the folder-size route walks folders (`server.folder_sizes`).
     pub folder_sizes: bool,
+    /// How archives compress their files (`server.archive_compression`).
+    pub archive_compression: ArchiveCompression,
 }
 
 impl Default for BrowseLimits {
@@ -207,6 +210,7 @@ impl Default for BrowseLimits {
             max_archive_entries: 10_000,
             stream_chunk_bytes: 65_536,
             folder_sizes: true,
+            archive_compression: ArchiveCompression::Auto,
         }
     }
 }
@@ -1478,13 +1482,14 @@ fn folder_layout(
     })
 }
 
-/// Streams a folder, a file, or a selection of entries of one folder as a
-/// store-only ZIP archive. Everything is walked and checked against the
-/// archive limits before the response starts, so a refusal is an ordinary
-/// error response and an admitted archive carries its exact
-/// `Content-Length`. If an entry changes while it streams, the body ends
-/// with an error, so the client sees a failed transfer rather than a
-/// complete-looking archive.
+/// Streams a folder, a file, or a selection of entries of one folder as a ZIP
+/// archive. Everything is walked and checked against the archive limits
+/// before the response starts, so a refusal is an ordinary error response.
+/// An archive in which no file may be deflated carries its exact
+/// `Content-Length`; one with deflate candidates is sent without it, in
+/// chunked transfer encoding. If an entry changes while it streams, the
+/// body ends with an error, so the client sees a failed transfer rather than
+/// a complete-looking archive.
 async fn download_archive(
     State(state): State<AppState>,
     identity: AuthenticatedIdentity,
@@ -1511,8 +1516,9 @@ async fn download_archive(
     .await?
     .map_err(map_fs_error)?;
 
-    let plan = ZipPlan::new(layout.sources).ok_or(AppError::TooLarge)?;
-    let content_length = plan.len();
+    let plan = ZipPlan::new(layout.sources, browse.limits.archive_compression)
+        .ok_or(AppError::TooLarge)?;
+    let content_length = plan.fixed_len();
     let filename = layout.filename;
     let archive = ArchiveStream {
         share: authorized,
@@ -1522,6 +1528,7 @@ async fn download_archive(
         state: ArchiveState::Entry(0),
         sent: 0,
         chunk_bytes: browse.limits.stream_chunk_bytes,
+        compressor: None,
         lease,
     };
     let stream = stream::try_unfold(archive, |mut archive| async move {
@@ -1546,10 +1553,12 @@ async fn download_archive(
         HeaderValue::from_static("application/zip"),
     );
     headers.insert(header::CONTENT_DISPOSITION, content_disposition(&filename)?);
-    headers.insert(
-        header::CONTENT_LENGTH,
-        header_value(&content_length.to_string())?,
-    );
+    if let Some(content_length) = content_length {
+        headers.insert(
+            header::CONTENT_LENGTH,
+            header_value(&content_length.to_string())?,
+        );
+    }
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; sandbox"),
@@ -1565,9 +1574,7 @@ enum ArchiveState {
     /// Streaming a file's bytes.
     File {
         index: usize,
-        file: tokio::fs::File,
-        remaining: u64,
-        crc: Crc32,
+        encoder: Box<EntryEncoder<std::fs::File>>,
     },
     /// The central directory header of this entry is next.
     Central(usize),
@@ -1575,7 +1582,9 @@ enum ArchiveState {
 }
 
 /// Produces a planned archive chunk by chunk, opening one file at a time.
-/// Dropping it closes the open file and releases the archive slot.
+/// Reading, checksumming, and compressing run on the blocking pool, one
+/// chunk per task. Dropping the stream closes the open file and releases
+/// the archive slot.
 struct ArchiveStream {
     share: OwnedAuthorizedShare,
     /// Directory every entry name is relative to once `prefix_len` bytes are
@@ -1590,69 +1599,58 @@ struct ArchiveStream {
     state: ArchiveState,
     sent: u64,
     chunk_bytes: usize,
+    /// The deflate compressor, created by the first deflated entry and
+    /// reused by the ones after it.
+    compressor: Option<flate2::Compress>,
     lease: Arc<SubjectLease>,
 }
 
 impl ArchiveStream {
     /// Returns the next chunk of about `chunk_bytes`, or `None` once the
-    /// whole planned length has been produced.
+    /// whole archive has been produced.
     async fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
         let mut out = Vec::with_capacity(self.chunk_bytes);
         while out.len() < self.chunk_bytes {
             match std::mem::replace(&mut self.state, ArchiveState::Done) {
                 ArchiveState::Entry(index) if index == self.plan.entry_count() => {
+                    self.plan.finish_entries()?;
                     self.state = ArchiveState::Central(0);
                 }
-                ArchiveState::Entry(index) => {
-                    self.plan.write_local_header(index, &mut out);
-                    self.state = match self.plan.entry_size(index) {
-                        None => ArchiveState::Entry(index + 1),
-                        Some(size) => ArchiveState::File {
+                ArchiveState::Entry(index) => match self.plan.entry_size(index) {
+                    None => {
+                        self.plan.write_local_header(index, false, &mut out);
+                        self.state = ArchiveState::Entry(index + 1);
+                    }
+                    Some(size) => {
+                        let encoder = self.open(index, size).await?;
+                        self.plan
+                            .write_local_header(index, encoder.deflated(), &mut out);
+                        self.state = ArchiveState::File {
                             index,
-                            file: self.open(index, size).await?,
-                            remaining: size,
-                            crc: Crc32::new(),
-                        },
-                    };
-                }
-                ArchiveState::File {
-                    index,
-                    crc,
-                    remaining: 0,
-                    file,
-                } => {
-                    // A file that grew past its planned size has changed.
-                    let mut probe = file.take(1);
-                    if probe.read(&mut [0]).await? != 0 {
-                        return Err(archive_changed());
+                            encoder: Box::new(encoder),
+                        };
                     }
-                    self.plan
-                        .write_data_descriptor(index, crc.finish(), &mut out);
-                    self.state = ArchiveState::Entry(index + 1);
-                }
-                ArchiveState::File {
-                    index,
-                    mut file,
-                    remaining,
-                    mut crc,
-                } => {
-                    let start = out.len();
-                    let wanted = u64::try_from(self.chunk_bytes - start)
-                        .unwrap_or(u64::MAX)
-                        .min(remaining);
-                    out.resize(start + wanted as usize, 0);
-                    let read = file.read(&mut out[start..]).await?;
-                    out.truncate(start + read);
-                    if read == 0 {
-                        return Err(archive_changed());
+                },
+                ArchiveState::File { index, mut encoder } => {
+                    let budget = self.chunk_bytes;
+                    let lease = Arc::clone(&self.lease);
+                    let (encoder, chunk, done) = tokio::task::spawn_blocking(move || {
+                        let _lease = lease;
+                        let done = encoder.fill(&mut out, budget);
+                        (encoder, out, done)
+                    })
+                    .await
+                    .map_err(std::io::Error::other)?;
+                    out = chunk;
+                    if done? {
+                        let (crc, written, compressor) = encoder.finish();
+                        self.compressor = compressor;
+                        self.plan
+                            .write_data_descriptor(index, crc, written, &mut out)?;
+                        self.state = ArchiveState::Entry(index + 1);
+                    } else {
+                        self.state = ArchiveState::File { index, encoder };
                     }
-                    crc.update(&out[start..]);
-                    self.state = ArchiveState::File {
-                        index,
-                        file,
-                        remaining: remaining - read as u64,
-                        crc,
-                    };
                 }
                 ArchiveState::Central(index) if index == self.plan.entry_count() => {
                     self.plan.write_end(&mut out);
@@ -1665,7 +1663,11 @@ impl ArchiveStream {
             }
         }
         self.sent += out.len() as u64;
-        if self.sent > self.plan.len() || (out.is_empty() && self.sent != self.plan.len()) {
+        let overran = self
+            .plan
+            .fixed_len()
+            .is_some_and(|planned| self.sent > planned);
+        if overran || (out.is_empty() && self.sent != self.plan.len()) {
             return Err(std::io::Error::other(
                 "archive length differs from its plan",
             ));
@@ -1674,37 +1676,39 @@ impl ArchiveStream {
     }
 
     /// Reopens file entry `index` through the share capability, exactly as a
-    /// single-file download would, and checks it still has its planned size.
-    async fn open(&self, index: usize, size: u64) -> std::io::Result<tokio::fs::File> {
+    /// single-file download would, checks it still has its planned size, and
+    /// starts its encoder, which reads a deflate candidate's first bytes.
+    async fn open(
+        &mut self,
+        index: usize,
+        size: u64,
+    ) -> std::io::Result<EntryEncoder<std::fs::File>> {
         let relative = self
             .plan
             .entry_name(index)
             .get(self.prefix_len..)
-            .ok_or_else(archive_changed)?;
+            .ok_or_else(entry_changed)?;
         let path = if self.base.is_root() {
             VirtualPath::parse(relative)
         } else {
             VirtualPath::parse(&format!("{}/{relative}", self.base))
         }
-        .map_err(|_| archive_changed())?;
+        .map_err(|_| entry_changed())?;
+        let candidate = self.plan.may_deflate(index);
+        let compressor = self.compressor.take();
         let share = self.share.clone();
         let lease = Arc::clone(&self.lease);
-        let opened = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _lease = lease;
-            share.view().open_file(&path)
+            let opened = share.view().open_file(&path).map_err(|_| entry_changed())?;
+            if opened.len() != size {
+                return Err(entry_changed());
+            }
+            EntryEncoder::start(opened.into_std(), size, candidate, compressor)
         })
         .await
         .map_err(std::io::Error::other)?
-        .map_err(|_| archive_changed())?;
-        if opened.len() != size {
-            return Err(archive_changed());
-        }
-        Ok(tokio::fs::File::from_std(opened.into_std()))
     }
-}
-
-fn archive_changed() -> std::io::Error {
-    std::io::Error::other("an archived entry changed while streaming")
 }
 
 /// Parses a fuzzer-chosen archive query and checks that an accepted
@@ -2868,18 +2872,29 @@ mod tests {
         .await
     }
 
-    async fn archive_names(response: Response) -> Vec<(String, Option<Vec<u8>>)> {
+    /// Reads an archive response, checking its `Content-Length` when it has
+    /// one, and returns that length and each entry's name, method, and data.
+    async fn archive_entries(
+        response: Response,
+    ) -> (Option<usize>, Vec<crate::zip::verify::ReadEntry>) {
         assert_eq!(response.status(), StatusCode::OK);
-        let length: usize = response.headers()[header::CONTENT_LENGTH]
-            .to_str()
-            .unwrap()
-            .parse()
-            .unwrap();
+        let length: Option<usize> = response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .map(|length| length.to_str().unwrap().parse().unwrap());
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("archive body");
-        assert_eq!(bytes.len(), length, "Content-Length is exact");
-        crate::zip::verify::read_archive(&bytes)
+        if let Some(length) = length {
+            assert_eq!(bytes.len(), length, "Content-Length is exact");
+        }
+        (length, crate::zip::verify::read_archive(&bytes))
+    }
+
+    async fn archive_names(response: Response) -> Vec<(String, Option<Vec<u8>>)> {
+        archive_entries(response)
+            .await
+            .1
             .into_iter()
             .map(|entry| (entry.name, entry.data))
             .collect()
@@ -2887,7 +2902,10 @@ mod tests {
 
     #[tokio::test]
     async fn folder_archives_stream_the_walked_tree_with_an_exact_length() {
-        let fixture = fixture(BrowseLimits::default());
+        let fixture = fixture(BrowseLimits {
+            archive_compression: ArchiveCompression::Off,
+            ..BrowseLimits::default()
+        });
         let root = fixture._root.path();
         fs::create_dir(root.join("a-directory/inner")).expect("nested directory");
         // Larger than one stream chunk, so the file spans several reads.
@@ -3001,33 +3019,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archives_deflate_text_and_keep_an_exact_length_without_candidates() {
+        const STORED: u16 = 0;
+        const DEFLATED: u16 = 8;
+        let fixture = fixture(BrowseLimits::default());
+        let root = fixture._root.path();
+        fs::create_dir(root.join("media")).expect("media folder");
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0];
+        jpeg.extend((0..300_000_u32).map(|value| (value.wrapping_mul(2_654_435_761) >> 13) as u8));
+        fs::write(root.join("media/photo.JPG"), &jpeg).expect("photo");
+        fs::write(root.join("media/clip.mp4"), &jpeg[..5_000]).expect("video");
+        fs::write(root.join("media/caption.txt"), b"a short caption").expect("caption");
+
+        // Media and small files: stored, with an exact length.
+        let response = archive(&fixture.app, &fixture.identity, "?path=media").await;
+        let (length, entries) = archive_entries(response).await;
+        assert!(length.is_some(), "no deflate candidate");
+        assert!(entries.iter().all(|entry| entry.method == STORED));
+        assert_eq!(entries.len(), 4);
+
+        // Text larger than one stream chunk is deflated; a binary file whose
+        // name does not rule it out is read first and then stored.
+        fs::create_dir(root.join("mixed")).expect("mixed folder");
+        let text = b"2026-10-05T12:00:00Z INFO served /index.html in 3 ms\n".repeat(4_000);
+        fs::write(root.join("mixed/server.log"), &text).expect("log");
+        fs::write(root.join("mixed/data.bin"), &jpeg[4..20_004]).expect("binary");
+        fs::write(root.join("mixed/photo.jpg"), &jpeg).expect("photo");
+        let response = archive(&fixture.app, &fixture.identity, "?path=mixed").await;
+        let (length, entries) = archive_entries(response).await;
+        assert_eq!(length, None, "a deflate candidate makes the length unknown");
+        let summary: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.method))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("mixed/", STORED),
+                ("mixed/data.bin", STORED),
+                ("mixed/photo.jpg", STORED),
+                ("mixed/server.log", DEFLATED),
+            ]
+        );
+        assert_eq!(entries[3].data.as_deref(), Some(text.as_slice()));
+        assert_eq!(entries[2].data.as_deref(), Some(jpeg.as_slice()));
+
+        // A selection follows the same rules.
+        let response = archive(
+            &fixture.app,
+            &fixture.identity,
+            "?path=mixed%2Fserver.log&path=mixed%2Fphoto.jpg",
+        )
+        .await;
+        let (length, entries) = archive_entries(response).await;
+        assert_eq!(length, None);
+        assert_eq!(entries[1].name, "server.log");
+        assert_eq!(entries[1].method, DEFLATED);
+
+        // Switched off, every file is stored and the length is exact again.
+        let off = self::fixture(BrowseLimits {
+            archive_compression: ArchiveCompression::Off,
+            ..BrowseLimits::default()
+        });
+        fs::write(off._root.path().join("a-directory/server.log"), &text).expect("log");
+        let response = archive(&off.app, &off.identity, "?path=a-directory").await;
+        let (length, entries) = archive_entries(response).await;
+        assert!(length.is_some());
+        assert!(entries.iter().all(|entry| entry.method == STORED));
+        assert_eq!(entries[1].data.as_deref(), Some(text.as_slice()));
+    }
+
+    #[tokio::test]
     async fn folder_archives_abort_when_an_entry_changes_while_streaming() {
         let fixture = fixture(BrowseLimits::default());
         let folder = fixture._root.path().join("a-directory");
-        // Same size as the archived file, so only the no-follow open rejects it.
         let outside = TempDir::new().expect("outside");
-        fs::write(outside.path().join("secret"), b"WXYZ").expect("outside file");
-        for change in ["resize", "remove", "replace with a link"] {
-            fs::write(folder.join("entry.txt"), b"1234").expect("archived file");
-            let response = archive(&fixture.app, &fixture.identity, "?path=a-directory").await;
-            assert_eq!(response.status(), StatusCode::OK);
-            match change {
-                "resize" => fs::write(folder.join("entry.txt"), b"123456789").expect("resize"),
-                "remove" => fs::remove_file(folder.join("entry.txt")).expect("remove"),
-                _ => {
-                    fs::remove_file(folder.join("entry.txt")).expect("remove");
-                    std::os::unix::fs::symlink(
-                        outside.path().join("secret"),
-                        folder.join("entry.txt"),
-                    )
-                    .expect("link");
+        // A stored file, and a text file large enough to be deflated.
+        let text = b"a line of archived text\n".repeat(200);
+        for original in [b"1234".to_vec(), text] {
+            // Same size as the archived file, so only the no-follow open
+            // rejects it.
+            fs::write(outside.path().join("secret"), vec![b'W'; original.len()])
+                .expect("outside file");
+            for change in ["resize", "remove", "replace with a link"] {
+                fs::write(folder.join("entry.txt"), &original).expect("archived file");
+                let response = archive(&fixture.app, &fixture.identity, "?path=a-directory").await;
+                assert_eq!(response.status(), StatusCode::OK);
+                match change {
+                    "resize" => {
+                        fs::write(folder.join("entry.txt"), [&original[..], b"more"].concat())
+                            .expect("resize")
+                    }
+                    "remove" => fs::remove_file(folder.join("entry.txt")).expect("remove"),
+                    _ => {
+                        fs::remove_file(folder.join("entry.txt")).expect("remove");
+                        std::os::unix::fs::symlink(
+                            outside.path().join("secret"),
+                            folder.join("entry.txt"),
+                        )
+                        .expect("link");
+                    }
                 }
+                assert!(
+                    to_bytes(response.into_body(), usize::MAX).await.is_err(),
+                    "{change}, {} bytes",
+                    original.len()
+                );
+                let _ = fs::remove_file(folder.join("entry.txt"));
             }
-            assert!(
-                to_bytes(response.into_body(), usize::MAX).await.is_err(),
-                "{change}"
-            );
-            let _ = fs::remove_file(folder.join("entry.txt"));
         }
     }
 
@@ -3378,7 +3477,8 @@ mod tests {
 
         let fixture = fixture(BrowseLimits::default());
         let path = fixture._root.path().join("a-directory/large.bin");
-        fs::write(&path, vec![0x5a; 2 * 1024 * 1024]).expect("large file");
+        // Binary, so it is stored and spans many chunks.
+        fs::write(&path, vec![0; 2 * 1024 * 1024]).expect("large file");
         let mut held = Vec::new();
         for _ in 0..MAX_CONCURRENT_ARCHIVES_PER_SUBJECT {
             let response = archive(&fixture.app, &fixture.identity, "?path=a-directory").await;

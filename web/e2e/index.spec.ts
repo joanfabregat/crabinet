@@ -704,7 +704,7 @@ test("a folder downloads as a ZIP of its files", async ({ page }) => {
   expect(download.suggestedFilename()).toBe("nested.zip");
   expect(await download.failure()).toBeNull();
   const archive = await readFile((await download.path())!);
-  // Entries are stored, so names and contents appear verbatim.
+  // A file under 1 KiB is stored, so its name and contents appear verbatim.
   expect(archive.subarray(0, 4).toString("latin1")).toBe("PK\u0003\u0004");
   const text = archive.toString("utf8");
   expect(text).toContain("nested/notes.txt");

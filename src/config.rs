@@ -188,6 +188,9 @@ struct RawServerConfig {
     /// Show folder sizes in listings. Each shown folder is walked in the background, within a budget of 200,000 entries or 2 seconds.
     #[serde(default = "default_true")]
     folder_sizes: bool,
+    /// Compression of folder and selection ZIP downloads. `auto` deflates text files of at least 1 KiB, decided per file, and stores media, archives, and other binary files; `off` stores every file and always sends an exact `Content-Length`.
+    #[serde(default)]
+    archive_compression: ArchiveCompression,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -250,6 +253,18 @@ pub enum ForwardedHeader {
     XForwardedFor,
     /// RFC 7239 `Forwarded: for=client, for=proxy1`.
     Forwarded,
+}
+
+/// How folder and selection ZIP downloads compress their files.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveCompression {
+    /// Deflate text files of at least 1 KiB, chosen per file from its name
+    /// and first bytes; store everything else.
+    #[default]
+    Auto,
+    /// Store every file uncompressed.
+    Off,
 }
 
 pub struct Config {
@@ -340,6 +355,7 @@ pub struct ServerConfig {
     thumbnail_cache_path: Option<PathBuf>,
     max_thumbnail_cache_size: u64,
     folder_sizes: bool,
+    archive_compression: ArchiveCompression,
 }
 
 #[derive(Clone)]
@@ -771,6 +787,7 @@ impl Config {
                 thumbnail_cache_path,
                 max_thumbnail_cache_size,
                 folder_sizes: raw.server.folder_sizes,
+                archive_compression: raw.server.archive_compression,
             },
             users,
             shares,
@@ -897,6 +914,11 @@ impl ServerConfig {
     /// Whether listings show folder sizes, walked in the background.
     pub fn folder_sizes(&self) -> bool {
         self.folder_sizes
+    }
+
+    /// How folder and selection archives compress their files.
+    pub fn archive_compression(&self) -> ArchiveCompression {
+        self.archive_compression
     }
 }
 
@@ -1742,6 +1764,42 @@ permission = "write"
             tree.load(&invalid),
             Err(ConfigError::Schema { .. })
         ));
+    }
+
+    #[test]
+    fn archive_compression_defaults_to_auto_and_can_be_switched_off() {
+        let tree = TestTree::new();
+        assert_eq!(
+            tree.load(&tree.valid_text())
+                .unwrap()
+                .server()
+                .archive_compression(),
+            ArchiveCompression::Auto
+        );
+        let with = |value: &str| {
+            tree.valid_text().replace(
+                "max_preview_size = \"1 MiB\"",
+                &format!("max_preview_size = \"1 MiB\"\narchive_compression = {value}"),
+            )
+        };
+        for (value, expected) in [
+            ("\"auto\"", ArchiveCompression::Auto),
+            ("\"off\"", ArchiveCompression::Off),
+        ] {
+            assert_eq!(
+                tree.load(&with(value))
+                    .unwrap()
+                    .server()
+                    .archive_compression(),
+                expected
+            );
+        }
+        for invalid in ["\"deflate\"", "\"Off\"", "false", "1"] {
+            assert!(
+                matches!(tree.load(&with(invalid)), Err(ConfigError::Schema { .. })),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

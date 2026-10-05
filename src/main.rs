@@ -186,6 +186,7 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
     let limits = BrowseLimits {
         max_text_bytes: config.server().max_preview_size(),
         folder_sizes: config.server().folder_sizes(),
+        archive_compression: config.server().archive_compression(),
         ..BrowseLimits::default()
     };
     BrowseState::new(

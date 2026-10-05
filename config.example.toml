@@ -35,6 +35,12 @@ max_thumbnail_cache_size = "256 MiB"
 # seconds and then showing a lower bound such as "≥ 14 GB". Results are cached for
 # 60 seconds. Turn it off on slow or network storage to avoid those walks.
 folder_sizes = true
+# Folder and selection ZIP downloads. "auto" deflates text files of at least 1 KiB,
+# chosen per file from its name and first bytes, and stores photos, video, audio,
+# archives, and other binary files as they are. An archive that may contain a
+# deflated file is sent without Content-Length, so browsers show no total size;
+# one of media and small files only keeps it. "off" stores every file.
+archive_compression = "auto"
 # Each Argon2 verifier uses up to the hash's accepted memory parameter. Keep this at 1
 # for small pods and increase only after measuring the release image under its limit.
 auth_max_concurrent = 1

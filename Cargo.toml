@@ -18,6 +18,9 @@ base64 = "0.22.1"
 cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+# Raw DEFLATE for archive entries, through the pure-Rust miniz_oxide backend
+# that png already builds (no C zlib).
+flate2 = "1.1.10"
 getrandom = "0.4.3"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }

@@ -1,16 +1,32 @@
-//! A store-only ZIP writer for streamed folder downloads.
+//! A streaming ZIP writer for folder and selection downloads.
 //!
-//! The archive layout is fixed before the first byte is sent: each entry's
-//! size comes from the folder walk, so every header offset and the total
-//! length are known up front and the response can carry `Content-Length`.
-//! Entries are stored without compression. A file's CRC-32 is computed while
-//! its bytes stream, written in a data descriptor after them, and repeated
-//! in the central directory. ZIP64 fields appear only for the entries,
-//! offsets, and counts that overflow the classic 32-bit and 16-bit fields.
+//! Every file entry is either stored or deflated. Whether an entry may be
+//! deflated is decided when the archive is planned, from its size and name
+//! alone (see [`may_deflate`]); such a candidate's first bytes then settle
+//! it when its turn comes ([`sniff_deflate`]). An archive without candidates
+//! has its layout fixed before the first byte is sent: each entry's size
+//! comes from the folder walk, so every header offset and the total length
+//! are known up front and the response can carry `Content-Length`. Once an
+//! entry may be deflated, the offsets after it are known only as the archive
+//! streams, so the writer records each entry's offset and compressed size as
+//! it goes and builds the central directory from them.
+//!
+//! A file's CRC-32 is computed while its bytes stream, written in a data
+//! descriptor after them, and repeated in the central directory. ZIP64
+//! fields appear only for the entries, offsets, and counts that overflow the
+//! classic 32-bit and 16-bit fields; a deflated entry uses them as soon as
+//! its compressed size could overflow, which is decided from its file size
+//! before its local header is written.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    io::{self, Read},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use flate2::{Compress, Compression, FlushCompress, Status};
 use time::OffsetDateTime;
+
+use crate::{config::ArchiveCompression, preview};
 
 const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
 const DATA_DESCRIPTOR_SIGNATURE: u32 = 0x0807_4b50;
@@ -22,6 +38,9 @@ const END_SIGNATURE: u32 = 0x0605_4b50;
 const FLAG_DATA_DESCRIPTOR: u16 = 1 << 3;
 /// General-purpose flag bit 11: names are UTF-8.
 const FLAG_UTF8: u16 = 1 << 11;
+const METHOD_STORED: u16 = 0;
+const METHOD_DEFLATED: u16 = 8;
+/// Version 2.0 covers stored and deflated entries alike.
 const VERSION_DEFAULT: u16 = 20;
 const VERSION_ZIP64: u16 = 45;
 /// High byte of "version made by": external attributes hold Unix modes.
@@ -46,6 +65,95 @@ const DOS_MIN: (u16, u16) = (0, (1 << 5) | 1);
 /// 2107-12-31 23:59:58, the latest MS-DOS timestamp.
 const DOS_MAX: (u16, u16) = (0xBF7D, 0xFF9F);
 
+/// Files smaller than this are always stored: headers, the data descriptor,
+/// and deflate's block overhead leave little to gain, and every candidate
+/// costs the archive its exact length.
+pub(crate) const MIN_DEFLATE_BYTES: u64 = 1024;
+/// Leading bytes of a candidate read to decide whether it is text. They are
+/// the start of the entry's data either way, so nothing is read twice.
+pub(crate) const SNIFF_BYTES: usize = 8 * 1024;
+/// miniz level 2 (greedy matching with short hash chains). Measured on one
+/// core of the development VM over 64 MiB of source text and of CSV: level
+/// 1 compressed 200–225 MB/s to 34–36 %, level 2 173–175 MB/s to 26–32 %,
+/// level 3 74–100 MB/s to 24–30 %, and level 6 26–43 MB/s to 23–27 %. Level
+/// 2 keeps one stream above gigabit line rate on one core for most of the
+/// size gain.
+const DEFLATE_LEVEL: u32 = 2;
+/// Uncompressed bytes read from a deflated file at a time.
+const DEFLATE_INPUT_BYTES: usize = 64 * 1024;
+/// Extensions of formats that are already compressed: raster images and
+/// camera RAW, audio and video, ZIP-based documents and packages, compressed
+/// archives and disk images, PDF, and web fonts. A file with one of these
+/// names is stored without reading it first, so an archive of such files
+/// keeps its exact length. Lowercase; names are compared case-insensitively.
+const COMPRESSED_EXTENSIONS: &[&str] = &[
+    // Raster images.
+    "apng", "avif", "gif", "heic", "heics", "heif", "hif", "jfif", "jpe", "jpeg", "jpg", "jxl",
+    "png", "svgz", "webp", // Camera RAW.
+    "3fr", "arw", "cr2", "cr3", "crw", "dng", "erf", "kdc", "mrw", "nef", "nrw", "orf", "pef",
+    "raf", "rw2", "sr2", "srf", "srw", "x3f", // Video.
+    "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts", "ogv",
+    "qt", "vob", "webm", "wmv", // Audio.
+    "aac", "flac", "m4a", "m4b", "mp3", "oga", "ogg", "opus", "wma",
+    // ZIP-based documents and packages.
+    "aab", "apk", "docm", "docx", "ear", "epub", "ipa", "jar", "kmz", "nupkg", "odg", "odp", "ods",
+    "odt", "pptm", "pptx", "vsix", "war", "whl", "xlsm", "xlsx", "xpi", "zip", "zipx",
+    // Compressed archives, packages, and disk images.
+    "7z", "br", "bz2", "cab", "deb", "dmg", "gz", "lz", "lz4", "lzma", "rar", "rpm", "tbz", "tbz2",
+    "tgz", "txz", "tzst", "xz", "zst", // Documents and fonts.
+    "pdf", "woff", "woff2",
+];
+
+/// Whether a file of `size` bytes named `name` may be deflated, from what is
+/// known before it is read: large enough, and not named as an
+/// already-compressed format.
+pub(crate) fn may_deflate(name: &str, size: u64) -> bool {
+    size >= MIN_DEFLATE_BYTES && !has_compressed_extension(name)
+}
+
+fn has_compressed_extension(name: &str) -> bool {
+    let file = name.rsplit('/').next().unwrap_or(name);
+    file.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.len() <= 5
+            && COMPRESSED_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+    })
+}
+
+/// Whether a candidate whose first bytes are `prefix` is deflated: it must
+/// not start with an already-compressed format's signature, and must read
+/// as text, either UTF-8 by the text-preview rules or mostly printable ASCII
+/// without NUL bytes (legacy 8-bit encodings). Everything else is stored.
+/// `at_end` says that `prefix` is the whole file.
+pub(crate) fn sniff_deflate(prefix: &[u8], at_end: bool) -> bool {
+    !preview::has_compressed_signature(prefix)
+        && (preview::is_text_prefix(prefix, at_end) || is_mostly_ascii(prefix))
+}
+
+/// No NUL byte, and at least 90% printable ASCII or whitespace.
+fn is_mostly_ascii(bytes: &[u8]) -> bool {
+    let printable = bytes
+        .iter()
+        .filter(|byte| matches!(byte, b' '..=b'~' | b'\t' | b'\n' | b'\r'))
+        .count();
+    !bytes.contains(&0) && printable * 10 >= bytes.len() * 9
+}
+
+/// Whether deflating `size` bytes could produce 0xFFFFFFFF bytes or more.
+/// Deflate's worst case is a few bytes per 64 KiB stored block; the margin
+/// of an eighth plus 1 KiB also covers fixed-Huffman literals at 9 bits.
+const fn deflated_may_overflow(size: u64) -> bool {
+    size.saturating_add(size / 8).saturating_add(1024) >= U32_SENTINEL
+}
+
+/// The data of an entry differed from what the walk recorded.
+pub(crate) fn entry_changed() -> io::Error {
+    io::Error::other("an archived entry changed while streaming")
+}
+
+fn layout_error() -> io::Error {
+    io::Error::other("archive length differs from its plan")
+}
+
 /// One entry to archive. `name` is relative to the archive root, uses `/`
 /// separators, and has no trailing slash; directories gain one.
 #[derive(Clone, Debug)]
@@ -56,20 +164,37 @@ pub(crate) struct ZipSource {
     pub(crate) modified: Option<SystemTime>,
 }
 
+/// How an entry's bytes are encoded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Method {
+    Stored,
+    /// Deflated if its first bytes read as text, otherwise stored; settled
+    /// when its local header is written.
+    Candidate,
+    Deflated,
+}
+
 #[derive(Debug)]
 struct ZipEntry {
     name: String,
     size: Option<u64>,
+    method: Method,
     dos_time: u16,
     dos_date: u16,
     unix_mtime: Option<u32>,
+    /// Planned before streaming; recorded again when the header is written.
     offset: u64,
     crc: u32,
+    /// Bytes of data written for the entry, known once it has streamed.
+    compressed: u64,
 }
 
 impl ZipEntry {
     fn zip64_sizes(&self) -> bool {
-        self.size.is_some_and(|size| size >= U32_SENTINEL)
+        self.size.is_some_and(|size| match self.method {
+            Method::Stored => size >= U32_SENTINEL,
+            Method::Candidate | Method::Deflated => deflated_may_overflow(size),
+        })
     }
 
     fn zip64_offset(&self) -> bool {
@@ -89,6 +214,14 @@ impl ZipEntry {
             FLAG_UTF8 | FLAG_DATA_DESCRIPTOR
         } else {
             FLAG_UTF8
+        }
+    }
+
+    fn method_code(&self) -> u16 {
+        if self.method == Method::Deflated {
+            METHOD_DEFLATED
+        } else {
+            METHOD_STORED
         }
     }
 
@@ -132,21 +265,29 @@ impl ZipEntry {
     }
 }
 
-/// The complete byte layout of one archive.
+/// The byte layout of one archive: planned in full when no entry may be
+/// deflated, otherwise completed as the entries stream.
 #[derive(Debug)]
 pub(crate) struct ZipPlan {
     entries: Vec<ZipEntry>,
+    /// Whether some entry may be deflated, so the length is known only once
+    /// every entry has streamed.
+    variable: bool,
+    /// Bytes of local headers, data, and descriptors written so far.
+    position: u64,
     central_offset: u64,
     central_len: u64,
     len: u64,
 }
 
 impl ZipPlan {
-    /// Lays out `sources` in order. Returns `None` for an empty or
-    /// over-long name, or a layout whose length overflows `u64`.
-    pub(crate) fn new(sources: Vec<ZipSource>) -> Option<Self> {
+    /// Lays out `sources` in order, marking the files that may be deflated
+    /// under `compression`. Returns `None` for an empty or over-long name, or
+    /// a layout whose stored length overflows `u64`.
+    pub(crate) fn new(sources: Vec<ZipSource>, compression: ArchiveCompression) -> Option<Self> {
         let mut entries = Vec::with_capacity(sources.len());
         let mut offset = 0_u64;
+        let mut variable = false;
         for source in sources {
             let mut name = source.name;
             if name.is_empty() || name.ends_with('/') {
@@ -158,15 +299,26 @@ impl ZipPlan {
             if name.len() > usize::from(u16::MAX) {
                 return None;
             }
+            let method = match source.size {
+                Some(size)
+                    if compression == ArchiveCompression::Auto && may_deflate(&name, size) =>
+                {
+                    Method::Candidate
+                }
+                _ => Method::Stored,
+            };
+            variable |= method == Method::Candidate;
             let (dos_time, dos_date) = dos_timestamp(source.modified);
             let entry = ZipEntry {
                 name,
                 size: source.size,
+                method,
                 dos_time,
                 dos_date,
                 unix_mtime: unix_mtime(source.modified),
                 offset,
                 crc: 0,
+                compressed: 0,
             };
             offset = offset
                 .checked_add(entry.local_len())?
@@ -180,6 +332,8 @@ impl ZipPlan {
             .try_fold(0_u64, |total, entry| total.checked_add(entry.central_len()))?;
         let mut plan = Self {
             entries,
+            variable,
+            position: 0,
             central_offset,
             central_len,
             len: 0,
@@ -190,7 +344,13 @@ impl ZipPlan {
         Some(plan)
     }
 
-    /// The exact number of bytes the archive occupies.
+    /// The exact length of an archive in which no entry may be deflated.
+    pub(crate) const fn fixed_len(&self) -> Option<u64> {
+        if self.variable { None } else { Some(self.len) }
+    }
+
+    /// The number of bytes the archive occupies: as planned, and exact once
+    /// [`Self::finish_entries`] has run or when [`Self::fixed_len`] is known.
     pub(crate) const fn len(&self) -> u64 {
         self.len
     }
@@ -209,13 +369,29 @@ impl ZipPlan {
         self.entries[index].size
     }
 
-    pub(crate) fn write_local_header(&self, index: usize, out: &mut Vec<u8>) {
-        let entry = &self.entries[index];
+    /// Whether file entry `index` is deflated if its first bytes read as text.
+    pub(crate) fn may_deflate(&self, index: usize) -> bool {
+        self.entries[index].method == Method::Candidate
+    }
+
+    /// Writes the local header of entry `index` at the current position.
+    /// `deflate` settles a candidate; other entries ignore it.
+    pub(crate) fn write_local_header(&mut self, index: usize, deflate: bool, out: &mut Vec<u8>) {
+        let position = self.position;
+        let entry = &mut self.entries[index];
+        if entry.method == Method::Candidate {
+            entry.method = if deflate {
+                Method::Deflated
+            } else {
+                Method::Stored
+            };
+        }
+        entry.offset = position;
         let size_field = if entry.zip64_sizes() { u32::MAX } else { 0 };
         put_u32(out, LOCAL_HEADER_SIGNATURE);
         put_u16(out, entry.version());
         put_u16(out, entry.flags());
-        put_u16(out, 0);
+        put_u16(out, entry.method_code());
         put_u16(out, entry.dos_time);
         put_u16(out, entry.dos_date);
         // With a data descriptor the CRC and sizes are zero here; a ZIP64
@@ -233,33 +409,78 @@ impl ZipPlan {
             put_u64(out, 0);
             put_u64(out, 0);
         }
+        self.position = position.saturating_add(entry.local_len());
     }
 
-    /// Records the CRC of file entry `index` and writes its data descriptor.
-    pub(crate) fn write_data_descriptor(&mut self, index: usize, crc: u32, out: &mut Vec<u8>) {
+    /// Records the CRC and written length of file entry `index` and writes
+    /// its data descriptor. Fails when a stored entry's length differs from
+    /// its size, or a compressed length overflows the fields its local
+    /// header chose.
+    pub(crate) fn write_data_descriptor(
+        &mut self,
+        index: usize,
+        crc: u32,
+        compressed: u64,
+        out: &mut Vec<u8>,
+    ) -> io::Result<()> {
         let entry = &mut self.entries[index];
         let Some(size) = entry.size else {
-            return;
+            return Ok(());
         };
+        if (entry.method != Method::Deflated && compressed != size)
+            || (!entry.zip64_sizes() && compressed >= U32_SENTINEL)
+        {
+            return Err(layout_error());
+        }
         entry.crc = crc;
+        entry.compressed = compressed;
         put_u32(out, DATA_DESCRIPTOR_SIGNATURE);
         put_u32(out, crc);
         if entry.zip64_sizes() {
-            put_u64(out, size);
+            put_u64(out, compressed);
             put_u64(out, size);
         } else {
-            put_u32(out, size as u32);
+            put_u32(out, compressed as u32);
             put_u32(out, size as u32);
         }
+        self.position = self
+            .position
+            .checked_add(compressed)
+            .and_then(|position| position.checked_add(entry.descriptor_len()))
+            .ok_or_else(layout_error)?;
+        Ok(())
+    }
+
+    /// Fixes the central directory's place and the archive's length once
+    /// every entry has been written. A fixed layout must end where planned.
+    pub(crate) fn finish_entries(&mut self) -> io::Result<()> {
+        let central_offset = self.position;
+        let central_len = self
+            .entries
+            .iter()
+            .try_fold(0_u64, |total, entry| total.checked_add(entry.central_len()))
+            .ok_or_else(layout_error)?;
+        let planned = (self.central_offset, self.central_len);
+        self.central_offset = central_offset;
+        self.central_len = central_len;
+        let len = central_offset
+            .checked_add(central_len)
+            .and_then(|len| len.checked_add(self.end_len()))
+            .ok_or_else(layout_error)?;
+        if !self.variable && ((central_offset, central_len) != planned || len != self.len) {
+            return Err(layout_error());
+        }
+        self.len = len;
+        Ok(())
     }
 
     pub(crate) fn write_central_header(&self, index: usize, out: &mut Vec<u8>) {
         let entry = &self.entries[index];
         let size = entry.size.unwrap_or(0);
-        let size_field = if entry.zip64_sizes() {
-            u32::MAX
+        let (compressed_field, size_field) = if entry.zip64_sizes() {
+            (u32::MAX, u32::MAX)
         } else {
-            size as u32
+            (entry.compressed as u32, size as u32)
         };
         let offset_field = if entry.zip64_offset() {
             u32::MAX
@@ -270,11 +491,11 @@ impl ZipPlan {
         put_u16(out, CREATOR_UNIX | entry.version());
         put_u16(out, entry.version());
         put_u16(out, entry.flags());
-        put_u16(out, 0);
+        put_u16(out, entry.method_code());
         put_u16(out, entry.dos_time);
         put_u16(out, entry.dos_date);
         put_u32(out, entry.crc);
-        put_u32(out, size_field);
+        put_u32(out, compressed_field);
         put_u32(out, size_field);
         put_u16(out, entry.name.len() as u16);
         put_u16(out, entry.central_extra_len() as u16);
@@ -298,7 +519,7 @@ impl ZipPlan {
             put_u16(out, (8 * fields) as u16);
             if entry.zip64_sizes() {
                 put_u64(out, size);
-                put_u64(out, size);
+                put_u64(out, entry.compressed);
             }
             if entry.zip64_offset() {
                 put_u64(out, entry.offset);
@@ -349,6 +570,194 @@ impl ZipPlan {
         } else {
             END_LEN
         }
+    }
+}
+
+/// One file entry's data on its way into an archive: read from `source`,
+/// checksummed, and stored or deflated. Every method reads and compresses
+/// synchronously, so an async caller runs them on the blocking pool.
+///
+/// A deflating entry holds the compressor (about 312 KiB of tables, window,
+/// and hash chains in miniz_oxide) and at most [`DEFLATE_INPUT_BYTES`] of
+/// input; a stored candidate holds its [`SNIFF_BYTES`] prefix. The
+/// compressor is handed from entry to entry, so one archive allocates it at
+/// most once.
+pub(crate) struct EntryEncoder<R> {
+    source: R,
+    /// File bytes not yet read.
+    remaining: u64,
+    crc: Crc32,
+    /// Bytes of entry data produced so far.
+    written: u64,
+    /// Bytes read but not yet emitted (the sniffed prefix), or not yet
+    /// consumed by the compressor, from `consumed` on.
+    pending: Vec<u8>,
+    consumed: usize,
+    compressor: Option<Compress>,
+    deflate: bool,
+    /// Whether the read past the planned size was made.
+    probed: bool,
+}
+
+impl<R: Read> EntryEncoder<R> {
+    /// Starts a file entry of `size` bytes. A deflate candidate's first
+    /// bytes are read now to settle its method, which its local header must
+    /// carry; see [`Self::deflated`]. `compressor` is a previous entry's,
+    /// reused if this one deflates.
+    pub(crate) fn start(
+        source: R,
+        size: u64,
+        candidate: bool,
+        compressor: Option<Compress>,
+    ) -> io::Result<Self> {
+        let mut encoder = Self {
+            source,
+            remaining: size,
+            crc: Crc32::new(),
+            written: 0,
+            pending: Vec::new(),
+            consumed: 0,
+            compressor,
+            deflate: false,
+            probed: false,
+        };
+        if candidate {
+            let prefix = size.min(SNIFF_BYTES as u64) as usize;
+            encoder.read_pending(prefix)?;
+            encoder.deflate = sniff_deflate(&encoder.pending, prefix as u64 == size);
+        }
+        if encoder.deflate {
+            match &mut encoder.compressor {
+                Some(compressor) => compressor.reset(),
+                None => {
+                    encoder.compressor =
+                        Some(Compress::new(Compression::new(DEFLATE_LEVEL), false));
+                }
+            }
+        }
+        Ok(encoder)
+    }
+
+    /// Whether the entry is deflated rather than stored.
+    pub(crate) const fn deflated(&self) -> bool {
+        self.deflate
+    }
+
+    /// Appends the entry's next data to `out` until it holds at least
+    /// `budget` bytes or the entry is complete, and returns whether it is.
+    /// Fails if the file ends early or continues past its planned size.
+    pub(crate) fn fill(&mut self, out: &mut Vec<u8>, budget: usize) -> io::Result<bool> {
+        if self.deflate {
+            self.fill_deflated(out, budget)
+        } else {
+            self.fill_stored(out, budget)
+        }
+    }
+
+    /// The entry's CRC-32 and data length, and the compressor for reuse.
+    pub(crate) fn finish(self) -> (u32, u64, Option<Compress>) {
+        (self.crc.finish(), self.written, self.compressor)
+    }
+
+    fn fill_stored(&mut self, out: &mut Vec<u8>, budget: usize) -> io::Result<bool> {
+        if self.consumed < self.pending.len() {
+            out.extend_from_slice(&self.pending[self.consumed..]);
+            self.written += (self.pending.len() - self.consumed) as u64;
+            self.consumed = self.pending.len();
+        }
+        while out.len() < budget && self.remaining > 0 {
+            let start = out.len();
+            let wanted = usize::try_from(self.remaining)
+                .unwrap_or(usize::MAX)
+                .min(budget - start);
+            out.resize(start + wanted, 0);
+            let read = self.source.read(&mut out[start..]);
+            let read = match read {
+                Ok(read) => read,
+                Err(error) => {
+                    out.truncate(start);
+                    return Err(error);
+                }
+            };
+            out.truncate(start + read);
+            if read == 0 {
+                return Err(entry_changed());
+            }
+            self.crc.update(&out[start..]);
+            self.remaining -= read as u64;
+            self.written += read as u64;
+        }
+        if self.remaining > 0 {
+            return Ok(false);
+        }
+        self.probe_end()?;
+        Ok(true)
+    }
+
+    fn fill_deflated(&mut self, out: &mut Vec<u8>, budget: usize) -> io::Result<bool> {
+        while out.len() < budget {
+            if self.consumed == self.pending.len() && self.remaining > 0 {
+                let next = self.remaining.min(DEFLATE_INPUT_BYTES as u64) as usize;
+                self.read_pending(next)?;
+            }
+            let finish = self.remaining == 0 && self.consumed == self.pending.len();
+            if finish {
+                self.probe_end()?;
+            }
+            let compressor = self.compressor.as_mut().ok_or_else(layout_error)?;
+            let start = out.len();
+            out.resize(budget, 0);
+            let (read_before, written_before) = (compressor.total_in(), compressor.total_out());
+            let status = compressor.compress(
+                &self.pending[self.consumed..],
+                &mut out[start..],
+                if finish {
+                    FlushCompress::Finish
+                } else {
+                    FlushCompress::None
+                },
+            );
+            let used = (compressor.total_in() - read_before) as usize;
+            let produced = (compressor.total_out() - written_before) as usize;
+            out.truncate(start + produced);
+            let status = status.map_err(io::Error::other)?;
+            self.consumed += used;
+            self.written += produced as u64;
+            if status == Status::StreamEnd {
+                return Ok(true);
+            }
+            if used == 0 && produced == 0 && (finish || self.consumed < self.pending.len()) {
+                return Err(io::Error::other("deflate made no progress"));
+            }
+        }
+        Ok(false)
+    }
+
+    /// Replaces the pending bytes with exactly the next `len` bytes.
+    fn read_pending(&mut self, len: usize) -> io::Result<()> {
+        self.pending.clear();
+        self.pending.resize(len, 0);
+        self.consumed = 0;
+        self.source
+            .read_exact(&mut self.pending)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::UnexpectedEof => entry_changed(),
+                _ => error,
+            })?;
+        self.crc.update(&self.pending);
+        self.remaining -= len as u64;
+        Ok(())
+    }
+
+    /// A file that grew past its planned size has changed.
+    fn probe_end(&mut self) -> io::Result<()> {
+        if !self.probed {
+            self.probed = true;
+            if self.source.read(&mut [0])? != 0 {
+                return Err(entry_changed());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -478,12 +887,16 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
 pub(crate) mod verify {
     use std::time::Duration;
 
+    use flate2::{Decompress, FlushDecompress};
+
     use super::*;
 
     /// One entry as an independent reader sees it.
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct ReadEntry {
         pub(crate) name: String,
+        /// The compression method, `0` (stored) or `8` (deflated).
+        pub(crate) method: u16,
         pub(crate) data: Option<Vec<u8>>,
     }
 
@@ -502,8 +915,10 @@ pub(crate) mod verify {
     /// One central directory header, with ZIP64 extra fields applied.
     struct CentralRecord {
         flags: u16,
+        method: u16,
         crc: u32,
         size: u64,
+        compressed: u64,
         offset: u64,
         name: String,
         /// Where the next header starts.
@@ -514,11 +929,14 @@ pub(crate) mod verify {
         assert_eq!(u32_at(bytes, at), CENTRAL_HEADER_SIGNATURE);
         let flags = u16_at(bytes, at + 8);
         assert_ne!(flags & FLAG_UTF8, 0);
-        assert_eq!(u16_at(bytes, at + 10), 0, "stored");
+        let method = u16_at(bytes, at + 10);
+        assert!(
+            method == METHOD_STORED || method == METHOD_DEFLATED,
+            "method {method}"
+        );
         let crc = u32_at(bytes, at + 16);
-        let compressed = u32_at(bytes, at + 20);
+        let mut compressed = u64::from(u32_at(bytes, at + 20));
         let mut size = u64::from(u32_at(bytes, at + 24));
-        assert_eq!(u64::from(compressed), size);
         let name_len = usize::from(u16_at(bytes, at + 28));
         let extra_len = usize::from(u16_at(bytes, at + 30));
         let mut offset = u64::from(u32_at(bytes, at + 42));
@@ -531,11 +949,15 @@ pub(crate) mod verify {
             let id = u16_at(bytes, extra);
             let len = usize::from(u16_at(bytes, extra + 2));
             if id == ZIP64_EXTRA_ID {
+                // APPNOTE 4.5.3: only the overflowing fields, in this order.
                 let mut field = extra + 4;
                 if size == U32_SENTINEL {
                     size = u64_at(bytes, field);
-                    assert_eq!(u64_at(bytes, field + 8), size);
-                    field += 16;
+                    field += 8;
+                }
+                if compressed == U32_SENTINEL {
+                    compressed = u64_at(bytes, field);
+                    field += 8;
                 }
                 if offset == U32_SENTINEL {
                     offset = u64_at(bytes, field);
@@ -546,14 +968,33 @@ pub(crate) mod verify {
             extra += 4 + len;
         }
         assert_eq!(extra, extra_end);
+        if method == METHOD_STORED {
+            assert_eq!(compressed, size, "{name}");
+        }
         CentralRecord {
             flags,
+            method,
             crc,
             size,
+            compressed,
             offset,
             name,
             next: extra_end,
         }
+    }
+
+    /// Inflates a raw deflate stream that must end exactly at the end of
+    /// `raw` and expand to exactly `size` bytes.
+    fn inflate(raw: &[u8], size: u64) -> Vec<u8> {
+        let mut inflater = Decompress::new(false);
+        let mut data = Vec::with_capacity(size as usize + 1);
+        let status = inflater
+            .decompress_vec(raw, &mut data, FlushDecompress::Finish)
+            .expect("valid deflate stream");
+        assert_eq!(status, Status::StreamEnd, "deflate stream ends");
+        assert_eq!(inflater.total_in(), raw.len() as u64, "no bytes after it");
+        assert_eq!(data.len() as u64, size, "inflated size");
+        data
     }
 
     /// Reads an archive the way an extractor does: from the end record,
@@ -581,8 +1022,10 @@ pub(crate) mod verify {
         for _ in 0..count {
             let CentralRecord {
                 flags,
+                method,
                 crc,
                 size,
+                compressed,
                 offset,
                 name,
                 next,
@@ -592,6 +1035,7 @@ pub(crate) mod verify {
             let local = offset as usize;
             assert_eq!(u32_at(bytes, local), LOCAL_HEADER_SIGNATURE);
             assert_eq!(u16_at(bytes, local + 6), flags);
+            assert_eq!(u16_at(bytes, local + 8), method);
             let local_name_len = usize::from(u16_at(bytes, local + 26));
             let local_extra_len = usize::from(u16_at(bytes, local + 28));
             assert_eq!(
@@ -603,47 +1047,73 @@ pub(crate) mod verify {
                 && u32_at(bytes, local + 18) == u32::MAX;
             let data = if name.ends_with('/') {
                 assert_eq!(flags & FLAG_DATA_DESCRIPTOR, 0);
+                assert_eq!(method, METHOD_STORED);
                 assert_eq!(size, 0);
                 None
             } else {
                 assert_ne!(flags & FLAG_DATA_DESCRIPTOR, 0);
-                let data = &bytes[data_start..data_start + size as usize];
-                assert_eq!(reference_crc(data), crc, "{name}");
-                let descriptor = data_start + size as usize;
+                let raw = &bytes[data_start..data_start + compressed as usize];
+                let data = if method == METHOD_DEFLATED {
+                    inflate(raw, size)
+                } else {
+                    raw.to_vec()
+                };
+                assert_eq!(reference_crc(&data), crc, "{name}");
+                let descriptor = data_start + compressed as usize;
                 assert_eq!(u32_at(bytes, descriptor), DATA_DESCRIPTOR_SIGNATURE);
                 assert_eq!(u32_at(bytes, descriptor + 4), crc);
                 if zip64_local {
-                    assert_eq!(u64_at(bytes, descriptor + 8), size);
+                    assert_eq!(u64_at(bytes, descriptor + 8), compressed);
                     assert_eq!(u64_at(bytes, descriptor + 16), size);
                 } else {
-                    assert_eq!(u64::from(u32_at(bytes, descriptor + 8)), size);
+                    assert_eq!(u64::from(u32_at(bytes, descriptor + 8)), compressed);
                     assert_eq!(u64::from(u32_at(bytes, descriptor + 12)), size);
                 }
-                Some(data.to_vec())
+                Some(data)
             };
-            entries.push(ReadEntry { name, data });
+            entries.push(ReadEntry { name, method, data });
         }
         assert_eq!(at as u64, central_offset + central_len);
         entries
     }
 
-    /// Streams `contents` through a plan the way the HTTP handler does, or
-    /// returns `None` when the sources have no valid layout.
-    pub(crate) fn build(
+    /// Streams `contents` through a plan the way the HTTP handler does, in
+    /// pieces of about `piece` bytes, or returns `None` when the sources have
+    /// no valid layout.
+    pub(crate) fn build_in_pieces(
         sources: Vec<ZipSource>,
         contents: &[Option<Vec<u8>>],
+        compression: ArchiveCompression,
+        piece: usize,
     ) -> Option<(ZipPlan, Vec<u8>)> {
-        let mut plan = ZipPlan::new(sources)?;
+        let mut plan = ZipPlan::new(sources, compression)?;
         let mut out = Vec::new();
+        let mut compressor = None;
         for (index, data) in contents.iter().enumerate() {
-            plan.write_local_header(index, &mut out);
-            if let Some(data) = data {
-                out.extend_from_slice(data);
-                let mut crc = Crc32::new();
-                crc.update(data);
-                plan.write_data_descriptor(index, crc.finish(), &mut out);
+            let Some(data) = data else {
+                plan.write_local_header(index, false, &mut out);
+                continue;
+            };
+            let mut encoder = EntryEncoder::start(
+                data.as_slice(),
+                data.len() as u64,
+                plan.may_deflate(index),
+                compressor.take(),
+            )
+            .expect("in-memory entry");
+            plan.write_local_header(index, encoder.deflated(), &mut out);
+            loop {
+                let budget = out.len() + piece.max(1);
+                if encoder.fill(&mut out, budget).expect("in-memory entry") {
+                    break;
+                }
             }
+            let (crc, written, spare) = encoder.finish();
+            compressor = spare;
+            plan.write_data_descriptor(index, crc, written, &mut out)
+                .expect("descriptor");
         }
+        plan.finish_entries().expect("layout");
         for index in 0..plan.entry_count() {
             plan.write_central_header(index, &mut out);
         }
@@ -651,30 +1121,53 @@ pub(crate) mod verify {
         Some((plan, out))
     }
 
+    /// [`build_in_pieces`] with the HTTP handler's default chunk size.
+    #[cfg(test)]
+    pub(crate) fn build(
+        sources: Vec<ZipSource>,
+        contents: &[Option<Vec<u8>>],
+        compression: ArchiveCompression,
+    ) -> Option<(ZipPlan, Vec<u8>)> {
+        build_in_pieces(sources, contents, compression, 64 * 1024)
+    }
+
     /// Writes every record of a layout whose file bytes are not
     /// materialized and checks that each record has its planned length and
-    /// that the central directory and end records decode to the planned
-    /// sizes, offsets, and counts. This reaches the ZIP64 branches, which
-    /// real data would need gigabytes for.
-    pub(crate) fn check_layout(sources: Vec<ZipSource>) {
-        let Some(mut plan) = ZipPlan::new(sources) else {
+    /// that the central directory and end records decode to the written
+    /// sizes, offsets, and counts. Every deflate candidate is taken as
+    /// deflated to half its size plus a few bytes. This reaches the ZIP64
+    /// branches, which real data would need gigabytes for.
+    pub(crate) fn check_layout(sources: Vec<ZipSource>, compression: ArchiveCompression) {
+        let Some(mut plan) = ZipPlan::new(sources, compression) else {
             return;
         };
+        let fixed_len = plan.fixed_len();
+        let planned_offsets: Vec<_> = plan.entries.iter().map(|entry| entry.offset).collect();
         let mut position = 0_u64;
         let mut record = Vec::new();
-        for index in 0..plan.entry_count() {
-            assert_eq!(plan.entries[index].offset, position);
+        for (index, planned) in planned_offsets.into_iter().enumerate() {
+            if fixed_len.is_some() {
+                assert_eq!(planned, position);
+            }
+            let deflate = plan.may_deflate(index);
             record.clear();
-            plan.write_local_header(index, &mut record);
-            assert_eq!(record.len() as u64, plan.entries[index].local_len());
+            plan.write_local_header(index, deflate, &mut record);
+            let entry = &plan.entries[index];
+            assert_eq!(entry.offset, position);
+            assert_eq!(record.len() as u64, entry.local_len());
+            assert_eq!(u16_at(&record, 8), entry.method_code());
             let zip64_local = u32_at(&record, 18) == u32::MAX;
-            assert_eq!(zip64_local, plan.entries[index].zip64_sizes());
-            position += record.len() as u64 + plan.entries[index].size.unwrap_or(0);
+            assert_eq!(zip64_local, entry.zip64_sizes());
+            let size = entry.size.unwrap_or(0);
+            let written = if deflate { size / 2 + 5 } else { size };
+            position += record.len() as u64 + written;
             record.clear();
-            plan.write_data_descriptor(index, 0x1234_5678, &mut record);
+            plan.write_data_descriptor(index, 0x1234_5678, written, &mut record)
+                .expect("descriptor");
             assert_eq!(record.len() as u64, plan.entries[index].descriptor_len());
             position += record.len() as u64;
         }
+        plan.finish_entries().expect("layout");
         assert_eq!(position, plan.central_offset);
 
         let mut central = Vec::new();
@@ -686,7 +1179,9 @@ pub(crate) mod verify {
         for entry in &plan.entries {
             let decoded = read_central(&central, at);
             assert_eq!(decoded.name, entry.name);
+            assert_eq!(decoded.method, entry.method_code());
             assert_eq!(decoded.size, entry.size.unwrap_or(0));
+            assert_eq!(decoded.compressed, entry.compressed);
             assert_eq!(decoded.offset, entry.offset);
             let expected_crc = if entry.size.is_some() { 0x1234_5678 } else { 0 };
             assert_eq!(decoded.crc, expected_crc);
@@ -701,6 +1196,9 @@ pub(crate) mod verify {
             position + central.len() as u64 + end.len() as u64,
             plan.len()
         );
+        if let Some(len) = fixed_len {
+            assert_eq!(plan.len(), len);
+        }
         let classic = end.len() - END_LEN as usize;
         assert_eq!(u32_at(&end, classic), END_SIGNATURE);
         let count = plan.entries.len() as u64;
@@ -724,15 +1222,24 @@ pub(crate) mod verify {
     }
 
     /// Decodes fuzzer bytes into archive entries. The first byte selects a
-    /// round trip with real file bytes, or a layout check with arbitrary
-    /// declared sizes; each entry then reads a control byte, a name, an
-    /// optional modification time, and its size or bytes.
+    /// round trip with real file bytes or a layout check with arbitrary
+    /// declared sizes (bit 0), automatic compression or none (bit 1), and
+    /// the size of the pieces a round trip streams in (bits 2–7); each entry
+    /// then reads a control byte, a name, an optional modification time,
+    /// and its size or bytes. Control bit 2 repeats a file's bytes 16 times,
+    /// so files reach the deflate threshold.
     pub(crate) fn fuzz(data: &[u8]) {
         let mut input = Input(data);
         let Some(mode) = input.byte() else {
             return;
         };
         let round_trip = mode & 1 == 0;
+        let compression = if mode & 2 == 0 {
+            ArchiveCompression::Off
+        } else {
+            ArchiveCompression::Auto
+        };
+        let piece = (usize::from(mode >> 2) + 1) * 256;
         let mut sources = Vec::new();
         let mut contents = Vec::new();
         while sources.len() < 64 {
@@ -765,7 +1272,12 @@ pub(crate) mod verify {
                 let Some(bytes) = input.take(usize::from(len)) else {
                     break;
                 };
-                (Some(bytes.len() as u64), Some(bytes.to_vec()))
+                let bytes = if control & 4 == 0 {
+                    bytes.to_vec()
+                } else {
+                    bytes.repeat(16)
+                };
+                (Some(bytes.len() as u64), Some(bytes))
             } else {
                 let Some(size) = input.take(8) else {
                     break;
@@ -781,27 +1293,54 @@ pub(crate) mod verify {
         }
 
         if !round_trip {
-            check_layout(sources);
+            check_layout(sources, compression);
             return;
         }
         let expected: Vec<_> = sources
             .iter()
             .zip(&contents)
-            .map(|(source, data)| ReadEntry {
-                name: if data.is_some() {
+            .map(|(source, data)| {
+                let name = if data.is_some() {
                     source.name.clone()
                 } else {
                     format!("{}/", source.name)
-                },
-                data: data.clone(),
+                };
+                (name, data.clone())
             })
             .collect();
-        check_layout(sources.clone());
-        let Some((plan, bytes)) = build(sources, &contents) else {
+        check_layout(sources.clone(), compression);
+        let candidates: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                compression == ArchiveCompression::Auto
+                    && source
+                        .size
+                        .is_some_and(|size| may_deflate(&source.name, size))
+            })
+            .collect();
+        let Some((plan, bytes)) = build_in_pieces(sources, &contents, compression, piece) else {
             return;
         };
         assert_eq!(plan.len(), bytes.len() as u64);
-        assert_eq!(read_archive(&bytes), expected);
+        let read = read_archive(&bytes);
+        for ((entry, candidate), data) in read.iter().zip(&candidates).zip(&contents) {
+            let deflated = entry.method == METHOD_DEFLATED;
+            assert_eq!(
+                deflated,
+                *candidate
+                    && data.as_ref().is_some_and(|data| {
+                        let prefix = &data[..data.len().min(SNIFF_BYTES)];
+                        sniff_deflate(prefix, prefix.len() == data.len())
+                    }),
+                "{}",
+                entry.name
+            );
+        }
+        let read: Vec<_> = read
+            .into_iter()
+            .map(|entry| (entry.name, entry.data))
+            .collect();
+        assert_eq!(read, expected);
     }
 
     struct Input<'data>(&'data [u8]);
@@ -874,21 +1413,24 @@ mod tests {
             },
         ];
         let contents = [None, Some(b"hello".to_vec()), Some(Vec::new())];
-        let (plan, bytes) = build(sources, &contents).expect("layout");
+        let (plan, bytes) = build(sources, &contents, ArchiveCompression::Off).expect("layout");
         assert_eq!(plan.len(), bytes.len() as u64);
         assert_eq!(
             read_archive(&bytes),
             vec![
                 ReadEntry {
                     name: "Photos/".into(),
+                    method: METHOD_STORED,
                     data: None,
                 },
                 ReadEntry {
                     name: "Photos/été.txt".into(),
+                    method: METHOD_STORED,
                     data: Some(b"hello".to_vec()),
                 },
                 ReadEntry {
                     name: "Photos/empty".into(),
+                    method: METHOD_STORED,
                     data: Some(Vec::new()),
                 },
             ]
@@ -903,7 +1445,10 @@ mod tests {
                 size: Some(0),
                 modified: None,
             };
-            assert!(ZipPlan::new(vec![source]).is_none(), "{name:.16}");
+            assert!(
+                ZipPlan::new(vec![source], ArchiveCompression::Off).is_none(),
+                "{name:.16}"
+            );
         }
     }
 
@@ -915,24 +1460,33 @@ mod tests {
             modified: None,
         };
         // A file that leaves room for every header below 4 GiB.
-        let small = ZipPlan::new(vec![file("a", U32_SENTINEL - 1_000)]).expect("layout");
+        let small = ZipPlan::new(
+            vec![file("a", U32_SENTINEL - 1_000)],
+            ArchiveCompression::Off,
+        )
+        .expect("layout");
         assert!(!small.entries[0].zip64_sizes());
         assert!(!small.needs_zip64_end());
         // One byte short of the sentinel still fits the size fields, but the
         // central directory then starts past them.
-        let edge = ZipPlan::new(vec![file("a", U32_SENTINEL - 1)]).expect("layout");
+        let edge = ZipPlan::new(vec![file("a", U32_SENTINEL - 1)], ArchiveCompression::Off)
+            .expect("layout");
         assert!(!edge.entries[0].zip64_sizes());
         assert!(edge.needs_zip64_end());
 
         // A file of exactly 0xFFFFFFFF bytes cannot use the sentinel value.
-        let plan = ZipPlan::new(vec![file("big", U32_SENTINEL), file("after", 1)]).expect("layout");
+        let mut plan = ZipPlan::new(
+            vec![file("big", U32_SENTINEL), file("after", 1)],
+            ArchiveCompression::Off,
+        )
+        .expect("layout");
         assert!(plan.entries[0].zip64_sizes());
         assert!(!plan.entries[0].zip64_offset());
         assert!(!plan.entries[1].zip64_sizes());
         assert!(plan.entries[1].zip64_offset());
         assert!(plan.needs_zip64_end());
         let mut header = Vec::new();
-        plan.write_local_header(0, &mut header);
+        plan.write_local_header(0, false, &mut header);
         assert_eq!(header.len() as u64, plan.entries[0].local_len());
         assert_eq!(u16_at(&header, 4), VERSION_ZIP64);
         let mut central = Vec::new();
@@ -948,7 +1502,7 @@ mod tests {
         plan.write_end(&mut end);
         assert_eq!(end.len() as u64, plan.end_len());
 
-        assert!(ZipPlan::new(vec![file("a", u64::MAX)]).is_none());
+        assert!(ZipPlan::new(vec![file("a", u64::MAX)], ArchiveCompression::Off).is_none());
     }
 
     #[test]
@@ -961,7 +1515,7 @@ mod tests {
             })
             .collect();
         let contents = vec![Some(Vec::new()); sources.len()];
-        let (plan, bytes) = build(sources, &contents).expect("layout");
+        let (plan, bytes) = build(sources, &contents, ArchiveCompression::Off).expect("layout");
         assert!(plan.needs_zip64_end());
         assert_eq!(plan.len(), bytes.len() as u64);
         assert_eq!(read_archive(&bytes).len() as u64, U16_SENTINEL);
@@ -990,7 +1544,7 @@ mod tests {
             size: Some(size),
             modified: None,
         };
-        check_layout(vec![
+        let sources = vec![
             file("a", U32_SENTINEL - 1),
             file("big", U32_SENTINEL),
             ZipSource {
@@ -999,7 +1553,63 @@ mod tests {
                 modified: Some(UNIX_EPOCH + Duration::from_secs(1)),
             },
             file("after", u64::from(u32::MAX) * 3),
-        ]);
+            file("movie.mp4", u64::from(u32::MAX) * 2),
+        ];
+        check_layout(sources.clone(), ArchiveCompression::Off);
+        // The same names, every one but the video a deflate candidate.
+        check_layout(sources, ArchiveCompression::Auto);
+    }
+
+    #[test]
+    fn deflated_entries_switch_to_zip64_before_they_could_overflow() {
+        assert!(!deflated_may_overflow(0));
+        assert!(!deflated_may_overflow(3_000_000_000));
+        assert!(deflated_may_overflow(U32_SENTINEL - 1_000));
+        assert!(deflated_may_overflow(u64::MAX));
+        let file = |name: &str, size| ZipSource {
+            name: name.into(),
+            size: Some(size),
+            modified: None,
+        };
+        // A candidate below the stored threshold already reserves ZIP64
+        // sizes, in its local header and its data descriptor, and keeps them
+        // whichever way it is settled.
+        let sources = vec![
+            file("server.log", U32_SENTINEL - 1_000),
+            file("notes.txt", 5_000),
+        ];
+        let mut plan = ZipPlan::new(sources.clone(), ArchiveCompression::Auto).expect("layout");
+        assert!(plan.may_deflate(0));
+        assert!(plan.entries[0].zip64_sizes());
+        assert!(plan.fixed_len().is_none());
+        let mut header = Vec::new();
+        plan.write_local_header(0, true, &mut header);
+        assert_eq!(u16_at(&header, 4), VERSION_ZIP64);
+        assert_eq!(u16_at(&header, 8), METHOD_DEFLATED);
+        assert_eq!(u32_at(&header, 18), u32::MAX);
+        let mut descriptor = Vec::new();
+        plan.write_data_descriptor(0, 1, 70_000_000, &mut descriptor)
+            .expect("descriptor");
+        assert_eq!(descriptor.len() as u64, ZIP64_DATA_DESCRIPTOR_LEN);
+        assert_eq!(u64_at(&descriptor, 8), 70_000_000, "compressed first");
+        assert_eq!(u64_at(&descriptor, 16), U32_SENTINEL - 1_000);
+        // Without ZIP64 sizes, a compressed size past the classic field is
+        // refused rather than truncated.
+        plan.write_local_header(1, true, &mut header);
+        assert!(!plan.entries[1].zip64_sizes());
+        assert!(
+            plan.write_data_descriptor(1, 1, U32_SENTINEL, &mut descriptor)
+                .is_err()
+        );
+        // A stored entry must have exactly its planned size.
+        let mut stored = ZipPlan::new(sources, ArchiveCompression::Off).expect("layout");
+        stored.write_local_header(0, true, &mut header);
+        assert!(!stored.entries[0].zip64_sizes(), "stays stored");
+        assert!(
+            stored
+                .write_data_descriptor(0, 1, 70_000_000, &mut descriptor)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1022,6 +1632,278 @@ mod tests {
         let mut layout = vec![1, 0, b'x'];
         layout.extend_from_slice(&U32_SENTINEL.to_le_bytes());
         fuzz(&layout);
+        // Automatic compression: a 1,600-byte text file "t" (100 bytes
+        // repeated 16 times) is deflated, in 256-byte pieces.
+        let mut text = vec![0b10, 0b0000_0100, b't', 100];
+        text.extend(b"line of text\n".iter().cycle().take(100));
+        fuzz(&text);
+        // The same declared layout, as a deflate candidate.
+        let mut layout = vec![0b11, 0, b'x'];
+        layout.extend_from_slice(&(U32_SENTINEL - 1).to_le_bytes());
+        fuzz(&layout);
+    }
+
+    #[test]
+    fn deflate_candidates_are_chosen_by_size_and_name() {
+        assert!(may_deflate("notes.txt", MIN_DEFLATE_BYTES));
+        assert!(!may_deflate("notes.txt", MIN_DEFLATE_BYTES - 1));
+        assert!(may_deflate("Makefile", 4_096));
+        assert!(may_deflate("archive.tar", 4_096), "tar is not compressed");
+        assert!(may_deflate("data.sqlite3", 4_096));
+        for name in [
+            "IMG_0001.JPG",
+            "a/b/photo.jpeg",
+            "scan.heic",
+            "raw/DSC_1.NEF",
+            "clip.MOV",
+            "song.flac",
+            "report.docx",
+            "book.epub",
+            "backup.tar.gz",
+            "dump.zst",
+            "paper.pdf",
+            "font.woff2",
+        ] {
+            assert!(!may_deflate(name, 1 << 20), "{name}");
+        }
+        // Only the file's own name counts.
+        assert!(may_deflate("photos.jpg/readme", 4_096));
+        assert!(may_deflate("jpg", 4_096));
+    }
+
+    #[test]
+    fn deflate_is_chosen_for_text_from_the_first_bytes() {
+        let text = b"fn main() {\n    println!(\"hello\");\n}\n".repeat(50);
+        assert!(sniff_deflate(&text, true));
+        assert!(sniff_deflate(
+            "Grüße, été, 東京\n".repeat(100).as_bytes(),
+            true
+        ));
+        // A multibyte character cut by the sniff bound is tolerated.
+        let cut = "é".repeat(SNIFF_BYTES / 2 + 1);
+        let prefix = &cut.as_bytes()[..SNIFF_BYTES - 1];
+        assert!(sniff_deflate(prefix, false));
+        assert!(!sniff_deflate(prefix, true), "a truncated whole file");
+        // Latin-1 text is not UTF-8 but mostly printable ASCII.
+        let mut latin1 =
+            b"The caf\xe9 on the corner serves cr\xe8me br\xfbl\xe9e every day of the week. "
+                .repeat(20);
+        assert!(sniff_deflate(&latin1, true));
+        latin1[17] = 0;
+        assert!(!sniff_deflate(&latin1, true), "a NUL byte");
+
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0];
+        jpeg.extend(b"plain looking padding ".repeat(80));
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x10\0\0\0\x10".to_vec();
+        png.extend(b"padding ".repeat(200));
+        let mut gzip = vec![0x1f, 0x8b, 8, 0];
+        gzip.extend(b"text-like payload ".repeat(80));
+        let mut zip = b"PK\x03\x04".to_vec();
+        zip.extend(b"[Content_Types].xml ".repeat(80));
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        pdf.extend(b"1 0 obj << /Type /Catalog >> endobj\n".repeat(60));
+        let mut id3 = b"ID3\x04\0\0\0\0\x01\0".to_vec();
+        id3.extend(b"TIT2 title text ".repeat(80));
+        let mut woff2 = b"wOF2".to_vec();
+        woff2.extend(b"font table ".repeat(120));
+        for (label, bytes) in [
+            ("jpeg", jpeg),
+            ("png", png),
+            ("gzip", gzip),
+            ("zip", zip),
+            ("pdf", pdf),
+            ("mp3", id3),
+            ("woff2", woff2),
+        ] {
+            assert!(preview::has_compressed_signature(&bytes), "{label}");
+            assert!(!sniff_deflate(&bytes, true), "{label}");
+        }
+        let binary: Vec<u8> = (0..4_096_u32)
+            .map(|value| (value * 7919 % 251) as u8)
+            .collect();
+        assert!(!sniff_deflate(&binary, true));
+    }
+
+    /// Bytes that never read as text and do not compress.
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mixed_archives_deflate_only_text_and_read_back() {
+        let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let text = b"2026-10-05T12:00:00Z INFO request served in 3 ms\n".repeat(400);
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0];
+        jpeg.extend(noise(6_000, 1));
+        let entries: Vec<(&str, Option<Vec<u8>>)> = vec![
+            ("Mixed", None),
+            ("Mixed/server.log", Some(text.clone())),
+            ("Mixed/photo.jpg", Some(jpeg.clone())),
+            ("Mixed/photo-without-extension", Some(jpeg.clone())),
+            ("Mixed/blob.bin", Some(noise(5_000, 2))),
+            ("Mixed/short.txt", Some(b"short text\n".to_vec())),
+            ("Mixed/empty", Some(Vec::new())),
+            (
+                "Mixed/again.md",
+                Some(b"# Heading\n\nSome *Markdown*.\n".repeat(200)),
+            ),
+        ];
+        let sources: Vec<_> = entries
+            .iter()
+            .map(|(name, data)| ZipSource {
+                name: (*name).into(),
+                size: data.as_ref().map(|data| data.len() as u64),
+                modified: Some(modified),
+            })
+            .collect();
+        let contents: Vec<_> = entries.iter().map(|(_, data)| data.clone()).collect();
+
+        let plan = ZipPlan::new(sources.clone(), ArchiveCompression::Auto).expect("layout");
+        assert!(plan.fixed_len().is_none(), "text candidates");
+        let candidates: Vec<_> = (0..plan.entry_count())
+            .map(|index| plan.may_deflate(index))
+            .collect();
+        assert_eq!(
+            candidates,
+            [false, true, false, true, true, false, false, true]
+        );
+
+        let (plan, bytes) =
+            build(sources.clone(), &contents, ArchiveCompression::Auto).expect("layout");
+        assert_eq!(plan.len(), bytes.len() as u64);
+        let read = read_archive(&bytes);
+        let methods: Vec<_> = read.iter().map(|entry| entry.method).collect();
+        assert_eq!(
+            methods,
+            [
+                METHOD_STORED,
+                METHOD_DEFLATED,
+                METHOD_STORED,
+                METHOD_STORED,
+                METHOD_STORED,
+                METHOD_STORED,
+                METHOD_STORED,
+                METHOD_DEFLATED,
+            ]
+        );
+        for ((entry, (name, data)), source) in read.iter().zip(&entries).zip(&sources) {
+            let expected_name = if data.is_some() {
+                source.name.clone()
+            } else {
+                format!("{name}/")
+            };
+            assert_eq!(entry.name, expected_name);
+            assert_eq!(&entry.data, data, "{name}");
+        }
+        let (_, stored) = build(sources, &contents, ArchiveCompression::Off).expect("layout");
+        assert!(
+            bytes.len() + text.len() / 2 < stored.len(),
+            "{} deflated against {} stored",
+            bytes.len(),
+            stored.len()
+        );
+
+        // Streaming in small pieces produces the same bytes.
+        let pieces = entries
+            .iter()
+            .map(|(name, data)| ZipSource {
+                name: (*name).into(),
+                size: data.as_ref().map(|data| data.len() as u64),
+                modified: Some(modified),
+            })
+            .collect();
+        let (_, in_pieces) =
+            build_in_pieces(pieces, &contents, ArchiveCompression::Auto, 7).expect("layout");
+        assert_eq!(in_pieces, bytes);
+    }
+
+    #[test]
+    fn off_and_media_only_archives_are_byte_for_byte_store_only() {
+        let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let text: Vec<u8> = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n"
+            .iter()
+            .copied()
+            .cycle()
+            .take(2_000)
+            .collect();
+        let golden = |compression, text_name: &str| {
+            let sources = vec![
+                ZipSource {
+                    name: "Mixed".into(),
+                    size: None,
+                    modified: Some(modified),
+                },
+                ZipSource {
+                    name: format!("Mixed/{text_name}"),
+                    size: Some(text.len() as u64),
+                    modified: Some(modified),
+                },
+                ZipSource {
+                    name: "Mixed/tiny".into(),
+                    size: Some(5),
+                    modified: None,
+                },
+            ];
+            let contents = [None, Some(text.clone()), Some(b"hello".to_vec())];
+            let (plan, bytes) = build(sources, &contents, compression).expect("layout");
+            assert_eq!(plan.len(), bytes.len() as u64);
+            (plan.fixed_len(), bytes)
+        };
+        // The length and CRC-32 of this archive as the store-only writer
+        // produced it before compression existed.
+        let (fixed, off) = golden(ArchiveCompression::Off, "notes.txt");
+        assert_eq!(fixed, Some(2_385));
+        assert_eq!(off.len(), 2_385);
+        assert_eq!(reference_crc(&off), 0xD5BA_1D16);
+
+        // With automatic compression, the text file deflates and the length
+        // is no longer planned.
+        let (fixed, auto) = golden(ArchiveCompression::Auto, "notes.txt");
+        assert_eq!(fixed, None);
+        assert!(auto.len() < off.len());
+
+        // A name that rules compression out keeps the stored bytes.
+        let (fixed, media) = golden(ArchiveCompression::Auto, "notes.pdf");
+        let (_, media_off) = golden(ArchiveCompression::Off, "notes.pdf");
+        assert_eq!(fixed, Some(media.len() as u64));
+        assert_eq!(media, media_off);
+    }
+
+    #[test]
+    fn encoders_refuse_files_that_changed_size() {
+        fn drain(mut encoder: EntryEncoder<&[u8]>) -> io::Result<()> {
+            let mut out = Vec::new();
+            loop {
+                let budget = out.len() + 512;
+                if encoder.fill(&mut out, budget)? {
+                    return Ok(());
+                }
+            }
+        }
+        let text = b"a line of text\n".repeat(200);
+        for candidate in [false, true] {
+            // Shorter than planned.
+            let short = &text[..text.len() - 10];
+            let result =
+                EntryEncoder::start(short, text.len() as u64, candidate, None).and_then(drain);
+            assert!(result.is_err(), "short, candidate {candidate}");
+            // Longer than planned.
+            let encoder =
+                EntryEncoder::start(text.as_slice(), text.len() as u64 - 10, candidate, None)
+                    .expect("start");
+            assert_eq!(encoder.deflated(), candidate);
+            assert!(drain(encoder).is_err(), "long, candidate {candidate}");
+        }
+        // A file shorter than its sniffed prefix fails before its header.
+        assert!(EntryEncoder::start(&text[..100], 2_000, true, None).is_err());
     }
 
     proptest! {
@@ -1044,8 +1926,10 @@ mod tests {
             files in proptest::collection::vec(
                 (proptest::option::of(proptest::collection::vec(any::<u8>(), 0..64)), any::<u32>()),
                 0..12,
-            )
+            ),
+            auto in any::<bool>(),
         ) {
+            let compression = if auto { ArchiveCompression::Auto } else { ArchiveCompression::Off };
             let sources = files
                 .iter()
                 .enumerate()
@@ -1056,13 +1940,38 @@ mod tests {
                 })
                 .collect();
             let contents: Vec<_> = files.iter().map(|(data, _)| data.clone()).collect();
-            let (plan, bytes) = build(sources, &contents).expect("layout");
+            let (plan, bytes) = build(sources, &contents, compression).expect("layout");
             prop_assert_eq!(plan.len(), bytes.len() as u64);
             let read = read_archive(&bytes);
             prop_assert_eq!(read.len(), contents.len());
             for (entry, data) in read.iter().zip(&contents) {
                 prop_assert_eq!(&entry.data, data);
             }
+        }
+
+        #[test]
+        fn text_round_trips_deflated_in_any_pieces(
+            lines in proptest::collection::vec("[ -~]{0,80}", 20..400),
+            piece in 1_usize..20_000,
+        ) {
+            let text = lines.join("\n").into_bytes();
+            let sources = vec![ZipSource {
+                name: "notes.txt".into(),
+                size: Some(text.len() as u64),
+                modified: None,
+            }];
+            let contents = [Some(text.clone())];
+            let (plan, bytes) =
+                build_in_pieces(sources, &contents, ArchiveCompression::Auto, piece).expect("layout");
+            prop_assert_eq!(plan.len(), bytes.len() as u64);
+            let read = read_archive(&bytes);
+            let expected = if text.len() as u64 >= MIN_DEFLATE_BYTES {
+                METHOD_DEFLATED
+            } else {
+                METHOD_STORED
+            };
+            prop_assert_eq!(read[0].method, expected);
+            prop_assert_eq!(read[0].data.as_deref(), Some(text.as_slice()));
         }
     }
 }

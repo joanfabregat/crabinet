@@ -36,6 +36,21 @@
     "server"
   ],
   "$defs": {
+    "ArchiveCompression": {
+      "description": "How folder and selection ZIP downloads compress their files.",
+      "oneOf": [
+        {
+          "description": "Deflate text files of at least 1 KiB, chosen per file from its name\nand first bytes; store everything else.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Store every file uncompressed.",
+          "type": "string",
+          "const": "off"
+        }
+      ]
+    },
     "ForwardedHeader": {
       "description": "Header from which a trusted reverse proxy's client address is read.",
       "oneOf": [
@@ -155,6 +170,11 @@
     "RawServerConfig": {
       "type": "object",
       "properties": {
+        "archive_compression": {
+          "description": "Compression of folder and selection ZIP downloads. `auto` deflates text files of at least 1 KiB, decided per file, and stores media, archives, and other binary files; `off` stores every file and always sends an exact `Content-Length`.",
+          "$ref": "#/$defs/ArchiveCompression",
+          "default": "auto"
+        },
         "auth_max_concurrent": {
           "description": "Maximum simultaneous Argon2 password verifications.",
           "type": "integer",
