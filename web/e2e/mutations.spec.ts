@@ -2,14 +2,20 @@ import { readFile } from "node:fs/promises";
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-import { chooseFiles, csrfToken, dropFiles, openSignedIn } from "./helpers";
+import {
+  chooseFiles,
+  csrfToken,
+  dropFiles,
+  openSignedIn,
+  ownsServerState,
+} from "./helpers";
 
 test.describe("writable share operations", () => {
   test.beforeEach(({ page }, testInfo) => {
     void page;
     test.skip(
-      testInfo.project.name !== "desktop-chromium",
-      "mutation state is exercised once against the shared production server",
+      !ownsServerState(testInfo),
+      "mutation state is exercised once per engine, in its desktop project",
     );
   });
 

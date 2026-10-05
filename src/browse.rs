@@ -3130,6 +3130,103 @@ mod tests {
         }
     }
 
+    /// Archives covering what independent extractors must accept: stored and
+    /// deflated entries side by side, an empty folder, a UTF-8 (flag bit 11)
+    /// name, and selections without a wrapping folder. When
+    /// `CRABINET_ZIP_SAMPLES_DIR` names a directory, each archive is written
+    /// there as `<case>.zip`, next to a `<case>/` tree of what it must
+    /// extract to, for `.github/scripts/check-zip-extractors.sh`.
+    #[tokio::test]
+    async fn archives_for_external_extractors() {
+        let fixture = fixture(BrowseLimits::default());
+        let mixed = fixture._root.path().join("mixed");
+        fs::create_dir_all(mixed.join("empty")).expect("empty folder");
+        fs::create_dir(mixed.join("nested")).expect("nested folder");
+        let unicode = "Café — 日本語 ünïcode.md";
+        let mut state = 0x2545_f491_u32;
+        let binary: Vec<u8> = (0..4_096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 24) as u8
+            })
+            .collect();
+        fs::write(
+            mixed.join("server.log"),
+            b"2026-10-05T12:00:00Z INFO request served in 3 ms\n".repeat(200),
+        )
+        .expect("text file");
+        fs::write(mixed.join("blob.bin"), &binary).expect("binary file");
+        fs::write(mixed.join("short.txt"), b"short\n").expect("short file");
+        fs::write(
+            mixed.join("nested").join(unicode),
+            "# Notes\n\nNon-ASCII text: café, 日本語.\n".repeat(60),
+        )
+        .expect("UTF-8 named file");
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(format!("mixed/nested/{unicode}").as_bytes())
+                .collect();
+        let cases = [
+            ("folder", "?path=mixed".to_owned()),
+            ("single-file", "?path=mixed%2Fserver.log".to_owned()),
+            ("single-utf8-file", format!("?path={encoded}")),
+            (
+                "selection",
+                "?path=mixed%2Fempty&path=mixed%2Fnested&path=mixed%2Fblob.bin".to_owned(),
+            ),
+        ];
+        let samples = std::env::var_os("CRABINET_ZIP_SAMPLES_DIR").map(std::path::PathBuf::from);
+        for (case, query) in cases {
+            let response = archive(&fixture.app, &fixture.identity, &query).await;
+            assert_eq!(response.status(), StatusCode::OK, "{case}");
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("archive body");
+            let entries = crate::zip::verify::read_archive(&bytes);
+            let methods: Vec<_> = entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.method))
+                .collect();
+            let expected: &[(&str, u16)] = match case {
+                "folder" => &[
+                    ("mixed/", 0),
+                    ("mixed/blob.bin", 0),
+                    ("mixed/empty/", 0),
+                    ("mixed/nested/", 0),
+                    ("mixed/nested/Café — 日本語 ünïcode.md", 8),
+                    ("mixed/server.log", 8),
+                    ("mixed/short.txt", 0),
+                ],
+                "single-file" => &[("server.log", 8)],
+                "single-utf8-file" => &[("Café — 日本語 ünïcode.md", 8)],
+                _ => &[
+                    ("blob.bin", 0),
+                    ("empty/", 0),
+                    ("nested/", 0),
+                    ("nested/Café — 日本語 ünïcode.md", 8),
+                ],
+            };
+            assert_eq!(methods, expected, "{case}");
+            let Some(samples) = &samples else {
+                continue;
+            };
+            let tree = samples.join(case);
+            fs::create_dir_all(&tree).expect("sample tree");
+            fs::write(samples.join(format!("{case}.zip")), &bytes).expect("sample archive");
+            for entry in entries {
+                let path = tree.join(&entry.name);
+                match entry.data {
+                    None => fs::create_dir_all(&path).expect("sample folder"),
+                    Some(data) => {
+                        fs::create_dir_all(path.parent().expect("parent")).expect("sample parent");
+                        fs::write(&path, data).expect("sample file");
+                    }
+                }
+            }
+        }
+    }
+
     fn disposition(response: &Response) -> String {
         response.headers()[header::CONTENT_DISPOSITION]
             .to_str()

@@ -5,6 +5,14 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 binary=${CRABINET_E2E_BINARY:-"$repo_root/target/release/crabinet"}
 port=${CRABINET_E2E_PORT:-4173}
+# With CRABINET_E2E_TLS=1, the server listens 100 ports higher and a TLS
+# proxy (tls-proxy.ts) serves it on CRABINET_E2E_PORT, as a reverse proxy
+# does in production.
+tls=${CRABINET_E2E_TLS:-0}
+listen_port=$port
+if [ "$tls" = 1 ]; then
+  listen_port=$((port + 100))
+fi
 
 if [ ! -x "$binary" ]; then
   echo "E2E production binary not found at $binary" >&2
@@ -14,13 +22,14 @@ fi
 
 state_dir=$(mktemp -d "${TMPDIR:-/tmp}/crabinet-e2e.XXXXXXXX")
 server_pid=
+proxy_pid=
 
 cleanup() {
   trap - EXIT INT TERM
-  if [ -n "$server_pid" ]; then
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
-  fi
+  for pid in $proxy_pid $server_pid; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf -- "$state_dir"
 }
 trap cleanup EXIT INT TERM
@@ -52,10 +61,22 @@ chmod 600 "$state_dir/session.key"
 
 sed \
   -e "s|__STATE_DIR__|$state_dir|g" \
-  -e "s|__PORT__|$port|g" \
+  -e "s|__PORT__|$listen_port|g" \
   "$script_dir/fixtures/config.toml.in" >"$state_dir/config.toml"
 chmod 600 "$state_dir/config.toml"
 
 "$binary" --config "$state_dir/config.toml" &
 server_pid=$!
+
+if [ "$tls" = 1 ]; then
+  # A throwaway certificate for this run only; Playwright ignores its issuer.
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -days 1 -subj /CN=localhost \
+    -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
+    -keyout "$state_dir/tls.key" -out "$state_dir/tls.crt" 2>/dev/null
+  node "$script_dir/tls-proxy.ts" "$port" "$listen_port" \
+    "$state_dir/tls.crt" "$state_dir/tls.key" &
+  proxy_pid=$!
+fi
+
 wait "$server_pid"

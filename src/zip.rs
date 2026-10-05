@@ -914,6 +914,7 @@ pub(crate) mod verify {
 
     /// One central directory header, with ZIP64 extra fields applied.
     struct CentralRecord {
+        version_needed: u16,
         flags: u16,
         method: u16,
         crc: u32,
@@ -927,6 +928,8 @@ pub(crate) mod verify {
 
     fn read_central(bytes: &[u8], at: usize) -> CentralRecord {
         assert_eq!(u32_at(bytes, at), CENTRAL_HEADER_SIGNATURE);
+        let version_needed = u16_at(bytes, at + 6);
+        assert_eq!(u16_at(bytes, at + 4), CREATOR_UNIX | version_needed);
         let flags = u16_at(bytes, at + 8);
         assert_ne!(flags & FLAG_UTF8, 0);
         let method = u16_at(bytes, at + 10);
@@ -945,10 +948,12 @@ pub(crate) mod verify {
             .to_owned();
         let mut extra = at + 46 + name_len;
         let extra_end = extra + extra_len;
+        let mut zip64 = false;
         while extra < extra_end {
             let id = u16_at(bytes, extra);
             let len = usize::from(u16_at(bytes, extra + 2));
             if id == ZIP64_EXTRA_ID {
+                zip64 = true;
                 // APPNOTE 4.5.3: only the overflowing fields, in this order.
                 let mut field = extra + 4;
                 if size == U32_SENTINEL {
@@ -971,7 +976,28 @@ pub(crate) mod verify {
         if method == METHOD_STORED {
             assert_eq!(compressed, size, "{name}");
         }
+        // APPNOTE 4.4.3.2: 4.5 only for an entry that uses ZIP64 fields; 2.0
+        // covers folders and stored and deflated entries. Extractors that
+        // predate ZIP64 refuse a higher version than they implement.
+        assert_eq!(
+            version_needed,
+            if zip64 {
+                VERSION_ZIP64
+            } else {
+                VERSION_DEFAULT
+            },
+            "{name}"
+        );
+        // Bit 11 (UTF-8 names) always and bit 3 (data descriptor) exactly for
+        // files; no other bit, such as encryption or patched data.
+        let expected_flags = if name.ends_with('/') {
+            FLAG_UTF8
+        } else {
+            FLAG_UTF8 | FLAG_DATA_DESCRIPTOR
+        };
+        assert_eq!(flags, expected_flags, "{name}");
         CentralRecord {
+            version_needed,
             flags,
             method,
             crc,
@@ -1021,6 +1047,7 @@ pub(crate) mod verify {
         let mut entries = Vec::new();
         for _ in 0..count {
             let CentralRecord {
+                version_needed,
                 flags,
                 method,
                 crc,
@@ -1045,6 +1072,10 @@ pub(crate) mod verify {
             let data_start = local + 30 + local_name_len + local_extra_len;
             let zip64_local = (local + 30 + local_name_len..data_start).len() >= 20
                 && u32_at(bytes, local + 18) == u32::MAX;
+            // Both copies of the version agree, and the local header carries
+            // ZIP64 sizes (so a ZIP64 data descriptor) only on a ZIP64 entry.
+            assert_eq!(u16_at(bytes, local + 4), version_needed, "{name}");
+            assert!(!zip64_local || version_needed == VERSION_ZIP64, "{name}");
             let data = if name.ends_with('/') {
                 assert_eq!(flags & FLAG_DATA_DESCRIPTOR, 0);
                 assert_eq!(method, METHOD_STORED);

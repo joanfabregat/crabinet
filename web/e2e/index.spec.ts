@@ -805,8 +805,8 @@ test("file rows keep room for their names on desktops, tablets, and phones", asy
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "desktop-chromium",
-    "each layout below sets its own viewport and input",
+    !testInfo.project.name.startsWith("desktop-"),
+    "each layout below sets its own viewport and input, once per engine",
   );
   // The name the iPad screenshot wrapped as "test-" / "pattern.m" / "p4".
   const longName = "test-pattern.mp4";

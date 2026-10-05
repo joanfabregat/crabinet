@@ -121,6 +121,18 @@ jobs:
         run: cargo +"${RUST_VERSION}" fmt --all -- --check
       - name: Run tests
         run: cargo +"${RUST_VERSION}" test --locked --all-targets --all-features
+      - name: Install independent ZIP extractors
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libarchive-tools unzip 7zip
+      # Reuses the test binary built above.
+      - name: Check archives with libarchive, Info-ZIP, and 7-Zip
+        env:
+          CRABINET_ZIP_SAMPLES_DIR: ${{ runner.temp }}/zip-samples
+        run: |
+          mkdir -p "${CRABINET_ZIP_SAMPLES_DIR}"
+          cargo +"${RUST_VERSION}" test --locked --all-features --lib archives_for_external_extractors
+          .github/scripts/check-zip-extractors.sh "${CRABINET_ZIP_SAMPLES_DIR}"
 
   clippy:
     name: Clippy
@@ -147,10 +159,24 @@ jobs:
         run: cargo +"${RUST_VERSION}" clippy --locked --all-targets --all-features -- -D warnings
 
   browser-e2e:
-    name: Browser E2E
+    # One job per engine, so a slower engine never delays or cancels
+    # Chromium's result. Chromium keeps the original check name.
+    name: ${{ matrix.check }}
     needs: frontend
     runs-on: ubuntu-26.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: chromium
+            check: Browser E2E
+          - engine: webkit
+            check: Browser E2E (WebKit)
+          - engine: firefox
+            check: Browser E2E (Firefox)
+    env:
+      ENGINE: ${{ matrix.engine }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -173,25 +199,26 @@ jobs:
       - name: Audit frontend dependencies
         working-directory: web
         run: npm audit --audit-level=high
-      - name: Install Chromium
+      - name: Install the browser engine
         working-directory: web
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps "${ENGINE}"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install "${RUST_VERSION}" --profile minimal
+      # The three engine jobs build the same executable; one saves the cache.
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.engine == 'chromium' }}
       - name: Build production executable with embedded assets
         run: cargo +"${RUST_VERSION}" build --locked --release
       - name: Run production browser suite
         working-directory: web
-        run: npm run test:e2e
+        run: npm run test:e2e -- --project "*-${ENGINE}"
       - name: Upload browser failure evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: browser-e2e-results
+          name: browser-e2e-results-${{ matrix.engine }}
           path: |
             web/playwright-report
             web/test-results
