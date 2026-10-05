@@ -209,7 +209,7 @@
           "default": "256 MiB"
         },
         "max_preview_size": {
-          "description": "Maximum size of a file previewed as text, code, Markdown, or HTML, for example \"2 MiB\". Streamed images, PDF, audio, and video are not bound by it.",
+          "description": "Largest text, code, Markdown, HTML, or SVG file previewed whole, for example \"2 MiB\"; a larger one previews only its first 64 KiB and 1,000 lines. Streamed images, PDF, audio, and video are not bound by it.",
           "type": "string"
         },
         "max_sessions_per_user": {

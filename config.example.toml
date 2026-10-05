@@ -12,8 +12,9 @@ database_path = "data/crabinet.sqlite3"
 session_secret_file = "secrets/session.key"
 # Sizes are positive integers with an explicit binary unit: B, KiB, MiB, or GiB.
 max_upload_size = "100 MiB"
-# Bounds buffered text, code, Markdown, and HTML previews only; images, PDF,
-# audio, and video stream and are bounded by the download limit instead.
+# Largest text, code, Markdown, HTML, or SVG file previewed whole; a larger one
+# previews only its first 64 KiB and 1,000 lines. Images, PDF, audio, and video
+# stream and are bounded by the download limit instead.
 max_preview_size = "2 MiB"
 # Image thumbnails. Every decode first reserves its estimated peak memory from
 # this one process-wide budget (at most "4 GiB"); a request that cannot get its

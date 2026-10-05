@@ -47,6 +47,7 @@ import {
   isStreamedPreviewKind,
   openUrl,
   renderedHtmlPreviewUrl,
+  svgPreviewUrl,
   thumbnailStatus,
   thumbnailUrl,
   type ApiClient,
@@ -71,6 +72,7 @@ import {
 } from "./operations";
 import { EntryIcon } from "./file-icons";
 import { HighlightedCode } from "./highlighted-code";
+import { LoadingSpinner } from "./loading-spinner";
 import { PdfFirstPage } from "./pdf-preview";
 import { CopyPathButton } from "./copy-path-button";
 import {
@@ -2427,6 +2429,7 @@ function PreviewPanel({
               htmlRenderedUrl={`${renderedHtmlPreviewUrl(shareId, path)}&v=${assetRevision}`}
               htmlRenderedViewUrl={renderedHtmlViewUrl(shareId, path)}
               imageUrl={`${imagePreviewUrl(shareId, path)}&v=${assetRevision}`}
+              svgUrl={`${svgPreviewUrl(shareId, path)}&v=${assetRevision}`}
               thumbnailUrl={`${thumbnailUrl(shareId, path, 1600)}&v=${assetRevision}`}
               inlineUrl={`${openUrl(shareId, path)}&v=${assetRevision}`}
               filename={filename}
@@ -2444,6 +2447,7 @@ function PreviewContent({
   htmlRenderedUrl,
   htmlRenderedViewUrl,
   imageUrl,
+  svgUrl,
   thumbnailUrl,
   inlineUrl,
   filename,
@@ -2453,12 +2457,20 @@ function PreviewContent({
   htmlRenderedUrl: string;
   htmlRenderedViewUrl: string;
   imageUrl: string;
+  /** The whole SVG document as an image, for `svg` documents. */
+  svgUrl: string;
   /** The 1600-pixel server thumbnail, for images and RAW files. */
   thumbnailUrl: string;
   /** The inline route, for media elements and the PDF first-page preview. */
   inlineUrl: string;
   filename: string;
 }) {
+  // Only the head of a large HTML file arrived, and the server renders only
+  // whole documents, so it shows as source alone.
+  if (document.kind === "html_source" && document.truncated) {
+    return <SourcePreview document={document} />;
+  }
+
   if (document.kind === "html_source") {
     return (
       <HtmlPreview
@@ -2487,32 +2499,14 @@ function PreviewContent({
     return <PdfFirstPage url={inlineUrl} filename={filename} />;
   }
 
-  if (document.kind === "audio") {
+  if (document.kind === "audio" || document.kind === "video") {
     return (
-      <figure class="media-preview">
-        <audio
-          src={inlineUrl}
-          controls
-          preload="metadata"
-          aria-label={`Audio preview of ${filename}`}
-        />
-        <figcaption>{document.mimeType}</figcaption>
-      </figure>
-    );
-  }
-
-  if (document.kind === "video") {
-    return (
-      <figure class="media-preview">
-        <video
-          src={inlineUrl}
-          controls
-          preload="metadata"
-          playsInline
-          aria-label={`Video preview of ${filename}`}
-        />
-        <figcaption>{document.mimeType}</figcaption>
-      </figure>
+      <MediaPreview
+        key={inlineUrl}
+        document={document}
+        url={inlineUrl}
+        filename={filename}
+      />
     );
   }
 
@@ -2520,7 +2514,105 @@ function PreviewContent({
     return <MarkdownPreview document={document} filename={filename} />;
   }
 
+  if (document.kind === "svg") {
+    return (
+      <SvgPreview
+        key={svgUrl}
+        document={document}
+        filename={filename}
+        imageUrl={svgUrl}
+      />
+    );
+  }
+
   return <SourcePreview document={document} />;
+}
+
+/** Audio or video from the inline route, with a spinner until its metadata. */
+function MediaPreview({
+  document,
+  url,
+  filename,
+}: {
+  document: PreviewDocument;
+  url: string;
+  filename: string;
+}) {
+  const [loading, setLoading] = useState(true);
+  const done = () => setLoading(false);
+  return (
+    <figure class="media-preview">
+      <div class="preview-loading-frame">
+        {document.kind === "audio" ? (
+          <audio
+            src={url}
+            controls
+            preload="metadata"
+            aria-label={`Audio preview of ${filename}`}
+            onLoadedMetadata={done}
+            onError={done}
+          />
+        ) : (
+          <video
+            src={url}
+            controls
+            preload="metadata"
+            playsInline
+            aria-label={`Video preview of ${filename}`}
+            onLoadedMetadata={done}
+            onError={done}
+          />
+        )}
+        {loading && <LoadingSpinner />}
+      </div>
+      <figcaption>{document.mimeType}</figcaption>
+    </figure>
+  );
+}
+
+/**
+ * An `<img>` with a spinner over it until it loads or fails. The spinner
+ * follows the current `src`, so a retried or replaced source shows it again.
+ */
+function LoadingImage({
+  src,
+  alt,
+  onError,
+}: {
+  src: string | undefined;
+  alt: string;
+  onError: () => void;
+}) {
+  const [settled, setSettled] = useState<string | undefined>(undefined);
+  const loading = src !== undefined && settled !== src;
+  return (
+    <div class={`preview-loading-frame${loading ? " is-loading" : ""}`}>
+      <img
+        src={src}
+        alt={alt}
+        draggable={false}
+        onLoad={() => setSettled(src)}
+        onError={() => {
+          setSettled(src);
+          onError();
+        }}
+      />
+      {loading && <LoadingSpinner />}
+    </div>
+  );
+}
+
+/** "Showing the first N lines (SIZE) of TOTAL" for a head-only preview. */
+function TruncationNotice({ document }: { document: PreviewDocument }) {
+  if (!document.truncated) return null;
+  const lines = document.shownLines ?? 0;
+  const shown =
+    document.shownBytes ?? new TextEncoder().encode(document.source).length;
+  const text =
+    `Showing the first ${lines} ${lines === 1 ? "line" : "lines"} ` +
+    `(${formatSize(shown)}) of ${formatSize(document.size)}. ` +
+    "Open in new tab or download for the full file.";
+  return <Notice tone="warning">{text}</Notice>;
 }
 
 type ImagePreviewState =
@@ -2635,9 +2727,11 @@ function ImagePreview({
 
   if (state.mode === "checking") {
     return (
-      <p class="status-message" role="status" aria-live="polite">
-        Loading preview…
-      </p>
+      <figure class="image-preview">
+        <div class="preview-loading-frame is-loading">
+          <LoadingSpinner />
+        </div>
+      </figure>
     );
   }
 
@@ -2651,10 +2745,9 @@ function ImagePreview({
       : originalUrl;
   return (
     <figure class="image-preview">
-      <img
+      <LoadingImage
         src={source}
         alt={`Preview of ${filename}`}
-        draggable={false}
         onError={() => {
           if (state.mode === "thumbnail") {
             setState({
@@ -2669,6 +2762,112 @@ function ImagePreview({
       />
       <figcaption>{caption}</figcaption>
     </figure>
+  );
+}
+
+/**
+ * A whole SVG document as an image, from a route that serves it as
+ * `image/svg+xml` under the sandboxed preview CSP, beside its source. An
+ * `<img>` never runs the document's scripts, loads its external resources,
+ * or lets it be interacted with.
+ */
+function SvgPreview({
+  document,
+  filename,
+  imageUrl,
+}: {
+  document: PreviewDocument;
+  filename: string;
+  imageUrl: string;
+}) {
+  const [mode, setMode] = useState<"image" | "source">("image");
+  const [failed, setFailed] = useState(false);
+  const imageTab = useRef<HTMLButtonElement>(null);
+  const sourceTab = useRef<HTMLButtonElement>(null);
+  const chooseMode = (next: "image" | "source") => {
+    setMode(next);
+    requestAnimationFrame(() =>
+      (next === "image" ? imageTab : sourceTab).current?.focus(),
+    );
+  };
+  const handleKeys = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "Home") {
+      event.preventDefault();
+      chooseMode("image");
+    } else if (event.key === "ArrowRight" || event.key === "End") {
+      event.preventDefault();
+      chooseMode("source");
+    }
+  };
+
+  return (
+    <div class="svg-preview">
+      <div class="preview-tabs-row">
+        <div class="preview-tabs" role="tablist" aria-label="SVG view">
+          <button
+            ref={imageTab}
+            type="button"
+            role="tab"
+            id="svg-image-tab"
+            aria-controls="svg-image-panel"
+            aria-selected={mode === "image"}
+            tabIndex={mode === "image" ? 0 : -1}
+            onClick={() => chooseMode("image")}
+            onKeyDown={handleKeys}
+          >
+            Image
+          </button>
+          <button
+            ref={sourceTab}
+            type="button"
+            role="tab"
+            id="svg-source-tab"
+            aria-controls="svg-source-panel"
+            aria-selected={mode === "source"}
+            tabIndex={mode === "source" ? 0 : -1}
+            onClick={() => chooseMode("source")}
+            onKeyDown={handleKeys}
+          >
+            Source
+          </button>
+        </div>
+        <SecurityNote>
+          The image is drawn without running scripts, loading external
+          resources, or following links.
+        </SecurityNote>
+        <CopySourceButton source={document.source} filename={filename} />
+      </div>
+      {mode === "image" ? (
+        <div
+          id="svg-image-panel"
+          role="tabpanel"
+          aria-labelledby="svg-image-tab"
+        >
+          {failed ? (
+            <div class="preview-error" role="alert">
+              <h3>No preview available</h3>
+              <p>This SVG could not be drawn. Its source is still available.</p>
+            </div>
+          ) : (
+            <figure class="image-preview svg-image">
+              <LoadingImage
+                src={imageUrl}
+                alt={`Preview of ${filename}`}
+                onError={() => setFailed(true)}
+              />
+            </figure>
+          )}
+        </div>
+      ) : (
+        <div
+          id="svg-source-panel"
+          role="tabpanel"
+          aria-labelledby="svg-source-tab"
+        >
+          <SourcePreview document={document} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2765,6 +2964,7 @@ type RenderedHtmlViewState =
   | { status: "loading" }
   | { status: "ready" }
   | { status: "not-html" }
+  | { status: "too-large" }
   | { status: "error"; error: ApiError };
 
 /**
@@ -2802,10 +3002,14 @@ function RenderedHtmlView({
     api.preview(shareId, path, controller.signal).then(
       (document) => {
         if (controller.signal.aborted) return;
+        // A head is never rendered: the server refuses to render a file
+        // above the preview limit.
         setState(
-          document.kind === "html_source"
-            ? { status: "ready" }
-            : { status: "not-html" },
+          document.kind !== "html_source"
+            ? { status: "not-html" }
+            : document.truncated
+              ? { status: "too-large" }
+              : { status: "ready" },
         );
       },
       (cause: unknown) => {
@@ -2870,6 +3074,14 @@ function RenderedHtmlView({
             <h2>This file is not HTML</h2>
             <p>Only HTML files open in this view.</p>
           </div>
+        ) : state.status === "too-large" ? (
+          <div class="preview-error" role="alert">
+            <h2>File is too large to render</h2>
+            <p>
+              Only HTML files within the preview limit are rendered. Download
+              the file to view it.
+            </p>
+          </div>
         ) : (
           <iframe
             class="rendered-view-frame"
@@ -2889,14 +3101,11 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
   const [wrap, setWrap] = useState(true);
   return (
     <div class="source-preview">
-      {document.truncated && (
-        <Notice tone="warning">
-          This preview is truncated. Download the file to see all content.
-        </Notice>
-      )}
+      <TruncationNotice document={document} />
       {document.source === "" ? (
         <p class="preview-empty">This file is empty.</p>
-      ) : document.kind === "code" && document.language ? (
+      ) : (document.kind === "code" || document.kind === "svg") &&
+        document.language ? (
         <HighlightedCode
           source={document.source}
           language={document.language}
@@ -2990,6 +3199,7 @@ function MarkdownPreview({
         </SecurityNote>
         <CopySourceButton source={document.source} filename={filename} />
       </div>
+      <TruncationNotice document={document} />
       {mode === "readable" ? (
         <div
           id="markdown-readable-panel"
@@ -3017,11 +3227,6 @@ function MarkdownPreview({
             <code>{document.source}</code>
           </pre>
         </div>
-      )}
-      {document.truncated && (
-        <Notice tone="warning">
-          This preview is truncated. Download the file to see all content.
-        </Notice>
       )}
     </div>
   );
@@ -3491,6 +3696,7 @@ function previewTypeLabel(
   if (document?.kind === "video") return document.mimeType ?? "Video";
   if (document?.kind === "markdown_source") return "Markdown";
   if (document?.kind === "html_source") return "HTML";
+  if (document?.kind === "svg") return "SVG image";
   if (document?.kind === "code") {
     const language = document.language;
     if (!language) return "Code";

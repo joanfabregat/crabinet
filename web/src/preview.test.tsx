@@ -917,9 +917,7 @@ describe("secure file previews", () => {
     const preview = vi
       .fn<ApiClient["preview"]>()
       .mockResolvedValueOnce(previewDocument(""))
-      .mockResolvedValueOnce(
-        previewDocument("partial", { truncated: true, kind: "text" }),
-      );
+      .mockResolvedValueOnce(headDocument("partial\n", 1, 5_000_000));
     const navigation = new MemoryNavigation({
       shareId: "docs",
       path: "",
@@ -935,10 +933,278 @@ describe("secure file previews", () => {
     });
     expect(
       await screen.findByText(
-        "This preview is truncated. Download the file to see all content.",
+        "Showing the first 1 line (8 B) of 5.0 MB. Open in new tab or download for the full file.",
       ),
     ).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "Download partial.txt" }),
+    ).toBeVisible();
   });
+});
+
+function headDocument(
+  source: string,
+  lines: number,
+  size: number,
+  overrides: Partial<PreviewDocument> = {},
+): PreviewDocument {
+  return {
+    kind: "text",
+    source,
+    size,
+    truncated: true,
+    shownBytes: new TextEncoder().encode(source).byteLength,
+    shownLines: lines,
+    openable: true,
+    ...overrides,
+  };
+}
+
+function renderFile(document: PreviewDocument, name: string) {
+  const navigation = new MemoryNavigation({
+    shareId: "docs",
+    path: "",
+    previewPath: name,
+  });
+  render(
+    <App
+      api={fakeApi({ preview: vi.fn(async () => document) })}
+      navigation={navigation}
+    />,
+  );
+  return screen.findByRole("complementary", { name });
+}
+
+describe("head-only previews of large text files", () => {
+  const notice = (lines: number, shown: string, total: string) =>
+    `Showing the first ${lines} lines (${shown}) of ${total}. Open in new tab or download for the full file.`;
+
+  it("shows the head of a large log with the notice, Open in new tab, and no Edit", async () => {
+    const source = "2026-01-01 entry\n".repeat(1000);
+    const panel = await renderFile(
+      headDocument(source, 1000, 300_000),
+      "server.log",
+    );
+    expect(
+      await within(panel).findByText(notice(1000, "17.0 kB", "300.0 kB")),
+    ).toBeVisible();
+    expect(within(panel).getByLabelText("File source")).toHaveTextContent(
+      "2026-01-01 entry",
+    );
+    expect(
+      within(panel).getByRole("link", { name: "Open server.log in a new tab" }),
+    ).toHaveAttribute("href", "/api/v1/shares/docs/open?path=server.log");
+    expect(
+      within(panel).queryByRole("button", { name: "Edit server.log" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the head of large Markdown with the notice", async () => {
+    const source = "# Large guide\n\nIntro.\n";
+    const panel = await renderFile(
+      headDocument(source, 3, 2_000_000, {
+        kind: "markdown_source",
+        language: "markdown",
+      }),
+      "guide.md",
+    );
+    expect(
+      await within(panel).findByRole("heading", { name: "Large guide" }),
+    ).toBeVisible();
+    expect(within(panel).getByText(notice(3, "22 B", "2.0 MB"))).toBeVisible();
+  });
+
+  it("shows only the source of large HTML, never a rendered frame", async () => {
+    const source = "<script>window.__large = true</script>\n<p>hi</p>\n";
+    const panel = await renderFile(
+      headDocument(source, 2, 3_000_000, {
+        kind: "html_source",
+        language: "html",
+      }),
+      "page.html",
+    );
+    expect(
+      await within(panel).findByText(notice(2, "49 B", "3.0 MB")),
+    ).toBeVisible();
+    expect(within(panel).getByLabelText("File source")).toHaveTextContent(
+      "<script>window.__large = true</script>",
+    );
+    expect(panel.querySelector("iframe")).toBeNull();
+    expect(within(panel).queryByRole("tab")).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("link", {
+        name: "Open rendered HTML in new tab",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not frame a large HTML file in the rendered viewer", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "page.html",
+      view: "rendered",
+    });
+    render(
+      <App
+        api={fakeApi({
+          preview: vi.fn(async () =>
+            headDocument("<p>x</p>\n", 1, 3_000_000, {
+              kind: "html_source",
+              language: "html",
+            }),
+          ),
+        })}
+        navigation={navigation}
+      />,
+    );
+    expect(
+      await screen.findByText("File is too large to render"),
+    ).toBeVisible();
+    expect(document.querySelector("iframe")).toBeNull();
+  });
+});
+
+describe("SVG previews", () => {
+  const source =
+    "<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'><script>alert(2)</script></svg>";
+  const svgDocument: PreviewDocument = {
+    kind: "svg",
+    source,
+    language: "xml",
+    size: source.length,
+    truncated: false,
+    openable: true,
+    thumbnailable: false,
+  };
+
+  it("shows the image from the SVG route with keyboard-operated Image and Source tabs", async () => {
+    const panel = await renderFile(svgDocument, "logo.svg");
+    const image = await within(panel).findByRole("img", {
+      name: "Preview of logo.svg",
+    });
+    expect(image.tagName).toBe("IMG");
+    expect(image).toHaveAttribute(
+      "src",
+      "/api/v1/shares/docs/preview/svg?path=logo.svg&v=0-0",
+    );
+    expect(
+      panel.querySelector("iframe, object, embed, svg[onload]"),
+    ).toBeNull();
+    expect(
+      within(panel).getByRole("link", { name: "Open logo.svg in a new tab" }),
+    ).toHaveAttribute("href", "/api/v1/shares/docs/open?path=logo.svg");
+    expect(within(panel).getByText("SVG image")).toBeVisible();
+
+    const imageTab = within(panel).getByRole("tab", { name: "Image" });
+    expect(imageTab).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(imageTab, { key: "ArrowRight" });
+    const sourceTab = within(panel).getByRole("tab", { name: "Source" });
+    await waitFor(() =>
+      expect(sourceTab).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(within(panel).getByLabelText("File source")).toHaveTextContent(
+      "<script>alert(2)</script>",
+    );
+    expect(
+      within(panel).queryByRole("img", { name: "Preview of logo.svg" }),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(sourceTab, { key: "Home" });
+    await waitFor(() =>
+      expect(within(panel).getByRole("tab", { name: "Image" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+  });
+
+  it("explains an SVG that cannot be drawn and keeps its source", async () => {
+    const panel = await renderFile(svgDocument, "logo.svg");
+    fireEvent.error(
+      await within(panel).findByRole("img", { name: "Preview of logo.svg" }),
+    );
+    expect(await within(panel).findByRole("alert")).toHaveTextContent(
+      "This SVG could not be drawn.",
+    );
+    fireEvent.click(within(panel).getByRole("tab", { name: "Source" }));
+    expect(within(panel).getByLabelText("File source")).toBeVisible();
+  });
+});
+
+describe("loading spinners", () => {
+  const spinner = (panel: HTMLElement) =>
+    within(panel).queryByRole("status", { name: "Loading preview" });
+
+  it("shows a spinner over an image until it loads", async () => {
+    const panel = await renderFile(
+      {
+        kind: "image",
+        source: "",
+        mimeType: "image/png",
+        width: 2,
+        height: 2,
+        size: 100,
+        truncated: false,
+        openable: true,
+        thumbnailable: false,
+      },
+      "pixel.png",
+    );
+    const image = await within(panel).findByRole("img", {
+      name: "Preview of pixel.png",
+    });
+    expect(spinner(panel)).toBeInTheDocument();
+    fireEvent.load(image);
+    await waitFor(() => expect(spinner(panel)).not.toBeInTheDocument());
+  });
+
+  it("stops the spinner when an image fails", async () => {
+    const panel = await renderFile(
+      {
+        kind: "image",
+        source: "",
+        mimeType: "image/avif",
+        size: 100,
+        truncated: false,
+        openable: true,
+        thumbnailable: false,
+      },
+      "photo.avif",
+    );
+    const image = await within(panel).findByRole("img", {
+      name: "Preview of photo.avif",
+    });
+    expect(spinner(panel)).toBeInTheDocument();
+    fireEvent.error(image);
+    await waitFor(() => expect(spinner(panel)).not.toBeInTheDocument());
+  });
+
+  it.each([
+    ["audio", "song.mp3", "audio/mpeg", "loadedMetadata"],
+    ["video", "clip.mp4", "video/mp4", "loadedMetadata"],
+    ["audio", "broken.mp3", "audio/mpeg", "error"],
+  ] as const)(
+    "shows a spinner over %s until %s",
+    async (kind, name, mimeType, event) => {
+      const panel = await renderFile(
+        {
+          kind,
+          source: "",
+          mimeType,
+          size: 100,
+          truncated: false,
+          openable: false,
+        },
+        name,
+      );
+      const media = await within(panel).findByLabelText(
+        `${kind === "audio" ? "Audio" : "Video"} preview of ${name}`,
+      );
+      expect(spinner(panel)).toBeInTheDocument();
+      if (event === "error") fireEvent.error(media);
+      else fireEvent.loadedMetadata(media);
+      await waitFor(() => expect(spinner(panel)).not.toBeInTheDocument());
+    },
+  );
 });
 
 describe("image thumbnails", () => {

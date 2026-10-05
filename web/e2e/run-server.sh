@@ -32,6 +32,12 @@ mv \
 mv \
   "$state_dir/read-only/navigation-html.fixture" \
   "$state_dir/read-only/navigation.html"
+mv \
+  "$state_dir/read-only/hostile-svg.fixture" \
+  "$state_dir/read-only/hostile.svg"
+# A synthetic log above the 256 KiB preview limit: 6,000 lines of 52 bytes.
+awk 'BEGIN { for (i = 1; i <= 6000; i++) printf "2026-01-01T00:00:00Z entry %05d synthetic log line\n", i }' \
+  >"$state_dir/read-only/server.log"
 cp -R "$script_dir/fixtures/writable" "$state_dir/writable"
 printf '%s' 'crabinet-e2e-only-session-secret-000000000000000000000000' >"$state_dir/session.key"
 chmod 600 "$state_dir/session.key"

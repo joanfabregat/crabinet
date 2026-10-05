@@ -41,7 +41,9 @@ test("a PDF previews its first page with pdf.js under the application CSP", asyn
 
   const firstPage = page.getByRole("img", { name: "First page of text.pdf" });
   await expect(firstPage).toBeVisible();
-  await expect(page.getByText("Loading the first page…")).toHaveCount(0);
+  await expect(
+    page.getByRole("status", { name: "Loading preview" }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("link", { name: "Open text.pdf in a new tab", exact: true }),
   ).toHaveAttribute("href", "/api/v1/shares/read-only/open?path=text.pdf");
