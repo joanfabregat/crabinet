@@ -30,6 +30,11 @@ max_image_decode_memory = "128 MiB"
 # size limit (at most "64 GiB"); "0 B" disables the cache.
 # thumbnail_cache_path = "data/thumbnails"
 max_thumbnail_cache_size = "256 MiB"
+# Folder sizes in listings. The browser asks for each folder row it shows, and the
+# server walks that folder in the background, stopping after 200,000 entries or 2
+# seconds and then showing a lower bound such as "≥ 14 GB". Results are cached for
+# 60 seconds. Turn it off on slow or network storage to avoid those walks.
+folder_sizes = true
 # Each Argon2 verifier uses up to the hash's accepted memory parameter. Keep this at 1
 # for small pods and increase only after measuring the release image under its limit.
 auth_max_concurrent = 1

@@ -121,6 +121,14 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         truncated: false,
       })),
     checkArchive: overrides.checkArchive ?? vi.fn(async () => undefined),
+    folderSize:
+      overrides.folderSize ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        size: 0,
+        complete: true,
+      })),
     metadata:
       overrides.metadata ??
       vi.fn(async (shareId, path) => ({
@@ -3048,5 +3056,120 @@ describe("selecting entries", () => {
       "trash-projects/c.txt",
     ]);
     expect(await screen.findByText("Restored 2 items.")).toBeVisible();
+  });
+});
+
+describe("folder sizes", () => {
+  const sizedSession: Session = { ...session, folderSizes: true };
+  const listing = vi.fn<ApiClient["directory"]>(async (shareId, path) => ({
+    shareId,
+    path,
+    entries: [
+      { name: "Music", kind: "directory" },
+      { name: "Photos", kind: "directory" },
+      { name: "notes.txt", kind: "file", size: 2_048 },
+    ],
+  }));
+
+  function rowNames(): string[] {
+    return within(screen.getByRole("list", { name: "Folder contents" }))
+      .getAllByRole("listitem")
+      .map((row) => row.querySelector(".entry-name")?.textContent ?? "");
+  }
+
+  function row(name: string): HTMLElement {
+    return screen.getByRole("link", { name }).closest(".entry-row")!;
+  }
+
+  it("shows a spinner in each folder row until its size arrives, without reordering rows", async () => {
+    const answers = new Map<string, (size: number) => void>();
+    const folderSize = vi.fn<ApiClient["folderSize"]>(
+      (shareId, path) =>
+        new Promise((resolve) =>
+          answers.set(path, (size) =>
+            resolve({ shareId, path, size, complete: true }),
+          ),
+        ),
+    );
+    render(
+      <App
+        api={fakeApi({
+          session: vi.fn(async () => sizedSession),
+          directory: listing,
+          folderSize,
+        })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    await screen.findByRole("link", { name: "Photos" });
+    expect(rowNames()).toEqual(["Music", "Photos", "notes.txt"]);
+    for (const folder of ["Music", "Photos"]) {
+      expect(
+        within(row(folder)).getByRole("img", { name: "Calculating size" }),
+      ).toBeVisible();
+    }
+    expect(row("notes.txt")).toHaveTextContent("2.0 kB");
+    await waitFor(() => expect(answers.size).toBe(2));
+
+    // The larger folder arrives first; the listing order stays put.
+    answers.get("Photos")!(3_500_000_000);
+    await waitFor(() => expect(row("Photos")).toHaveTextContent("3.5 GB"));
+    expect(
+      within(row("Music")).getByRole("img", { name: "Calculating size" }),
+    ).toBeVisible();
+    expect(rowNames()).toEqual(["Music", "Photos", "notes.txt"]);
+    answers.get("Music")!(1_200);
+    await waitFor(() => expect(row("Music")).toHaveTextContent("1.2 kB"));
+    expect(rowNames()).toEqual(["Music", "Photos", "notes.txt"]);
+    expect(folderSize).toHaveBeenCalledWith(
+      "read-only",
+      "Photos",
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("shows a folder the server stopped counting as a lower bound", async () => {
+    const folderSize = vi.fn<ApiClient["folderSize"]>(
+      async (shareId, path) => ({
+        shareId,
+        path,
+        size: path === "Photos" ? 14_000_000_000 : 0,
+        complete: path !== "Photos",
+      }),
+    );
+    render(
+      <App
+        api={fakeApi({
+          session: vi.fn(async () => sizedSession),
+          directory: listing,
+          folderSize,
+        })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    await screen.findByRole("link", { name: "Photos" });
+    await waitFor(() =>
+      expect(row("Photos")).toHaveTextContent("≥ At least 14.0 GB"),
+    );
+    expect(row("Music")).toHaveTextContent("0 B");
+    expect(row("Music")).not.toHaveTextContent("≥");
+  });
+
+  it("shows no folder sizes and asks for none when the server turns them off", async () => {
+    const folderSize = vi.fn<ApiClient["folderSize"]>();
+    render(
+      <App
+        api={fakeApi({ directory: listing, folderSize })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    await screen.findByRole("link", { name: "Photos" });
+    expect(screen.queryByRole("img", { name: "Calculating size" })).toBeNull();
+    expect(row("Photos").querySelector(".entry-meta")).toHaveTextContent("");
+    expect(row("notes.txt")).toHaveTextContent("2.0 kB");
+    expect(folderSize).not.toHaveBeenCalled();
   });
 });

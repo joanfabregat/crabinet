@@ -42,9 +42,10 @@ use crate::{
     extract::{ApiPath, ApiQuery},
     filesystem::{
         AccessLevel, ArchiveLimits, AuthorizedShare, DirectoryEntry, EntryKind, EntryMetadata,
-        EntryName, FsError, FsErrorCode, GlobalPolicy, OwnedAuthorizedShare, ShareFs, ShareGrant,
-        ShareId, VirtualPath,
+        EntryName, FolderSizeBudget, FsError, FsErrorCode, GlobalPolicy, OwnedAuthorizedShare,
+        ShareFs, ShareGrant, ShareId, VirtualPath,
     },
+    folder_sizes::FolderSizeCache,
     zip::{Crc32, ZipPlan, ZipSource},
 };
 
@@ -112,6 +113,19 @@ const MAX_ARCHIVE_PATHS: usize = 1_000;
 /// is decoded. A thousand selected names of typical length fit easily; the
 /// HTTP server's own header limit applies before this one.
 const MAX_ARCHIVE_QUERY_BYTES: usize = 256 * 1024;
+/// Concurrent folder-size walks across the process. Each holds a blocking
+/// thread for at most [`FOLDER_SIZE_BUDGET`]'s duration and a few counters
+/// of memory; the walk keeps no names.
+const MAX_CONCURRENT_FOLDER_SIZES: usize = 8;
+/// Folder-size walks per authenticated subject. The browser client runs two
+/// at a time, so this leaves room for a second tab.
+const MAX_CONCURRENT_FOLDER_SIZES_PER_SUBJECT: usize = 4;
+/// One folder-size walk ends after this many scanned entries or this long,
+/// whichever comes first, and reports what it counted as a lower bound.
+const FOLDER_SIZE_BUDGET: FolderSizeBudget = FolderSizeBudget {
+    max_entries: 200_000,
+    max_duration: Duration::from_secs(2),
+};
 
 /// Runs synchronous filesystem work on Tokio's blocking pool so slow disks
 /// or network filesystems never stall the async worker threads.
@@ -178,6 +192,8 @@ pub struct BrowseLimits {
     /// Directory entries one folder archive may scan, including omitted ones.
     pub max_archive_entries: usize,
     pub stream_chunk_bytes: usize,
+    /// Whether the folder-size route walks folders (`server.folder_sizes`).
+    pub folder_sizes: bool,
 }
 
 impl Default for BrowseLimits {
@@ -190,6 +206,7 @@ impl Default for BrowseLimits {
             max_download_bytes: 1_073_741_824,
             max_archive_entries: 10_000,
             stream_chunk_bytes: 65_536,
+            folder_sizes: true,
         }
     }
 }
@@ -245,6 +262,8 @@ pub struct BrowseState {
     buffered_read_gate: SubjectGate,
     listing_gate: SubjectGate,
     blocking_gate: SubjectGate,
+    folder_size_gate: SubjectGate,
+    folder_sizes: Arc<FolderSizeCache>,
 }
 
 /// A process-wide concurrency cap combined with a per-subject cap, so one
@@ -265,6 +284,7 @@ pub(crate) enum BrowseGate {
     BufferedReads,
     Listings,
     Blocking,
+    FolderSizes,
 }
 
 pub(crate) struct SubjectLease {
@@ -400,6 +420,11 @@ impl BrowseState {
                 MAX_CONCURRENT_BLOCKING_REQUESTS,
                 MAX_CONCURRENT_BLOCKING_REQUESTS_PER_SUBJECT,
             ),
+            folder_size_gate: SubjectGate::new(
+                MAX_CONCURRENT_FOLDER_SIZES,
+                MAX_CONCURRENT_FOLDER_SIZES_PER_SUBJECT,
+            ),
+            folder_sizes: Arc::new(FolderSizeCache::default()),
         }
     }
 
@@ -466,6 +491,27 @@ impl BrowseState {
             .ok_or(AppError::Busy)
     }
 
+    /// Admits one folder-size walk.
+    fn acquire_folder_size(
+        &self,
+        identity: &AuthenticatedIdentity,
+    ) -> Result<SubjectLease, AppError> {
+        self.folder_size_gate
+            .try_acquire(identity.subject())
+            .ok_or(AppError::Busy)
+    }
+
+    /// Whether folder sizes are computed, for the session response.
+    #[must_use]
+    pub(crate) const fn folder_sizes_enabled(&self) -> bool {
+        self.limits.folder_sizes
+    }
+
+    /// Forgets every cached folder size in a share after a mutation in it.
+    pub(crate) fn invalidate_folder_sizes(&self, share_id: &ShareId) {
+        self.folder_sizes.invalidate_share(share_id);
+    }
+
     /// Admits one directory or trash scan.
     pub(crate) fn acquire_listing(
         &self,
@@ -501,6 +547,7 @@ impl BrowseState {
             BrowseGate::BufferedReads => &self.buffered_read_gate,
             BrowseGate::Listings => &self.listing_gate,
             BrowseGate::Blocking => &self.blocking_gate,
+            BrowseGate::FolderSizes => &self.folder_size_gate,
         }
     }
 
@@ -585,6 +632,7 @@ pub fn router() -> Router<AppState> {
         .route("/shares/{share_id}/text", get(read_text))
         .route("/shares/{share_id}/download", get(download))
         .route("/shares/{share_id}/archive", get(download_archive))
+        .route("/shares/{share_id}/folder-size", get(folder_size))
 }
 
 #[derive(Serialize)]
@@ -753,6 +801,64 @@ struct EventStreamState {
     /// Held for the life of the stream to keep its event-connection slot.
     _lease: SubjectLease,
     session: Option<SessionCheck>,
+    sizes: WatchedSizes,
+}
+
+/// The watched directory, whose observed changes invalidate cached folder
+/// sizes.
+struct WatchedSizes {
+    cache: Arc<FolderSizeCache>,
+    share_id: ShareId,
+    path: VirtualPath,
+}
+
+impl WatchedSizes {
+    /// Each changed entry invalidates itself, everything beneath it, and the
+    /// watched directory with its ancestors. A change without a usable name,
+    /// such as one to the directory itself, invalidates the whole directory.
+    fn invalidate(&self, changed: &[Option<EntryName>]) {
+        for name in changed {
+            match name {
+                Some(name) => self
+                    .cache
+                    .invalidate(&self.share_id, &self.path.join(name.clone())),
+                None => self.cache.invalidate(&self.share_id, &self.path),
+            }
+        }
+    }
+}
+
+/// Events drained from a watch in one poll; beyond it the whole directory is
+/// invalidated and the rest are read on the next poll.
+const MAX_EVENT_NAMES: usize = 64;
+
+/// Drains the pending events of a directory watch: `Ok(None)` if there are
+/// none, otherwise each changed entry's name, `None` for a change without a
+/// valid entry name or past [`MAX_EVENT_NAMES`].
+fn read_changes(
+    watcher: &rustix::fd::OwnedFd,
+) -> rustix::io::Result<Option<Vec<Option<EntryName>>>> {
+    let mut buffer = [MaybeUninit::uninit(); 4096];
+    let mut reader = rustix::fs::inotify::Reader::new(watcher, &mut buffer);
+    let mut changed = Vec::new();
+    loop {
+        if changed.len() == MAX_EVENT_NAMES {
+            changed.push(None);
+            break;
+        }
+        match reader.next() {
+            Ok(event) => changed.push(
+                event
+                    .file_name()
+                    .and_then(|name| name.to_str().ok())
+                    .and_then(|name| EntryName::new(name).ok()),
+            ),
+            Err(rustix::io::Errno::AGAIN) if changed.is_empty() => return Ok(None),
+            Err(error) if changed.is_empty() => return Err(error),
+            Err(_) => break,
+        }
+    }
+    Ok(Some(changed))
 }
 
 struct SessionCheck {
@@ -780,6 +886,11 @@ async fn directory_events(
     let path = parse_query_path(query.path.as_deref())?;
     let authorized = state.browse().authorize_owned(&identity, &share_id)?;
     let lease = state.browse().acquire_event_connection(&identity)?;
+    let sizes = WatchedSizes {
+        cache: Arc::clone(&state.browse().folder_sizes),
+        share_id,
+        path: path.clone(),
+    };
     let watcher = run_blocking(move || authorized.view().watch_directory(&path))
         .await?
         .map_err(map_fs_error)?;
@@ -803,6 +914,7 @@ async fn directory_events(
         deadline: now + EVENT_STREAM_LIFETIME,
         _lease: lease,
         session,
+        sizes,
     };
 
     // A retry-only event sets the browser's reconnect delay without
@@ -823,16 +935,17 @@ async fn directory_events(
                 }
                 session.next_check = Instant::now() + EVENT_SESSION_CHECK_INTERVAL;
             }
-            let mut buffer = [MaybeUninit::uninit(); 4096];
-            match rustix::fs::inotify::Reader::new(&stream_state.watcher, &mut buffer).next() {
-                Ok(_) => {
+            match read_changes(&stream_state.watcher) {
+                Ok(None) => {}
+                Ok(Some(changed)) => {
+                    stream_state.sizes.invalidate(&changed);
                     return Some((
                         Ok::<Event, Infallible>(Event::default().event("invalidate").data("{}")),
                         stream_state,
                     ));
                 }
-                Err(rustix::io::Errno::AGAIN) => {}
                 Err(_) => {
+                    stream_state.sizes.invalidate(&[None]);
                     stream_state.deadline = Instant::now();
                     return Some((
                         Ok::<Event, Infallible>(Event::default().event("resync").data("{}")),
@@ -918,6 +1031,69 @@ async fn read_metadata(
         .headers_mut()
         .insert(header::ETAG, header_value(&etag)?);
     Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+struct FolderQuery {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderSizeResponse {
+    share_id: String,
+    path: String,
+    size: u64,
+    /// False when the walk stopped at its budget or skipped an unreadable or
+    /// too-deep subfolder, so `size` is a lower bound.
+    complete: bool,
+}
+
+/// Sums the sizes of the files beneath one folder, for the listing's Size
+/// column. The listing itself never walks subfolders; the client asks for
+/// the folders it shows. A walk is bounded by [`FOLDER_SIZE_BUDGET`] and the
+/// folder-size gate, and its result is cached for every user granted the
+/// share until it expires or a change invalidates it. The grant is checked
+/// on every request, before the cache is consulted.
+async fn folder_size(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    ApiPath(raw_share_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<FolderQuery>,
+) -> Result<Response, AppError> {
+    let browse = state.browse();
+    // A server-wide setting, already disclosed by the session response.
+    if !browse.limits.folder_sizes {
+        return Err(AppError::FeatureDisabled);
+    }
+    let authorized = browse.authorized_owned(&identity, &raw_share_id)?;
+    let share_id = authorized.share_id().clone();
+    let path = parse_query_path(query.path.as_deref())?;
+    let size = if let Some(size) = browse.folder_sizes.get(&share_id, &path) {
+        size
+    } else {
+        // The lease moves into the walk, so a cancelled request cannot
+        // release the slot while the walk still runs.
+        let lease = browse.acquire_folder_size(&identity)?;
+        let started = browse.folder_sizes.generation();
+        let walk_path = path.clone();
+        let size = run_blocking(move || {
+            let _lease = lease;
+            authorized
+                .view()
+                .folder_size(&walk_path, FOLDER_SIZE_BUDGET)
+        })
+        .await?
+        .map_err(map_fs_error)?;
+        browse.folder_sizes.insert(&share_id, &path, size, started);
+        size
+    };
+    Ok(inert_json(FolderSizeResponse {
+        share_id: share_id.as_str().to_owned(),
+        path: path.to_string(),
+        size: size.bytes,
+        complete: size.complete,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3493,6 +3669,200 @@ mod tests {
         let mut body = response.into_body().into_data_stream();
         let first = body.next().await.expect("first frame").expect("frame");
         assert_eq!(first.as_ref(), b"retry: 1000\n\n");
+    }
+
+    async fn folder_size_json(fixture: &Fixture, path: &str) -> Value {
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get(format!("/api/v1/shares/documents/folder-size?path={path}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-store, private"
+        );
+        json(response).await
+    }
+
+    #[tokio::test]
+    async fn folder_sizes_sum_the_walked_files() {
+        let fixture = fixture(BrowseLimits::default());
+        let root = fixture._root.path();
+        fs::create_dir(root.join("a-directory/sub")).expect("subfolder");
+        fs::write(root.join("a-directory/one.txt"), b"1").expect("file");
+        fs::write(root.join("a-directory/sub/.two"), b"22").expect("hidden file");
+        assert_eq!(
+            folder_size_json(&fixture, "a-directory").await,
+            serde_json::json!({
+                "shareId": "documents",
+                "path": "a-directory",
+                "size": 3,
+                "complete": true,
+            })
+        );
+        // a.txt (6), page.html (33), invalid.txt (2), and the folder's 3.
+        let share_root = folder_size_json(&fixture, "").await;
+        assert_eq!(share_root["path"], "");
+        assert_eq!(share_root["size"], 44);
+    }
+
+    #[tokio::test]
+    async fn folder_sizes_are_authorized_and_non_disclosing_like_listings() {
+        let fixture = fixture(BrowseLimits::default());
+        let no_grants = AuthenticatedIdentity::new("user-2", vec![]);
+        for (identity, uri) in [
+            (
+                &fixture.identity,
+                "/api/v1/shares/missing/folder-size?path=",
+            ),
+            (&no_grants, "/api/v1/shares/documents/folder-size?path="),
+            (
+                &no_grants,
+                "/api/v1/shares/documents/folder-size?path=a-directory",
+            ),
+            (
+                &fixture.identity,
+                "/api/v1/shares/documents/folder-size?path=absent",
+            ),
+            (
+                &fixture.identity,
+                "/api/v1/shares/documents/folder-size?path=a.txt",
+            ),
+        ] {
+            let response = send(
+                &fixture.app,
+                Some(identity),
+                Request::get(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(json(response).await["error"]["code"], "not_found", "{uri}");
+        }
+        // A cached size is still only served to a granted user.
+        folder_size_json(&fixture, "a-directory").await;
+        let response = send(
+            &fixture.app,
+            Some(&no_grants),
+            Request::get("/api/v1/shares/documents/folder-size?path=a-directory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/folder-size?path=..%2Fescape")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = send(
+            &fixture.app,
+            None,
+            Request::get("/api/v1/shares/documents/folder-size?path=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn disabled_folder_sizes_refuse_without_walking() {
+        let fixture = fixture(BrowseLimits {
+            folder_sizes: false,
+            ..BrowseLimits::default()
+        });
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/folder-size?path=a-directory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json(response).await["error"]["code"], "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn cached_folder_sizes_are_invalidated_by_mutations() {
+        let fixture = fixture(BrowseLimits::default());
+        let root = fixture._root.path();
+        assert_eq!(folder_size_json(&fixture, "a-directory").await["size"], 0);
+        // A change outside Crabinet, with no event stream open, is served
+        // from the cache until the entry expires.
+        fs::write(root.join("a-directory/direct.txt"), b"abc").expect("direct write");
+        assert_eq!(folder_size_json(&fixture, "a-directory").await["size"], 0);
+
+        let metadata = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/metadata?path=a.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let etag = metadata.headers()[header::ETAG].clone();
+        let mut request = Request::post("/api/v1/shares/documents/move")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::IF_MATCH, etag)
+            .body(Body::from(
+                r#"{"source":"a.txt","destination":"a-directory/a.txt"}"#,
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::mutations::CsrfVerified(()));
+        let moved = send(&fixture.app, Some(&fixture.identity), request).await;
+        assert_eq!(moved.status(), StatusCode::OK);
+        // The move forgot the share's sizes: the direct write shows too.
+        assert_eq!(folder_size_json(&fixture, "a-directory").await["size"], 9);
+    }
+
+    #[tokio::test]
+    async fn directory_events_invalidate_cached_folder_sizes() {
+        let fixture = fixture(BrowseLimits::default());
+        let root = fixture._root.path();
+        assert_eq!(folder_size_json(&fixture, "").await["size"], 41);
+        assert_eq!(folder_size_json(&fixture, "a-directory").await["size"], 0);
+        // Written before the watch starts, so no event reports it.
+        fs::write(root.join("a-directory/unwatched"), b"zz").expect("nested file");
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/events?path=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        body.next().await.expect("retry frame").expect("frame");
+
+        fs::write(root.join("new.txt"), b"new").expect("new file");
+        let invalidated = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = body.next().await.expect("event frame").expect("frame");
+                if String::from_utf8_lossy(&frame).contains("event: invalidate") {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(invalidated.is_ok(), "no invalidate event");
+        // The root holds `new.txt`, so it is walked again, now counting the
+        // unwatched file too.
+        assert_eq!(folder_size_json(&fixture, "").await["size"], 46);
+        // The event named only `new.txt`, so the folder keeps its cached size
+        // until it expires.
+        assert_eq!(folder_size_json(&fixture, "a-directory").await["size"], 0);
     }
 
     #[tokio::test]

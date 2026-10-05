@@ -21,13 +21,16 @@ This document records the assumptions made by the Preact file-browser shell. The
   "shares": [{ "id": "docs", "name": "Documents", "access": "read-write" }],
   "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" },
   "preferences": { "showHiddenFiles": false, "theme": "system" },
-  "csrfToken": "opaque-value"
+  "csrfToken": "opaque-value",
+  "folderSizes": true
 }
 ```
 
 An anonymous or expired session returns `401`. `csrfToken` is held in memory and sent on authenticated state-changing requests; it is not a session identifier.
 
 `user.pictureUrl` is optional. When present, it is an accepted Google profile image or, when `auth.gravatar_enabled` is set, a Gravatar URL derived from the configured email address; the browser loads that external image. See [account pictures](authentication.md#account-pictures).
+
+`folderSizes` is `true` when the server computes folder sizes (`server.folder_sizes`, on by default) and `false` when an operator turned them off. A client treats an absent field, from a server that predates it, as `false`.
 
 `defaultFolder` is `null` when no start folder is selected or the saved folder is no longer accessible. Opening `/` goes to this folder when present; a direct `/{shareId}/…` link keeps its own destination. `PUT /api/v1/preferences` accepts `{ "defaultFolder": { "shareId": "docs", "path": "projects/crabinet" } }` or `{ "defaultFolder": null }`, with same-origin and session-bound CSRF checks. The server accepts only an existing directory in a share granted to the current user, stores its virtual share ID and path in SQLite, and returns the new `defaultFolder` value. Passwords and host filesystem paths are not stored in this preference.
 
@@ -73,6 +76,8 @@ Trash is a separate per-share view, not a virtual `.crabinet` folder. `GET /api/
 - Access is `read` or `read-write` after resolving user and share policy. The server checks it on every request.
 
 `GET /api/v1/shares/{shareId}/events?path={path}` is an authenticated server-sent-events stream for the currently open directory. It emits `invalidate` when a non-recursive kernel watch observes a change and `resync` if the watch becomes unreliable. A connection is bounded to 60 seconds, carries a `retry: 1000` reconnection hint, and then reconnects through normal authentication. The server also re-checks the stream's session every 15 seconds, without extending it, and ends the stream once the session is signed out, expired, or revoked; the reconnect then fails authentication. Events carry no names, host paths, or file contents; clients debounce them and fetch a fresh directory page. The endpoint never scans the directory or share.
+
+`GET /api/v1/shares/{shareId}/folder-size?path={path}` returns `{ "shareId": "docs", "path": "projects", "size": 1234567, "complete": true }`, the total size of the files beneath one folder; [Browse API](browse-api.md#folder-size) has the walk, its budget, the cache, and the errors. When the session's `folderSizes` is `true`, each folder row's Size cell shows a small spinner (an image labelled "Calculating size", a still ring under reduced motion) until the size arrives, then the size, or `≥ 14.0 GB` with the screen-reader text "At least" when `complete` is `false`. The listing renders without waiting: the client asks only for folder rows whose Size cell is on screen, observed with `IntersectionObserver` (every listed folder when the browser lacks it), one folder per request and two requests at a time, so a hidden Size column or a row scrolled out of view costs nothing. A `429` is retried twice, one and then two seconds later; any other failure, including `404`, leaves the cell empty as for a folder without a size, and `401` is session expiry. A `feature_disabled` error stops the listing from asking further. Changing folder or share cancels the requests in flight; a reload of the same listing, after a change event or a mutation, asks again for the folders on screen while their previous sizes stay shown, and the server answers from its cache unless the change invalidated them. Rows keep the server's order (folders first, then by name) as sizes arrive; the list offers no sort by size, so nothing moves. Sizes are not shown in the Trash view. When `folderSizes` is `false` or absent, folder rows leave the Size cell empty and the client never calls the route.
 
 `GET /api/v1/shares/{shareId}/metadata?path={path}` returns mutation validators and optional filesystem timestamps:
 

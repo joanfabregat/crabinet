@@ -1,4 +1,4 @@
-import { type JSX } from "preact";
+import { type JSX, type RefObject } from "preact";
 import {
   useCallback,
   useEffect,
@@ -71,6 +71,11 @@ import {
   type UploadSelection,
 } from "./operations";
 import { EntryIcon } from "./file-icons";
+import {
+  FolderSizeValue,
+  useFolderSizes,
+  type FolderSizeState,
+} from "./folder-sizes";
 import { HighlightedCode } from "./highlighted-code";
 import { LoadingSpinner } from "./loading-spinner";
 import { PdfFirstPage } from "./pdf-preview";
@@ -907,6 +912,7 @@ function AuthenticatedShell({
             shares={session.shares}
             userId={session.user.id}
             showHiddenFiles={showHiddenFiles}
+            folderSizes={session.folderSizes === true}
             onSessionExpired={onSessionExpired}
             onSessionRefreshed={onSessionRefreshed}
           />
@@ -931,6 +937,8 @@ interface DirectoryBrowserProps {
   shares: Share[];
   userId: string;
   showHiddenFiles: boolean;
+  /** Whether the server computes folder sizes for the Size column. */
+  folderSizes: boolean;
   onSessionExpired: () => void;
   onSessionRefreshed: (session: Session) => void;
 }
@@ -944,6 +952,7 @@ function DirectoryBrowser({
   shares,
   userId,
   showHiddenFiles,
+  folderSizes: folderSizesEnabled,
   onSessionExpired,
   onSessionRefreshed,
 }: DirectoryBrowserProps) {
@@ -983,6 +992,19 @@ function DirectoryBrowser({
         entry.name !== ".crabinet" &&
         (showHiddenFiles || !entry.name.startsWith(".")),
     ) ?? [];
+  const entryListRef = useRef<HTMLDivElement>(null);
+  const folderSizes = useFolderSizes({
+    api,
+    shareId: share.id,
+    path: route.path,
+    folders: visibleEntries
+      .filter((entry) => entry.kind === "directory")
+      .map((entry) => entry.name),
+    enabled: folderSizesEnabled && route.view !== "trash",
+    revision: refreshKey,
+    container: entryListRef,
+    onSessionExpired,
+  });
 
   const selectionLocation = `${share.id}\u0000${route.path}\u0000${showHiddenFiles}`;
   const {
@@ -1854,7 +1876,9 @@ function DirectoryBrowser({
                   />
                 )}
                 <EntryList
+                  listRef={entryListRef}
                   entries={visibleEntries}
+                  folderSizes={folderSizesEnabled ? folderSizes : undefined}
                   shareId={share.id}
                   path={route.path}
                   selectedPath={route.previewPath ?? undefined}
@@ -1972,7 +1996,9 @@ function DirectoryBrowser({
 }
 
 function EntryList({
+  listRef,
   entries,
+  folderSizes,
   shareId,
   path,
   selectedPath,
@@ -1984,7 +2010,10 @@ function EntryList({
   onToggleChecked,
   onDownloadArchive,
 }: {
+  listRef: RefObject<HTMLDivElement>;
   entries: DirectoryEntry[];
+  /** Sizes of the listed folders; absent when the server computes none. */
+  folderSizes?: ReadonlyMap<string, FolderSizeState>;
   shareId: string;
   path: string;
   selectedPath?: string;
@@ -2000,6 +2029,7 @@ function EntryList({
 }) {
   return (
     <div
+      ref={listRef}
       class={`entry-list${checked.size > 0 ? " has-checked" : ""}`}
       role="list"
       aria-label="Folder contents"
@@ -2099,9 +2129,18 @@ function EntryList({
                 )}
               </span>
             </div>
-            <span class="entry-meta">
-              {entry.kind === "file" ? formatSize(entry.size) : ""}
-            </span>
+            {entry.kind === "directory" && folderSizes ? (
+              <span class="entry-meta" data-folder-size={entry.name}>
+                <FolderSizeValue
+                  state={folderSizes.get(entry.name)}
+                  format={formatSize}
+                />
+              </span>
+            ) : (
+              <span class="entry-meta">
+                {entry.kind === "file" ? formatSize(entry.size) : ""}
+              </span>
+            )}
             <EntryActionButtons
               entry={entry}
               path={entryPath}

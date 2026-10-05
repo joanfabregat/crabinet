@@ -15,7 +15,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use cap_fs_ext::MetadataExt as _;
@@ -881,6 +881,36 @@ impl AuthorizedShare<'_> {
         Ok(walk.items)
     }
 
+    /// Sums the sizes of the files beneath the directory `path` within
+    /// `budget`. The walk applies the archive walk's entry policy: internal,
+    /// unsupported, and invalidly named entries, links, special files, and
+    /// hard-link aliases are left out, links are never followed, and every
+    /// scanned entry counts toward the budget. Hidden entries count. Unlike an
+    /// archive, the walk never fails part-way: a subfolder that cannot be
+    /// read or lies below [`MAX_PATH_DEPTH`] is skipped and the budget ends
+    /// the walk early, either way marking the result incomplete. Only the
+    /// folder itself must exist and be readable.
+    pub fn folder_size(
+        &self,
+        path: &VirtualPath,
+        budget: FolderSizeBudget,
+    ) -> FsResult<FolderSize> {
+        let directory = self.share.open_directory(&path.0)?;
+        let entries = directory.entries().map_err(map_io)?;
+        let mut walk = SizeWalk {
+            max_entries: budget.max_entries,
+            deadline: Instant::now() + budget.max_duration,
+            scanned: 0,
+            bytes: 0,
+            complete: true,
+        };
+        walk.visit(&directory, entries, path.depth());
+        Ok(FolderSize {
+            bytes: walk.bytes,
+            complete: walk.complete,
+        })
+    }
+
     pub fn open_file(&self, path: &VirtualPath) -> FsResult<OpenedFile> {
         let file = self.open_regular_file(path, false)?;
         let metadata = file.metadata().map_err(map_io)?;
@@ -1262,6 +1292,81 @@ impl ArchiveWalk {
             }
         }
         Ok(())
+    }
+}
+
+/// Bounds on one folder-size walk: whichever is reached first ends it.
+#[derive(Clone, Copy, Debug)]
+pub struct FolderSizeBudget {
+    /// Directory entries scanned, including omitted ones.
+    pub max_entries: usize,
+    /// Wall-clock time from the start of the walk.
+    pub max_duration: Duration,
+}
+
+/// The total size of the files beneath a folder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FolderSize {
+    /// Sum of the sizes of every counted file.
+    pub bytes: u64,
+    /// False when the walk stopped at its budget or skipped an unreadable or
+    /// too-deep subfolder, so `bytes` is a lower bound.
+    pub complete: bool,
+}
+
+struct SizeWalk {
+    max_entries: usize,
+    deadline: Instant,
+    scanned: usize,
+    bytes: u64,
+    complete: bool,
+}
+
+impl SizeWalk {
+    /// Adds the files beneath `directory`, whose virtual depth is `depth`.
+    /// Returns false once the budget is spent, so every caller stops.
+    fn visit(&mut self, directory: &Dir, entries: cap_std::fs::ReadDir, depth: usize) -> bool {
+        for entry in entries {
+            self.scanned += 1;
+            if self.scanned > self.max_entries || Instant::now() >= self.deadline {
+                self.complete = false;
+                return false;
+            }
+            let child = match entry.map_err(map_io).and_then(supported_entry) {
+                Ok(Some(child)) => child,
+                Ok(None) => continue,
+                Err(_) => {
+                    self.complete = false;
+                    continue;
+                }
+            };
+            // Entries below the depth limit cannot be listed or opened, so
+            // they are left out, as an archive refuses them.
+            if depth >= MAX_PATH_DEPTH {
+                self.complete = false;
+                continue;
+            }
+            match child.kind {
+                EntryKind::File => self.bytes = self.bytes.saturating_add(child.size),
+                EntryKind::Directory => {
+                    let opened = directory
+                        .open_dir_nofollow(child.name.as_str())
+                        .and_then(|opened| opened.entries().map(|entries| (opened, entries)));
+                    match opened {
+                        Ok((opened, entries)) => {
+                            if !self.visit(&opened, entries, depth + 1) {
+                                return false;
+                            }
+                        }
+                        // Removed or renamed since the scan, as in a listing.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        // Unreadable: skipped, and the total is a lower bound.
+                        Err(_) => self.complete = false,
+                    }
+                }
+            }
+        }
+        true
     }
 }
 
@@ -2637,6 +2742,200 @@ mod tests {
                 .code(),
             FsErrorCode::TooDeep
         );
+    }
+
+    const SIZE_BUDGET: FolderSizeBudget = FolderSizeBudget {
+        max_entries: 1_000,
+        max_duration: Duration::from_secs(60),
+    };
+
+    fn folder_size_of(
+        share: &ShareFs,
+        grant: &ShareGrant,
+        path: &str,
+        budget: FolderSizeBudget,
+    ) -> FsResult<FolderSize> {
+        let path = if path.is_empty() {
+            VirtualPath::root()
+        } else {
+            VirtualPath::parse(path)?
+        };
+        share
+            .authorize(Some(grant), GlobalPolicy::default())
+            .expect("read access")
+            .folder_size(&path, budget)
+    }
+
+    #[test]
+    fn folder_sizes_sum_files_with_the_archive_entry_policy() {
+        use std::{
+            ffi::OsStr,
+            os::unix::{ffi::OsStrExt as _, fs::symlink},
+        };
+
+        let (temporary, share, read, _write) = fixture();
+        let root = temporary.path();
+        let outside = TempDir::new().expect("outside");
+        fs::write(outside.path().join("large"), vec![0_u8; 4096]).expect("outside file");
+        fs::write(outside.path().join("aliased"), b"0123456789").expect("aliased file");
+        // Hidden entries count, whatever a user's hidden-files preference.
+        fs::write(root.join("nested/.hidden"), b"abc").expect("hidden file");
+        fs::create_dir(root.join("nested/deeper")).expect("deeper directory");
+        fs::write(root.join("nested/deeper/more.txt"), b"more").expect("deeper file");
+        fs::create_dir(root.join("nested/empty")).expect("empty directory");
+        // Links are never followed, and a hard-linked file is omitted as an
+        // alias, as in listings and archives.
+        symlink(outside.path().join("large"), root.join("nested/file-link")).expect("symlink");
+        symlink(outside.path(), root.join("nested/directory-link")).expect("directory symlink");
+        fs::hard_link(outside.path().join("aliased"), root.join("nested/alias"))
+            .expect("hard link");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            root.join("nested/fifo").as_path(),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("fifo");
+        let raw = root.join(OsStr::from_bytes(b"nested/raw-\xff"));
+        fs::create_dir(&raw).expect("non-UTF-8 directory");
+        fs::write(raw.join("inner"), b"ignored").expect("file under a non-UTF-8 name");
+
+        // inside.txt (6), .hidden (3), and deeper/more.txt (4).
+        assert_eq!(
+            folder_size_of(&share, &read, "nested", SIZE_BUDGET).expect("size"),
+            FolderSize {
+                bytes: 13,
+                complete: true
+            }
+        );
+        // The share root adds hello.txt (5); Crabinet's internal directory
+        // is never counted.
+        assert_eq!(
+            folder_size_of(&share, &read, "", SIZE_BUDGET).expect("size"),
+            FolderSize {
+                bytes: 18,
+                complete: true
+            }
+        );
+        assert_eq!(
+            folder_size_of(&share, &read, "nested/empty", SIZE_BUDGET)
+                .expect("size")
+                .bytes,
+            0
+        );
+        for missing in [
+            "absent",
+            "hello.txt",
+            "nested/directory-link",
+            "nested/fifo",
+        ] {
+            let error = folder_size_of(&share, &read, missing, SIZE_BUDGET)
+                .expect_err("not a folder within the share");
+            assert!(
+                matches!(
+                    error.code(),
+                    FsErrorCode::NotFound | FsErrorCode::UnsupportedEntry
+                ),
+                "{missing}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn folder_size_walks_stop_at_their_budget_with_a_lower_bound() {
+        let (temporary, share, read, _write) = fixture();
+        fs::create_dir(temporary.path().join("many")).expect("directory");
+        for index in 0..10 {
+            fs::write(temporary.path().join(format!("many/{index}")), b"x").expect("file");
+        }
+        let entries = |max_entries| FolderSizeBudget {
+            max_entries,
+            max_duration: Duration::from_secs(60),
+        };
+        assert_eq!(
+            folder_size_of(&share, &read, "many", entries(10)).expect("size"),
+            FolderSize {
+                bytes: 10,
+                complete: true
+            }
+        );
+        assert_eq!(
+            folder_size_of(&share, &read, "many", entries(4)).expect("size"),
+            FolderSize {
+                bytes: 4,
+                complete: false
+            }
+        );
+        let expired = FolderSizeBudget {
+            max_entries: 1_000,
+            max_duration: Duration::ZERO,
+        };
+        assert_eq!(
+            folder_size_of(&share, &read, "many", expired).expect("size"),
+            FolderSize {
+                bytes: 0,
+                complete: false
+            }
+        );
+    }
+
+    #[test]
+    fn folder_size_walks_skip_too_deep_and_unreadable_subfolders() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = TempDir::new().expect("temporary directory");
+        nested_tree(temporary.path(), MAX_PATH_DEPTH - 1);
+        let id = ShareId::new("deep").expect("id");
+        let share = ShareFs::open_read_only(id.clone(), temporary.path()).expect("open share");
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadOnly,
+        };
+        assert_eq!(
+            folder_size_of(&share, &grant, "", SIZE_BUDGET).expect("size"),
+            FolderSize {
+                bytes: 1,
+                complete: true
+            },
+            "the leaf sits exactly at the limit"
+        );
+        let deeper = temporary.path().join(depth_path(MAX_PATH_DEPTH + 1));
+        fs::create_dir_all(&deeper).expect("deeper");
+        fs::write(deeper.join("unreachable.txt"), b"unreachable").expect("deep file");
+        assert_eq!(
+            folder_size_of(&share, &grant, "", SIZE_BUDGET).expect("size"),
+            FolderSize {
+                bytes: 1,
+                complete: false
+            }
+        );
+
+        let other = TempDir::new().expect("temporary directory");
+        fs::write(other.path().join("open.txt"), b"open").expect("file");
+        let locked = other.path().join("locked");
+        fs::create_dir(&locked).expect("locked directory");
+        fs::write(locked.join("secret.txt"), b"secret").expect("locked file");
+        let id = ShareId::new("locked").expect("id");
+        let share = ShareFs::open_read_only(id.clone(), other.path()).expect("open share");
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadOnly,
+        };
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+        // A privileged test user reads the directory regardless of its mode.
+        let unreadable = fs::read_dir(&locked).is_err();
+        let size = folder_size_of(&share, &grant, "", SIZE_BUDGET);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod back");
+        if unreadable {
+            assert_eq!(
+                size.expect("the readable part is counted"),
+                FolderSize {
+                    bytes: 4,
+                    complete: false
+                }
+            );
+        }
     }
 
     #[test]

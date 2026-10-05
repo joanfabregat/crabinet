@@ -1824,6 +1824,19 @@ html.preview-fullscreen-open body {
   }
 }
 
+/* A folder's size while the server walks it: a small inline ring the size of
+   the text beside it. With reduced motion it stays still. */
+.size-spinner {
+  animation: preview-spin 0.9s linear infinite;
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  border-top-color: var(--accent);
+  display: inline-block;
+  height: 0.75rem;
+  vertical-align: middle;
+  width: 0.75rem;
+}
+
 .image-preview figcaption {
   color: var(--muted);
   font-size: 0.8rem;
@@ -2767,7 +2780,8 @@ html.preview-fullscreen-open body {
   .directory-skeleton span,
   .selection-bar,
   .toast,
-  .preview-spinner::before {
+  .preview-spinner::before,
+  .size-spinner {
     animation: none;
   }
 

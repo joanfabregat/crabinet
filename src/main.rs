@@ -185,6 +185,7 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
         .collect::<Result<Vec<_>>>()?;
     let limits = BrowseLimits {
         max_text_bytes: config.server().max_preview_size(),
+        folder_sizes: config.server().folder_sizes(),
         ..BrowseLimits::default()
     };
     BrowseState::new(

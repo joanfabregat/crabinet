@@ -1389,6 +1389,73 @@ describe("API client", () => {
     expect(directory.kind).toBe("directory");
   });
 
+  it("requests one folder's size and validates the answer", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "Photos/2026",
+          size: 14_000_000_000,
+          complete: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "docs",
+          path: "other",
+          size: 1,
+          complete: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ shareId: "docs", path: "a", size: -1, complete: true }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ shareId: "docs", path: "a", size: 1, complete: "yes" }),
+      );
+    const api = createApiClient({ fetch });
+
+    await expect(api.folderSize("docs", "Photos/2026")).resolves.toEqual({
+      shareId: "docs",
+      path: "Photos/2026",
+      size: 14_000_000_000,
+      complete: false,
+    });
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/v1/shares/docs/folder-size?path=Photos%2F2026",
+    );
+    for (const path of ["a", "a", "a"]) {
+      await expect(api.folderSize("docs", path)).rejects.toMatchObject({
+        kind: "invalid-response",
+      });
+    }
+    await expect(api.folderSize("docs", "../a")).rejects.toMatchObject({
+      kind: "invalid-request",
+    });
+  });
+
+  it("reads the folder-size setting from the session", async () => {
+    const base = {
+      user: { id: "u", username: "u", displayName: "u" },
+      shares: [],
+      preferences: { showHiddenFiles: false, theme: "system" },
+      csrfToken: "csrf",
+    };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(Response.json({ ...base, folderSizes: true }))
+      .mockResolvedValueOnce(Response.json(base))
+      .mockResolvedValueOnce(Response.json({ ...base, folderSizes: "on" }));
+    const api = createApiClient({ fetch });
+
+    expect((await api.session()).folderSizes).toBe(true);
+    expect((await api.session()).folderSizes).toBeUndefined();
+    await expect(api.session()).rejects.toMatchObject({
+      kind: "invalid-response",
+    });
+  });
+
   it("streams a browser File through FormData with progress, CSRF, and replace preconditions", async () => {
     const xhr = new FakeXhr();
     const progress = vi.fn();

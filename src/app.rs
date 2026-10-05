@@ -508,6 +508,15 @@ pub(crate) mod tests {
             )
             // A selection of two files, the most general request shape.
             .query("path=page.html&path=pixel.png"),
+            // A cached size is served without the gate; each fixture is new,
+            // so the first request walks.
+            Route::new(
+                "GET",
+                "/api/v1/shares/{share_id}/folder-size",
+                Share,
+                Safe,
+                Bound::Browse(BrowseGate::FolderSizes),
+            ),
             Route::new(
                 "GET",
                 "/api/v1/shares/{share_id}/preview",
@@ -648,13 +657,14 @@ pub(crate) mod tests {
     };
 
     /// Every request gate. Each must guard at least one route.
-    const GATES: [Bound; 8] = [
+    const GATES: [Bound; 9] = [
         Bound::Browse(BrowseGate::Events),
         Bound::Browse(BrowseGate::Downloads),
         Bound::Browse(BrowseGate::Archives),
         Bound::Browse(BrowseGate::BufferedReads),
         Bound::Browse(BrowseGate::Listings),
         Bound::Browse(BrowseGate::Blocking),
+        Bound::Browse(BrowseGate::FolderSizes),
         Bound::Mutation(MutationGate::Uploads),
         Bound::Mutation(MutationGate::TextSaves),
     ];
