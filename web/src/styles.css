@@ -2118,9 +2118,7 @@ html.preview-fullscreen-open body {
 }
 
 .entry-checkbox {
-  height: 0.875rem;
   opacity: 0;
-  width: 0.875rem;
 }
 
 .entry-select:has(.entry-checkbox:focus-visible) .entry-checkbox,

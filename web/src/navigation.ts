@@ -194,6 +194,17 @@ function browserUrl(route: BrowserRoute): string {
   return `/${encodeURIComponent(shareId)}${pathSuffix(inline ? previewPath : safePath)}${suffix}`;
 }
 
+/**
+ * Starts Google sign-in. A location other than the app root travels to the
+ * server, which keeps it only when it is a safe in-app path and returns there
+ * after sign-in, as a direct link would. The root keeps the start folder.
+ */
+export function oidcStartUrl(route: BrowserRoute): string {
+  const location = browserUrl(route);
+  if (location === "/") return "/api/v1/auth/oidc/start";
+  return `/api/v1/auth/oidc/start?${new URLSearchParams({ return_to: location }).toString()}`;
+}
+
 function pathSuffix(path: string): string {
   return path
     .split("/")

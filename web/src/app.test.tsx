@@ -250,7 +250,10 @@ describe("authentication", () => {
       })),
     });
     const first = render(
-      <App api={oidcOnly} navigation={new MemoryNavigation()} />,
+      <App
+        api={oidcOnly}
+        navigation={new MemoryNavigation({ shareId: null, path: "" })}
+      />,
     );
     expect(
       await screen.findByRole("link", { name: "Sign in with Google" }),
@@ -270,7 +273,11 @@ describe("authentication", () => {
     const googleLink = screen.getByRole("link", {
       name: "Sign in with Google",
     });
-    expect(googleLink).toHaveAttribute("href", "/api/v1/auth/oidc/start");
+    // A direct link survives the round trip through the identity provider.
+    expect(googleLink).toHaveAttribute(
+      "href",
+      "/api/v1/auth/oidc/start?return_to=%2Fread-only",
+    );
     expect(googleLink.querySelector("img")).toHaveAttribute(
       "src",
       "/google-g.png",
@@ -441,6 +448,45 @@ describe("authentication", () => {
     expect(
       screen.getByRole("heading", { name: "Sign in to Crabinet" }),
     ).toBeInTheDocument();
+  });
+
+  it("offers Google sign-in back to the page where the session expired", async () => {
+    const api = fakeApi({
+      authMethods: vi.fn(async () => ({
+        passwordEnabled: false,
+        oidcEnabled: true,
+      })),
+      directory: vi
+        .fn()
+        .mockRejectedValue(
+          new ApiError("unauthorized", "session expired", { status: 401 }),
+        ),
+    });
+
+    render(
+      <App
+        api={api}
+        navigation={
+          new MemoryNavigation({
+            shareId: "read-only",
+            path: "Feature demo/Photos",
+            previewPath: "notes.txt",
+          })
+        }
+      />,
+    );
+
+    const googleLink = await screen.findByRole("link", {
+      name: "Sign in with Google",
+    });
+    expect(
+      screen.getByText("Your session expired. Sign in again to continue."),
+    ).toBeVisible();
+    const start = new URL(googleLink.getAttribute("href")!, "https://x.test");
+    expect(start.pathname).toBe("/api/v1/auth/oidc/start");
+    expect(start.searchParams.get("return_to")).toBe(
+      "/read-only/Feature%20demo/Photos?preview=notes.txt",
+    );
   });
 
   it("shows a recoverable connection error instead of a misleading login form", async () => {

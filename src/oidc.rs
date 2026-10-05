@@ -9,7 +9,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{RawQuery, State},
     http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Redirect, Response},
     routing::get,
@@ -38,6 +38,9 @@ const TRANSACTION_COOKIE: &str = "__Host-crabinet_oidc_state";
 /// Bounds the replay-protection set of consumed states. Transactions live in
 /// the browser, so nothing unauthenticated callers do can refuse new sign-ins.
 const MAX_CONSUMED_STATES: usize = 4_096;
+/// Longest in-app location a sign-in carries back; it keeps the transaction
+/// cookie well under the 4 KiB browsers accept.
+const MAX_RETURN_PATH: usize = 2_048;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -66,13 +69,15 @@ struct ProviderMetadata {
     token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
-/// One sign-in attempt. Its state, expiry and the previous session key travel
-/// in an HMAC-protected cookie; the nonce and PKCE verifier are derived from
-/// the state with the server key, so no per-attempt server memory is needed.
+/// One sign-in attempt. Its state, expiry, the previous session key and the
+/// in-app location to return to travel in an HMAC-protected cookie; the nonce
+/// and PKCE verifier are derived from the state with the server key, so no
+/// per-attempt server memory is needed.
 struct Transaction {
     nonce: String,
     verifier: String,
     previous_session_key: Option<Vec<u8>>,
+    return_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -227,7 +232,13 @@ impl OidcService {
         URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     }
 
-    fn cookie_mac(&self, state: &str, expires_at: u64, previous: &str) -> HmacSha256 {
+    fn cookie_mac(
+        &self,
+        state: &str,
+        expires_at: u64,
+        previous: &str,
+        return_path: &str,
+    ) -> HmacSha256 {
         let mut mac = self.transaction_mac();
         mac.update(b"oidc-transaction\0");
         mac.update(state.as_bytes());
@@ -235,18 +246,31 @@ impl OidcService {
         mac.update(expires_at.to_string().as_bytes());
         mac.update(b"\0");
         mac.update(previous.as_bytes());
+        mac.update(b"\0");
+        mac.update(return_path.as_bytes());
         mac
     }
 
-    fn begin(&self, previous_session_key: Option<&[u8]>) -> Result<Response, AppError> {
+    /// Starts a sign-in. `return_path` is the in-app location the browser
+    /// comes back to; it is kept only when it passes `safe_return_path`, and
+    /// only in the transaction cookie, never in what the provider sees.
+    fn begin(
+        &self,
+        previous_session_key: Option<&[u8]>,
+        return_path: Option<&str>,
+    ) -> Result<Response, AppError> {
         let state = random_token()?;
         let nonce = self.derive(b"oidc-nonce\0", &state);
         let verifier = self.derive(b"oidc-verifier\0", &state);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let expires_at = unix_time()? + TRANSACTION_SECONDS;
         let previous = previous_session_key.map(encode_hex).unwrap_or_default();
+        let return_path = return_path
+            .and_then(safe_return_path)
+            .map(|path| URL_SAFE_NO_PAD.encode(path))
+            .unwrap_or_default();
         let tag = URL_SAFE_NO_PAD.encode(
-            self.cookie_mac(&state, expires_at, &previous)
+            self.cookie_mac(&state, expires_at, &previous, &return_path)
                 .finalize()
                 .into_bytes(),
         );
@@ -263,7 +287,7 @@ impl OidcService {
             .append_pair("code_challenge_method", "S256");
         let mut response = Redirect::temporary(url.as_str()).into_response();
         response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&format!(
-            "{TRANSACTION_COOKIE}={state}.{expires_at}.{previous}.{tag}; Max-Age={TRANSACTION_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Lax"
+            "{TRANSACTION_COOKIE}={state}.{expires_at}.{previous}.{return_path}.{tag}; Max-Age={TRANSACTION_SECONDS}; Path=/; Secure; HttpOnly; SameSite=Lax"
         )).map_err(|_| AppError::Internal)?);
         no_store(&mut response);
         Ok(response)
@@ -280,9 +304,12 @@ impl OidcService {
         client: Option<IpAddr>,
     ) -> Result<Response, AppError> {
         match self.complete(headers, callback, auth).await {
-            Ok((username, cookie_token)) => {
+            Ok((username, cookie_token, return_path)) => {
                 audit::sign_in_succeeded("oidc_login", &username, client);
-                let mut response = Redirect::to("/").into_response();
+                // A stored location is a direct link; without one the app
+                // root applies the user's start folder.
+                let mut response =
+                    Redirect::to(return_path.as_deref().unwrap_or("/")).into_response();
                 response.headers_mut().append(
                     header::SET_COOKIE,
                     session_cookie_header(&cookie_token, auth.absolute_timeout_seconds()),
@@ -316,7 +343,7 @@ impl OidcService {
         headers: &HeaderMap,
         callback: CallbackQuery,
         auth: &crate::auth::AuthService,
-    ) -> Result<(String, String), CallbackFailure> {
+    ) -> Result<(String, String, Option<String>), CallbackFailure> {
         let refused = |reason| CallbackFailure::refused(reason);
         let state = callback
             .state
@@ -400,20 +427,29 @@ impl OidcService {
                 unrecognized: true,
                 rejection,
             })?;
-        Ok((username, cookie_token))
+        Ok((username, cookie_token, transaction.return_path))
     }
 
     fn consume(&self, headers: &HeaderMap, state: &str) -> Result<Transaction, AppError> {
         let value =
             cookie_value(headers, TRANSACTION_COOKIE).ok_or(AppError::AuthenticationFailed)?;
         let mut parts = value.split('.');
-        let (Some(cookie_state), Some(expires_at), Some(previous), Some(tag), None) = (
+        let (
+            Some(cookie_state),
+            Some(expires_at),
+            Some(previous),
+            Some(return_path),
+            Some(tag),
+            None,
+        ) = (
             parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
-        ) else {
+            parts.next(),
+        )
+        else {
             return Err(AppError::AuthenticationFailed);
         };
         if state.len() > 128 || cookie_state != state {
@@ -425,7 +461,7 @@ impl OidcService {
         let tag = URL_SAFE_NO_PAD
             .decode(tag)
             .map_err(|_| AppError::AuthenticationFailed)?;
-        self.cookie_mac(state, expires_at, previous)
+        self.cookie_mac(state, expires_at, previous, return_path)
             .verify_slice(&tag)
             .map_err(|_| AppError::AuthenticationFailed)?;
         let now = unix_time()?;
@@ -441,6 +477,13 @@ impl OidcService {
                     .to_vec(),
             )
         };
+        // Authenticated above, but checked again so a redirect target only
+        // ever comes from the validator.
+        let return_path = URL_SAFE_NO_PAD
+            .decode(return_path)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|path| safe_return_path(path).is_some());
         {
             let mut consumed = self.inner.consumed.lock().map_err(|_| AppError::Internal)?;
             consumed.retain(|_, expiry| *expiry > now);
@@ -461,6 +504,7 @@ impl OidcService {
             nonce: self.derive(b"oidc-nonce\0", state),
             verifier: self.derive(b"oidc-verifier\0", state),
             previous_session_key,
+            return_path,
         })
     }
 
@@ -565,6 +609,80 @@ fn safe_https_url(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Accepts only a same-origin location inside the app: a path starting with a
+/// single `/`, made of visible ASCII, with an optional query and no fragment.
+/// The percent-decoded form must pass the same checks, so encoded slashes,
+/// backslashes, dot segments and control characters cannot turn it into
+/// another origin, a header injection or a route outside the app. API and
+/// health routes are never a destination. Anything else is `None`.
+fn safe_return_path(value: &str) -> Option<&str> {
+    if value.is_empty()
+        || value.len() > MAX_RETURN_PATH
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'\\' && byte != b'#')
+    {
+        return None;
+    }
+    let (path, query) = value.split_once('?').unwrap_or((value, ""));
+    let decoded_path = percent_decode(path)?;
+    let decoded_query = percent_decode(query)?;
+    if [path, decoded_path.as_str()]
+        .iter()
+        .any(|path| !path.starts_with('/') || path.starts_with("//"))
+        || [decoded_path.as_str(), decoded_query.as_str()]
+            .iter()
+            .any(|part| part.chars().any(|c| c.is_control() || c == '\\'))
+        || decoded_path
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return None;
+    }
+    let lowercase = decoded_path.to_ascii_lowercase();
+    let outside_app = ["/api", "/health"].iter().any(|prefix| {
+        lowercase
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    (!outside_app).then_some(value)
+}
+
+/// Strict percent-decoding: a `%` must start two hex digits and the result
+/// must be UTF-8.
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            if !hex.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// The `return_to` query parameter of a sign-in start, when it is present
+/// exactly once and safe. Invalid values are dropped without an error.
+fn requested_return_path(query: Option<&str>) -> Option<String> {
+    let mut values = url::form_urlencoded::parse(query?.as_bytes())
+        .filter(|(key, _)| key == "return_to")
+        .map(|(_, value)| value);
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    safe_return_path(&value).map(str::to_owned)
+}
+
 async fn fetch_json<T: DeserializeOwned>(
     http: &reqwest::Client,
     url: &str,
@@ -649,12 +767,17 @@ async fn methods(State(state): State<AppState>) -> Json<Methods> {
     })
 }
 
-async fn start(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
+async fn start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Response, AppError> {
     let oidc = state.oidc().ok_or(AppError::NotFound)?;
     let previous_session_key = state
         .auth()
         .and_then(|auth| session_cookie(&headers).and_then(|cookie| auth.session_key(cookie)));
-    oidc.begin(previous_session_key.as_deref())
+    let return_path = requested_return_path(query.as_deref());
+    oidc.begin(previous_session_key.as_deref(), return_path.as_deref())
 }
 
 async fn callback(
@@ -847,7 +970,7 @@ mod tests {
     #[test]
     fn state_requires_the_starting_browser_and_is_single_use() {
         let (service, _) = service_and_key();
-        let response = service.begin(None).unwrap();
+        let response = service.begin(None, None).unwrap();
         let location = response
             .headers()
             .get(header::LOCATION)
@@ -887,7 +1010,7 @@ mod tests {
     fn transaction_cookie_is_authenticated_and_carries_no_server_state() {
         let (service, _) = service_and_key();
         let previous = [9_u8; 32];
-        let response = service.begin(Some(&previous)).unwrap();
+        let response = service.begin(Some(&previous), None).unwrap();
         let location = response.headers().get(header::LOCATION).unwrap();
         let location = Url::parse(location.to_str().unwrap()).unwrap();
         let query = |name: &str| {
@@ -973,7 +1096,7 @@ email = "alice@example.com"
         let (_directory, auth) = local_auth();
         let logs = crate::audit::capture::start();
         let (mut service, private) = service_and_key();
-        let begin = service.begin(None).unwrap();
+        let begin = service.begin(None, None).unwrap();
         let location = Url::parse(
             begin
                 .headers()
@@ -1106,6 +1229,200 @@ email = "alice@example.com"
                 "log contains a secret: {captured}"
             );
         }
+        server.abort();
+    }
+
+    #[test]
+    fn return_paths_are_same_origin_app_locations_only() {
+        for accepted in [
+            "/",
+            "/writable/Feature%20demo/Photos",
+            "/writable/caf%C3%A9/%E2%9C%93",
+            "/writable/docs?preview=notes%2Freadme.md",
+            "/writable?view=rendered&path=a",
+            "/trash",
+            "/apiary/notes",
+            "/healthy",
+        ] {
+            assert_eq!(safe_return_path(accepted), Some(accepted), "{accepted}");
+        }
+        let overlong = format!("/{}", "a".repeat(MAX_RETURN_PATH));
+        for rejected in [
+            "",
+            "writable/notes",
+            "//evil.example",
+            "//evil.example/path",
+            "/\\evil.example",
+            "/%5Cevil.example",
+            "/%2F%2Fevil.example",
+            "/%2f/evil.example",
+            "https://evil.example/",
+            "javascript:alert(1)",
+            "/writable/a\r\nSet-Cookie: x=y",
+            "/writable/%0D%0ASet-Cookie:%20x=y",
+            "/writable?preview=%0A",
+            "/writable/\tnotes",
+            "/writable/a b",
+            "/writable/caf\u{e9}",
+            "/writable#fragment",
+            "/writable/%zz",
+            "/writable/%C3",
+            "/writable/../api/v1/session",
+            "/%2E%2E/api/v1/session",
+            "/./api",
+            "/api",
+            "/api/v1/auth/logout",
+            "/API/v1/session",
+            "/%61pi/v1/session",
+            "/api?x=1",
+            "/health/live",
+            "/health",
+            overlong.as_str(),
+        ] {
+            assert_eq!(safe_return_path(rejected), None, "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn start_reads_one_return_to_parameter_and_drops_invalid_values() {
+        assert_eq!(
+            requested_return_path(Some("return_to=%2Fwritable%2FFeature%2520demo")),
+            Some("/writable/Feature%20demo".into())
+        );
+        for query in [
+            None,
+            Some(""),
+            Some("other=%2Fwritable"),
+            Some("return_to=%2Fa&return_to=%2Fb"),
+            Some("return_to=%2F%2Fevil.example"),
+            Some("return_to=https%3A%2F%2Fevil.example"),
+        ] {
+            assert_eq!(requested_return_path(query), None, "{query:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_returns_to_the_location_bound_to_its_own_transaction() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_directory, auth) = local_auth();
+        let (mut service, private) = service_and_key();
+        let issued = Arc::new(Mutex::new(String::new()));
+        let provider_token = Arc::clone(&issued);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let token = provider_token.lock().unwrap().clone();
+                async move { Json(json!({"id_token": token})) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+        Arc::get_mut(&mut service.inner)
+            .unwrap()
+            .metadata
+            .token_endpoint = format!("http://{address}/token");
+        let app = crate::app::router(AppState::with_auth(true, auth).with_oidc_service(service));
+
+        // Starts a sign-in and returns its state and transaction cookie, with
+        // the provider primed to sign a token for its nonce.
+        let start = |return_to: Option<&'static str>| {
+            let app = app.clone();
+            let issued = Arc::clone(&issued);
+            let private = private.clone();
+            let uri = match return_to {
+                Some(path) => format!(
+                    "/api/v1/auth/oidc/start?{}",
+                    url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("return_to", path)
+                        .finish()
+                ),
+                None => "/api/v1/auth/oidc/start".into(),
+            };
+            async move {
+                let response = app
+                    .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+                let location = response.headers().get(header::LOCATION).unwrap();
+                let location = Url::parse(location.to_str().unwrap()).unwrap();
+                if let Some(path) = return_to {
+                    assert!(!location.as_str().contains(path));
+                }
+                let query = |name: &str| {
+                    location
+                        .query_pairs()
+                        .find(|(key, _)| key == name)
+                        .unwrap()
+                        .1
+                        .into_owned()
+                };
+                *issued.lock().unwrap() = token(
+                    &private,
+                    "https://id.example.com",
+                    "crabinet",
+                    &query("nonce"),
+                    unix_time().unwrap() + 300,
+                    true,
+                );
+                let cookie = response.headers().get(header::SET_COOKIE).unwrap();
+                let cookie = cookie.to_str().unwrap().split(';').next().unwrap();
+                (query("state"), cookie.to_owned())
+            }
+        };
+        let callback = |state: String, cookie: Option<String>| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::get(format!(
+                    "/api/v1/auth/oidc/callback?code=sample-code&state={state}"
+                ));
+                if let Some(cookie) = cookie {
+                    request = request.header(header::COOKIE, cookie);
+                }
+                app.oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+        let location = |response: &Response| {
+            response
+                .headers()
+                .get(header::LOCATION)
+                .map(|value| value.to_str().unwrap().to_owned())
+        };
+
+        let deep_link = "/writable/Feature%20demo/Photos?preview=Photos%2Fcrab.png";
+        let (state, cookie) = start(Some(deep_link)).await;
+        let response = callback(state, Some(cookie)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response).as_deref(), Some(deep_link));
+
+        for fallback in [None, Some("//evil.example"), Some("/api/v1/session")] {
+            let (state, cookie) = start(fallback).await;
+            let response = callback(state, Some(cookie)).await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(location(&response).as_deref(), Some("/"), "{fallback:?}");
+        }
+
+        // Another location cannot be swapped into a transaction, and none is
+        // honored without the browser's transaction cookie.
+        let (state, cookie) = start(Some("/writable/a")).await;
+        let tampered = cookie.replacen(
+            &URL_SAFE_NO_PAD.encode("/writable/a"),
+            &URL_SAFE_NO_PAD.encode("/writable/b"),
+            1,
+        );
+        assert_ne!(tampered, cookie);
+        let response = callback(state.clone(), Some(tampered)).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(location(&response), None);
+        let response = callback(state, None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(location(&response), None);
         server.abort();
     }
 }
