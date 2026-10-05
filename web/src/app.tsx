@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "preact/hooks";
@@ -56,6 +57,7 @@ import {
   type DirectoryPage,
   type DefaultFolder,
   type EntryMetadata,
+  type ListedFolderSize,
   type PreviewDocument,
   type Session,
   type Share,
@@ -961,6 +963,9 @@ function DirectoryBrowser({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiError>();
   const [refreshKey, setRefreshKey] = useState(0);
+  // Counts first pages as they arrive, so folder sizes are asked for again
+  // only once a reload has listed the sizes still cached.
+  const [listingRevision, setListingRevision] = useState(0);
   const [operation, setOperation] = useState<EntryOperation>();
   const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
@@ -993,6 +998,17 @@ function DirectoryBrowser({
         (showHiddenFiles || !entry.name.startsWith(".")),
     ) ?? [];
   const entryListRef = useRef<HTMLDivElement>(null);
+  // Sizes the server already had cached come with the listing. A page left
+  // from the previous folder, for the render before it is cleared, lends
+  // none.
+  const listedFolderSizes = useMemo(() => {
+    const sizes = new Map<string, ListedFolderSize>();
+    if (page?.shareId !== share.id || page.path !== route.path) return sizes;
+    for (const entry of page.entries) {
+      if (entry.folderSize) sizes.set(entry.name, entry.folderSize);
+    }
+    return sizes;
+  }, [page, route.path, share.id]);
   const folderSizes = useFolderSizes({
     api,
     shareId: share.id,
@@ -1000,8 +1016,9 @@ function DirectoryBrowser({
     folders: visibleEntries
       .filter((entry) => entry.kind === "directory")
       .map((entry) => entry.name),
+    listed: listedFolderSizes,
     enabled: folderSizesEnabled && route.view !== "trash",
-    revision: refreshKey,
+    revision: listingRevision,
     container: entryListRef,
     onSessionExpired,
   });
@@ -1326,6 +1343,7 @@ function DirectoryBrowser({
         (result) => {
           if (controller.signal.aborted) return;
           setPage(result);
+          setListingRevision((value) => value + 1);
           setLoading(false);
           if (shouldFocusHeading) {
             requestAnimationFrame(() => headingRef.current?.focus());
@@ -2049,9 +2067,10 @@ function EntryList({
               beginEntryDrag(event, shareId, entryPath, entry)
             }
           >
-            {/* The icon doubles as the row's checkbox: hovering or focusing
-                the row, or selecting anything, shows the checkbox in its
-                place, and a tap on it toggles the row (see styles.css). */}
+            {/* The icon doubles as the row's checkbox: hovering the icon,
+                focusing the checkbox from the keyboard, or selecting
+                anything shows the checkbox in its place, and a tap on it
+                toggles the row (see styles.css). */}
             <label
               class="entry-select"
               onMouseDown={(event) => {
@@ -2089,7 +2108,7 @@ function EntryList({
                     });
                   }}
                 >
-                  {entry.name}
+                  <EntryNameText name={entry.name} />
                 </a>
               ) : (
                 <a
@@ -2108,7 +2127,7 @@ function EntryList({
                     );
                   }}
                 >
-                  {entry.name}
+                  <EntryNameText name={entry.name} />
                 </a>
               )}
               <span class="entry-kind">
@@ -2471,6 +2490,7 @@ function PreviewPanel({
               svgUrl={`${svgPreviewUrl(shareId, path)}&v=${assetRevision}`}
               thumbnailUrl={`${thumbnailUrl(shareId, path, 1600)}&v=${assetRevision}`}
               inlineUrl={`${openUrl(shareId, path)}&v=${assetRevision}`}
+              downloadUrl={downloadUrl(shareId, path)}
               filename={filename}
             />
           )}
@@ -2489,6 +2509,7 @@ function PreviewContent({
   svgUrl,
   thumbnailUrl,
   inlineUrl,
+  downloadUrl,
   filename,
 }: {
   document: PreviewDocument;
@@ -2502,6 +2523,8 @@ function PreviewContent({
   thumbnailUrl: string;
   /** The inline route, for media elements and the PDF first-page preview. */
   inlineUrl: string;
+  /** The attachment download, offered where the browser cannot show a file. */
+  downloadUrl: string;
   filename: string;
 }) {
   // Only the head of a large HTML file arrived, so the panel shows it as
@@ -2536,6 +2559,7 @@ function PreviewContent({
         filename={filename}
         originalUrl={document.kind === "image" ? imageUrl : undefined}
         thumbnailUrl={document.thumbnailable ? thumbnailUrl : undefined}
+        downloadUrl={downloadUrl}
       />
     );
   }
@@ -2665,7 +2689,10 @@ type ImagePreviewState =
   | { mode: "checking"; attempt: number; checked: boolean }
   | { mode: "original" }
   | { mode: "busy"; attempt: number }
-  | { mode: "failed"; reason: "too-large" | "unsupported" | "other" };
+  | {
+      mode: "failed";
+      reason: "too-large" | "unsupported" | "undecodable" | "other";
+    };
 
 /**
  * Shows the server thumbnail, which keeps large photos out of the browser,
@@ -2673,18 +2700,21 @@ type ImagePreviewState =
  * `<img>` cannot see why it failed, so a failed thumbnail is requested once
  * more to read the status: `429` offers a retry, anything else falls back to
  * the original image or, for RAW files, explains why nothing can be shown.
+ * A HEIC or HEIF original that the browser cannot decode offers its download.
  */
 function ImagePreview({
   document,
   filename,
   originalUrl,
   thumbnailUrl,
+  downloadUrl,
 }: {
   document: PreviewDocument;
   filename: string;
   /** The browser-decodable original, absent for RAW files. */
   originalUrl?: string;
   thumbnailUrl?: string;
+  downloadUrl?: string;
 }) {
   const [state, setState] = useState<ImagePreviewState>(() =>
     thumbnailUrl
@@ -2724,6 +2754,14 @@ function ImagePreview({
   }, [state, thumbnailUrl]);
 
   const isRaw = document.kind === "raw";
+  // Served only as the original, which some browsers cannot decode: Safari
+  // shows HEIC and HEIF, Chromium and Firefox do not.
+  const browserDecodedFormat =
+    document.mimeType === "image/heic"
+      ? "HEIC"
+      : document.mimeType === "image/heif"
+        ? "HEIF"
+        : undefined;
   const caption = isRaw
     ? "RAW image"
     : `${document.mimeType ?? "Image"}${
@@ -2748,6 +2786,24 @@ function ImagePreview({
         >
           Try preview again
         </Button>
+      </div>
+    );
+  }
+
+  if (state.mode === "failed" && state.reason === "undecodable") {
+    return (
+      <div class="preview-error" role="alert">
+        <h3>No preview in this browser</h3>
+        <p>
+          This browser can't display {browserDecodedFormat} images. Download it
+          to view.
+        </p>
+        {downloadUrl && (
+          <a class="button button-secondary" href={downloadUrl}>
+            <Download size={17} aria-hidden="true" />
+            Download image
+          </a>
+        )}
       </div>
     );
   }
@@ -2801,7 +2857,10 @@ function ImagePreview({
               checked: state.checked,
             });
           } else {
-            setState({ mode: "failed", reason: "other" });
+            setState({
+              mode: "failed",
+              reason: browserDecodedFormat ? "undecodable" : "other",
+            });
           }
         }}
       />
@@ -3750,6 +3809,23 @@ function itemCount(count: number): string {
 
 function joinPath(path: string, name: string): string {
   return path ? `${path}/${name}` : name;
+}
+
+/**
+ * An entry name that, when it must wrap, breaks before its extension rather
+ * than inside it ("chime" / ".mp3", not "chime.mp" / "3"). Breaking inside a
+ * word stays the last resort for a name with no such point.
+ */
+function EntryNameText({ name }: { name: string }) {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return <>{name}</>;
+  return (
+    <>
+      {name.slice(0, dot)}
+      <wbr />
+      {name.slice(dot)}
+    </>
+  );
 }
 
 function breadcrumbItems(path: string): Array<{ name: string; path: string }> {

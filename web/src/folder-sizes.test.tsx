@@ -2,7 +2,12 @@ import { render, screen, waitFor } from "@testing-library/preact";
 import { useRef } from "preact/hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, type ApiClient, type FolderSize } from "./api";
+import {
+  ApiError,
+  type ApiClient,
+  type FolderSize,
+  type ListedFolderSize,
+} from "./api";
 import {
   FolderSizeValue,
   folderSizeConcurrency,
@@ -35,11 +40,13 @@ function deferredSizes() {
 function Harness({
   folderSize,
   folders,
+  listed,
   enabled = true,
   revision = 0,
 }: {
   folderSize: ApiClient["folderSize"];
   folders: string[];
+  listed?: ReadonlyMap<string, ListedFolderSize>;
   enabled?: boolean;
   revision?: number;
 }) {
@@ -49,6 +56,7 @@ function Harness({
     shareId: "docs",
     path: "base",
     folders,
+    listed,
     enabled,
     revision,
     container,
@@ -209,6 +217,70 @@ describe("folder sizes", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows a listed size at once and asks only for the others", async () => {
+    const { folderSize, pending } = deferredSizes();
+    const listed = new Map([
+      ["a", { size: 7, complete: true }],
+      ["c", { size: 9, complete: false }],
+    ]);
+    render(
+      <Harness
+        folderSize={folderSize}
+        folders={["a", "b", "c"]}
+        listed={listed}
+      />,
+    );
+
+    expect(screen.getByTestId("a")).toHaveTextContent("7 B");
+    expect(screen.getByTestId("c")).toHaveTextContent("≥ At least 9 B");
+    expect(
+      screen.getAllByRole("img", { name: "Calculating size" }),
+    ).toHaveLength(1);
+    await waitFor(() => expect(pending).toHaveLength(1));
+    expect(pending[0]!.path).toBe("base/b");
+    pending[0]!.resolve(3);
+    expect(await screen.findByText("3 B")).toBeVisible();
+    expect(folderSize).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for a folder a reload no longer lists, keeping its size meanwhile", async () => {
+    const { folderSize, pending } = deferredSizes();
+    const { rerender } = render(
+      <Harness
+        folderSize={folderSize}
+        folders={["a"]}
+        listed={new Map([["a", { size: 7, complete: true }]])}
+      />,
+    );
+    expect(screen.getByTestId("a")).toHaveTextContent("7 B");
+
+    // A reload that still lists the size asks for nothing.
+    rerender(
+      <Harness
+        folderSize={folderSize}
+        folders={["a"]}
+        listed={new Map([["a", { size: 8, complete: true }]])}
+        revision={1}
+      />,
+    );
+    expect(await screen.findByText("8 B")).toBeVisible();
+    expect(folderSize).not.toHaveBeenCalled();
+
+    // One whose cached size expired asks, and shows the last size meanwhile.
+    rerender(
+      <Harness
+        folderSize={folderSize}
+        folders={["a"]}
+        listed={new Map()}
+        revision={2}
+      />,
+    );
+    await waitFor(() => expect(pending).toHaveLength(1));
+    expect(screen.getByTestId("a")).toHaveTextContent("8 B");
+    pending[0]!.resolve(11);
+    expect(await screen.findByText("11 B")).toBeVisible();
   });
 
   it("asks for nothing when disabled", () => {

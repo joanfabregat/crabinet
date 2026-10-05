@@ -164,13 +164,13 @@ export function EntryActionButtons({
         <CopyPathButton
           value={copyPath}
           label={`Copy full path for ${entry.name}`}
-          className="entry-action"
+          className="entry-action entry-action-secondary"
           size={18}
         />
         {writable && (
           <>
             <button
-              class="entry-action tooltip-action"
+              class="entry-action entry-action-secondary tooltip-action"
               type="button"
               aria-label={`Rename ${entry.name}`}
               data-tooltip="Rename"
@@ -179,7 +179,7 @@ export function EntryActionButtons({
               <Pencil size={18} aria-hidden="true" />
             </button>
             <button
-              class="entry-action tooltip-action"
+              class="entry-action entry-action-secondary tooltip-action"
               type="button"
               aria-label={`Move ${entry.name}`}
               data-tooltip="Move to…"
@@ -213,7 +213,9 @@ export function EntryActionButtons({
 
 /**
  * On phones the row's actions fold into one "⋯" button so each row stays a
- * single line. Wider screens show the icon buttons instead (see styles.css).
+ * single line. Wider screens show the icon buttons instead, and a list too
+ * narrow for all of them keeps Download and Delete beside this menu, which
+ * still holds every action (see styles.css).
  */
 function EntryActionMenu({
   entry,

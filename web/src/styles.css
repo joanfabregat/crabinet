@@ -2068,8 +2068,11 @@ html.preview-fullscreen-open body {
   overflow-wrap: anywhere;
 }
 
+/* The list is a size container, so rows adapt to the width the layout
+   leaves it (beside the tree, a preview, or both), not to the viewport. */
 .entry-list {
   border-top: 1px solid var(--line);
+  container: entry-list / inline-size;
 }
 
 .entry-row {
@@ -2097,9 +2100,11 @@ html.preview-fullscreen-open body {
 
 /* The row's file-type icon doubles as its checkbox. The checkbox sits on
    top of the icon, invisible but focusable and clickable, so a tap on the
-   icon toggles the row even on a touch screen. Hovering or focusing the row,
-   or selecting anything in the list, swaps the icon for the visible
-   checkbox in the same place, so nothing shifts. */
+   icon toggles the row even on a touch screen. Pointing at the icon itself,
+   focusing the checkbox from the keyboard, or selecting anything in the list
+   swaps the icon for the visible checkbox in the same place, so nothing
+   shifts. Hovering elsewhere in the row, or focusing or tapping its name,
+   leaves the icon alone. */
 .entry-select {
   align-items: center;
   cursor: pointer;
@@ -2113,19 +2118,31 @@ html.preview-fullscreen-open body {
 }
 
 .entry-checkbox {
+  height: 0.875rem;
   opacity: 0;
+  width: 0.875rem;
 }
 
-.entry-row:hover .entry-checkbox,
-.entry-row:focus-within .entry-checkbox,
+.entry-select:has(.entry-checkbox:focus-visible) .entry-checkbox,
 .entry-list.has-checked .entry-checkbox {
   opacity: 1;
 }
 
-.entry-row:hover .entry-select .entry-icon,
-.entry-row:focus-within .entry-select .entry-icon,
+.entry-select:has(.entry-checkbox:focus-visible) .entry-icon,
 .entry-list.has-checked .entry-select .entry-icon {
   visibility: hidden;
+}
+
+/* A touch screen keeps the last tap's hover, so only a real pointer reveals
+   the checkbox by hovering. */
+@media (hover: hover) {
+  .entry-select:hover .entry-checkbox {
+    opacity: 1;
+  }
+
+  .entry-select:hover .entry-icon {
+    visibility: hidden;
+  }
 }
 
 /* A larger tap target that still leaves the layout alone. */
@@ -2275,6 +2292,64 @@ html.preview-fullscreen-open body {
 
 .entry-action:hover {
   background: var(--selected-bg);
+}
+
+/* A narrower list (a preview beside it, or a tablet) tightens its rows, so
+   the name keeps more of the width: less padding and gap, no minimum width
+   for the actions, and the action buttons closer together. Touch screens
+   keep their 2.75rem tap targets (see the pointer: coarse rules below). */
+@container entry-list (max-width: 44rem) {
+  .entry-row {
+    gap: 0.6rem;
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto auto;
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .entry-actions {
+    flex-wrap: nowrap;
+    gap: 0;
+  }
+
+  .entry-actions-inline {
+    gap: 0;
+  }
+
+  .entry-actions-inline .entry-action-danger {
+    margin-left: 0.25rem;
+  }
+
+  .entry-action {
+    height: 1.875rem;
+    padding: 0.25rem;
+    width: 1.875rem;
+  }
+}
+
+/* Where even those buttons would crowd the name, the rarer actions (copy
+   path, rename, move) leave the row for its "⋯" menu, which holds every
+   action, and Download and Delete stay beside it. Touch targets are wider,
+   so touch screens switch sooner. */
+@container entry-list (max-width: 28rem) {
+  .entry-action-secondary {
+    display: none;
+  }
+
+  .entry-menu {
+    display: block;
+  }
+}
+
+@media (pointer: coarse) {
+  @container entry-list (max-width: 36rem) {
+    .entry-action-secondary {
+      display: none;
+    }
+
+    .entry-menu {
+      display: block;
+    }
+  }
 }
 
 .modal-backdrop,

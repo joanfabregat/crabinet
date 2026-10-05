@@ -621,12 +621,30 @@ test.describe("writable share operations", () => {
     const row = listing.getByRole("listitem").filter({
       has: page.getByRole("checkbox", { name: "Select select-a.txt" }),
     });
-    // The checkbox takes the icon's place only while the row is hovered.
+    // The checkbox takes the icon's place only while the icon itself is
+    // hovered, or the checkbox has keyboard focus; hovering the rest of the
+    // row or focusing its name leaves the icon.
     await page.mouse.move(0, 0);
     await expect(first).toHaveCSS("opacity", "0");
-    await row.hover();
+    const name = row.getByRole("link", { name: "select-a.txt", exact: true });
+    await name.hover();
+    await expect(first).toHaveCSS("opacity", "0");
+    await name.focus();
+    await expect(first).toHaveCSS("opacity", "0");
+    await expect(row.locator(".entry-icon")).toBeVisible();
+    await page.keyboard.press("Shift+Tab");
+    await expect(first).toBeFocused();
     await expect(first).toHaveCSS("opacity", "1");
     await expect(row.locator(".entry-icon")).toBeHidden();
+    await name.focus();
+    await expect(first).toHaveCSS("opacity", "0");
+    await row.locator(".entry-select").hover();
+    await expect(first).toHaveCSS("opacity", "1");
+    await expect(row.locator(".entry-icon")).toBeHidden();
+    // Smaller than the icon it replaces.
+    const box = await first.boundingBox();
+    expect(box?.width).toBeLessThanOrEqual(15);
+    expect(box?.width).toBeGreaterThanOrEqual(13);
 
     await first.click();
     await last.click({ modifiers: ["Shift"] });

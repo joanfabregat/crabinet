@@ -1379,6 +1379,46 @@ describe("image thumbnails", () => {
   });
 
   it.each([
+    ["image/heic", "photo.heic", "HEIC"],
+    ["image/heif", "photo.heif", "HEIF"],
+  ] as const)(
+    "offers the download when the browser cannot decode %s",
+    async (mimeType, name, format) => {
+      const image = await renderPreview(
+        { ...imageDocument, mimeType, thumbnailable: false },
+        name,
+      );
+      expect(image).toHaveAttribute(
+        "src",
+        `/api/v1/shares/docs/preview/image?path=${name}&v=0-0`,
+      );
+      fireEvent.error(image);
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(
+        `This browser can't display ${format} images. Download it to view.`,
+      );
+      expect(
+        within(alert).getByRole("link", { name: "Download image" }),
+      ).toHaveAttribute("href", `/api/v1/shares/docs/download?path=${name}`);
+      expect(
+        screen.queryByRole("img", { name: `Preview of ${name}` }),
+      ).toBeNull();
+    },
+  );
+
+  it("keeps the generic message when another original fails", async () => {
+    const image = await renderPreview(
+      { ...imageDocument, mimeType: "image/avif", thumbnailable: false },
+      "photo.avif",
+    );
+    fireEvent.error(image);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("could not be shown");
+    expect(within(alert).queryByRole("link")).toBeNull();
+  });
+
+  it.each([
     [413, "thumbnail_too_large"],
     [415, "unsupported_entry"],
   ])(

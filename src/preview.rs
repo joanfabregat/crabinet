@@ -877,8 +877,9 @@ pub fn load(
             StreamedMedia::Image(image) => (image.width, image.height),
             _ => (None, None),
         };
-        // AVIF is served as the original only: no permissively licensed
-        // pure-Rust decoder exists. An animated GIF or WebP is served as the
+        // AVIF and HEIF (including HEIC) are served as the original only: no
+        // permissively licensed pure-Rust decoder exists, and only some
+        // browsers decode them. An animated GIF or WebP is served as the
         // original too, because its thumbnail would be a still first frame.
         let thumbnailable = match media {
             StreamedMedia::Image(ImageInfo {
@@ -1449,14 +1450,64 @@ fn classify_image(bytes: &[u8]) -> Option<ImageInfo> {
             height,
         });
     }
-    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && bytes[8..12].starts_with(b"avif") {
+    if let Some(mime_type) = classify_heif(bytes) {
         return Some(ImageInfo {
-            mime_type: "image/avif",
+            mime_type,
             width: None,
             height: None,
         });
     }
     None
+}
+
+/// AVIF brands. A file naming one is AVIF whatever else it lists, because an
+/// AVIF file is also a HEIF (`mif1`/`msf1`) file.
+const AVIF_BRANDS: [&[u8; 4]; 2] = [b"avif", b"avis"];
+/// HEVC-coded HEIF brands: still images (`heic`, `heix`), their multi-view
+/// and scalable variants (`heim`, `heis`), and image sequences (`hevc`,
+/// `hevx`). All are served as `image/heic`.
+const HEIC_BRANDS: [&[u8; 4]; 6] = [b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx"];
+/// Generic HEIF structural brands, served as `image/heif` when no AVIF or
+/// HEVC brand says more.
+const HEIF_BRANDS: [&[u8; 4]; 4] = [b"mif1", b"mif2", b"msf1", b"miaf"];
+
+/// AVIF, HEIC, or another HEIF image, from the brands of a leading `ftyp`
+/// box. None of them is decoded on the server: they are served as the
+/// original for the browser to decode. A major brand `avif` is AVIF even in a
+/// box that is not complete within the header, as it always has been; every
+/// other match needs a complete `ftyp` box.
+fn classify_heif(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return None;
+    }
+    if bytes[8..12].starts_with(b"avif") {
+        return Some("image/avif");
+    }
+    let brands = ftyp_brands(bytes)?;
+    let names = |list: &[&[u8; 4]]| brands.clone().any(|brand| list.contains(&brand));
+    if names(&AVIF_BRANDS) {
+        Some("image/avif")
+    } else if names(&HEIC_BRANDS) {
+        Some("image/heic")
+    } else if names(&HEIF_BRANDS) {
+        Some("image/heif")
+    } else {
+        None
+    }
+}
+
+/// The major and compatible brands of a complete leading `ftyp` box.
+fn ftyp_brands(header: &[u8]) -> Option<impl Iterator<Item = &[u8; 4]> + Clone> {
+    if header.len() < 16 || &header[4..8] != b"ftyp" {
+        return None;
+    }
+    let size = usize::try_from(u32::from_be_bytes(header[0..4].try_into().ok()?)).ok()?;
+    if size < 16 || size % 4 != 0 || size > header.len() {
+        return None;
+    }
+    let major: &[u8; 4] = header[8..12].try_into().ok()?;
+    let (compatible, _) = header[16..size].as_chunks::<4>();
+    Some(std::iter::once(major).chain(compatible))
 }
 
 fn validated_image(bytes: &[u8]) -> Result<ImageInfo, PreviewError> {
@@ -1515,9 +1566,9 @@ impl StreamedMedia {
 
 /// Classifies a bounded file header by signature only.
 ///
-/// Raster images come first, so an AVIF `ftyp` is never served as video and
-/// image polyglots keep their pixel cap. `Ok(None)` means the bytes match no
-/// streamed type; the caller may then try the UTF-8 text rules.
+/// Raster images come first, so an AVIF or HEIF `ftyp` is never served as
+/// video and image polyglots keep their pixel cap. `Ok(None)` means the bytes
+/// match no streamed type; the caller may then try the UTF-8 text rules.
 fn classify_streamed(header: &[u8]) -> Result<Option<StreamedMedia>, PreviewError> {
     if let Some(image) = classify_image(header) {
         validate_image_dimensions(image)?;
@@ -1576,29 +1627,21 @@ const MP4_VIDEO_BRANDS: [&[u8; 4]; 11] = [
 /// MP4 major brands for audio-only files (`.m4a`, `.m4b`).
 const MP4_AUDIO_BRANDS: [&[u8; 4]; 2] = [b"M4A ", b"M4B "];
 /// Still-image and image-sequence brands that must never open as video.
-const IMAGE_BRANDS: [&[u8; 4]; 11] = [
+/// [`classify_image`] claims these first; this list keeps the MP4 rules safe
+/// on their own.
+const IMAGE_BRANDS: [&[u8; 4]; 12] = [
     b"avif", b"avis", b"mif1", b"mif2", b"msf1", b"miaf", b"heic", b"heix", b"heim", b"heis",
-    b"hevc",
+    b"hevc", b"hevx",
 ];
 
 /// An ISO base media file must start with a complete `ftyp` box whose major
 /// brand is allowlisted and whose compatible brands name no image format.
 fn classify_iso_bmff(header: &[u8]) -> Option<StreamedMedia> {
-    if header.len() < 16 || &header[4..8] != b"ftyp" {
+    let mut brands = ftyp_brands(header)?;
+    if brands.clone().any(|brand| IMAGE_BRANDS.contains(&brand)) {
         return None;
     }
-    let size = usize::try_from(u32::from_be_bytes(header[0..4].try_into().ok()?)).ok()?;
-    if size < 16 || size % 4 != 0 || size > header.len() {
-        return None;
-    }
-    let major: &[u8; 4] = header[8..12].try_into().ok()?;
-    let (compatible, _) = header[16..size].as_chunks::<4>();
-    if std::iter::once(major)
-        .chain(compatible)
-        .any(|brand| IMAGE_BRANDS.contains(&brand))
-    {
-        return None;
-    }
+    let major = brands.next()?;
     if MP4_AUDIO_BRANDS.contains(&major) {
         return Some(StreamedMedia::Audio("audio/mp4"));
     }
@@ -2066,11 +2109,11 @@ mod tests {
 
     #[test]
     fn oversized_binary_is_unsupported_not_too_large() {
-        // A HEIC-like ISO-BMFF file has no streamed type and is binary.
-        let mut heic = 24_u32.to_be_bytes().to_vec();
-        heic.extend_from_slice(b"ftypheic\0\0\0\0mif1heic");
-        heic.resize(4096, 0);
-        let (_temporary, share, grant, path) = fixture(&heic, "photo.heic");
+        // A QuickTime ISO-BMFF file has no streamed type and is binary.
+        let mut movie = 24_u32.to_be_bytes().to_vec();
+        movie.extend_from_slice(b"ftypqt  \0\0\0\0qt  qt  ");
+        movie.resize(4096, 0);
+        let (_temporary, share, grant, path) = fixture(&movie, "movie.mov");
         let authorized = share
             .authorize(Some(&grant), GlobalPolicy::default())
             .expect("authorized");
@@ -2988,18 +3031,36 @@ mod tests {
 
     #[test]
     fn hostile_and_ambiguous_signatures_get_no_streamed_type() {
-        // AVIF stays an image; image brands never become video.
-        assert_eq!(
-            streamed(&ftyp(b"avif", &[b"avif", b"mif1"])),
-            Some((PreviewKind::Image, "image/avif"))
-        );
+        // AVIF and HEIF stay images; image brands never become video. An AVIF
+        // brand wins over the HEIF brands every AVIF file also lists, and an
+        // HEVC brand over the generic HEIF ones.
+        for (major, compatible, media_type) in [
+            (b"avif", vec![b"avif", b"mif1"], "image/avif"),
+            (b"mif1", vec![b"avif"], "image/avif"),
+            (b"mif1", vec![b"mif1", b"miaf", b"avif"], "image/avif"),
+            (b"msf1", vec![b"avis", b"msf1"], "image/avif"),
+            (b"isom", vec![b"avif"], "image/avif"),
+            (b"heic", vec![b"mif1", b"heic"], "image/heic"),
+            (b"heix", vec![b"mif1", b"heix"], "image/heic"),
+            (b"mif1", vec![b"mif1", b"heic"], "image/heic"),
+            (b"msf1", vec![b"msf1", b"hevc"], "image/heic"),
+            (b"hevx", vec![b"msf1"], "image/heic"),
+            (b"heim", vec![b"mif1"], "image/heic"),
+            (b"mp42", vec![b"heic"], "image/heic"),
+            (b"mif1", vec![b"mif1", b"miaf"], "image/heif"),
+            (b"msf1", vec![b"msf1"], "image/heif"),
+        ] {
+            assert_eq!(
+                streamed(&ftyp(major, &compatible)),
+                Some((PreviewKind::Image, media_type)),
+                "{} {compatible:?}",
+                String::from_utf8_lossy(major)
+            );
+        }
         for (major, compatible) in [
-            (b"mif1", vec![b"avif"]),
-            (b"isom", vec![b"avif"]),
-            (b"mp42", vec![b"heic"]),
-            (b"heic", vec![b"mif1"]),
             (b"qt  ", vec![b"qt  "]),
             (b"3gp4", vec![b"isom"]),
+            (b"crx ", vec![b"crx "]),
         ] {
             assert_eq!(
                 streamed(&ftyp(major, &compatible)),
@@ -3008,10 +3069,16 @@ mod tests {
                 String::from_utf8_lossy(major)
             );
         }
-        // A truncated or oversized ftyp box is not trusted.
+        // A truncated or oversized ftyp box is not trusted, for HEIF either.
         let mut truncated = ftyp(b"isom", &[b"isom"]);
         truncated[3] = 0xf0;
         assert_eq!(streamed(&truncated), None);
+        let mut truncated = ftyp(b"heic", &[b"mif1", b"heic"]);
+        truncated[3] = 0xf0;
+        assert_eq!(streamed(&truncated), None);
+        let mut unaligned = ftyp(b"mif1", &[b"heic"]);
+        unaligned[3] = 18;
+        assert_eq!(streamed(&unaligned), None);
 
         // Active documents and text are never a streamed type, whatever the
         // name says.
@@ -3579,6 +3646,7 @@ mod tests {
         );
         write_fixture(&fixture, "report.pdf", &pdf_bytes());
         write_fixture(&fixture, "clip.mp4", &ftyp(b"isom", &[b"isom"]));
+        write_fixture(&fixture, "photo.heic", &ftyp(b"heic", &[b"mif1", b"heic"]));
         write_fixture(&fixture, "song.mp3", &mp3_frames());
         write_fixture(
             &fixture,
@@ -3589,6 +3657,8 @@ mod tests {
         for (name, media_type, size) in [
             ("report.pdf", "application/pdf", "215"),
             ("clip.mp4", "video/mp4", "28"),
+            // Decoded by the browser's image decoder, like AVIF.
+            ("photo.heic", "image/heic", "32"),
             ("song.mp3", "audio/mpeg", "834"),
             ("pixel.png", "image/png", "24"),
             // Text beyond the 32-byte preview limit still opens.
