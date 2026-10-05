@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   browserNavigation,
   directoryUrl,
+  oidcStartUrl,
   parentPath,
   previewRouteUrl,
   renderedHtmlViewUrl,
@@ -89,6 +90,27 @@ describe("browser navigation", () => {
     expect(parentPath("one/two/three")).toBe("one/two");
     expect(parentPath("one")).toBe("");
     expect(parentPath("")).toBe("");
+  });
+
+  it("carries the current location into Google sign-in except at the root", () => {
+    expect(oidcStartUrl({ shareId: null, path: "" })).toBe(
+      "/api/v1/auth/oidc/start",
+    );
+    const start = new URL(
+      oidcStartUrl(at("/writable/Feature%20demo/Photos?view=full")),
+      "https://crabinet.test",
+    );
+    expect(start.pathname).toBe("/api/v1/auth/oidc/start");
+    expect([...start.searchParams.keys()]).toEqual(["return_to"]);
+    expect(start.searchParams.get("return_to")).toBe(
+      "/writable/Feature%20demo/Photos?view=full",
+    );
+    expect(
+      new URL(
+        oidcStartUrl({ shareId: null, path: "", view: "trash" }),
+        "https://crabinet.test",
+      ).searchParams.get("return_to"),
+    ).toBe("/trash");
   });
 
   it("addresses a file previewed from its own folder by the file path", () => {

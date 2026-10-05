@@ -595,6 +595,23 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toBeVisible();
   await expect(fullScreenPreview).toHaveCount(0);
 
+  // The expanded view's X only collapses it: the preview stays open on the
+  // same file (a side panel on desktop, the whole width on a phone), and
+  // focus returns to the expand button. The preview's own X still closes it.
+  await page.getByRole("button", { name: "Expand preview" }).click();
+  await expect(fullScreenPreview).toBeVisible();
+  await page.getByRole("button", { name: "Exit expanded preview" }).click();
+  await expect(fullScreenPreview).toHaveCount(0);
+  await expect(page.locator(".preview-panel")).toBeVisible();
+  await expect(page.getByLabel("File source")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Expand preview" }),
+  ).toBeFocused();
+  await expect(
+    page.getByRole("button", { name: "Close preview of hello.rs" }),
+  ).toBeVisible();
+  await expect(page).not.toHaveURL(/view=full/);
+
   const dimensions = await page.evaluate(() => ({
     viewport: window.innerWidth,
     content: document.documentElement.scrollWidth,

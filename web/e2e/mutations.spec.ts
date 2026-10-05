@@ -641,10 +641,10 @@ test.describe("writable share operations", () => {
     await row.locator(".entry-select").hover();
     await expect(first).toHaveCSS("opacity", "1");
     await expect(row.locator(".entry-icon")).toBeHidden();
-    // Smaller than the icon it replaces.
+    // The same 1.125rem as the select-all checkbox.
     const box = await first.boundingBox();
-    expect(box?.width).toBeLessThanOrEqual(15);
-    expect(box?.width).toBeGreaterThanOrEqual(13);
+    expect(box?.width).toBeLessThanOrEqual(19);
+    expect(box?.width).toBeGreaterThanOrEqual(17);
 
     await first.click();
     await last.click({ modifiers: ["Shift"] });

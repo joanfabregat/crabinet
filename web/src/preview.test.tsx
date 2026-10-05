@@ -619,6 +619,58 @@ describe("secure file previews", () => {
     });
   });
 
+  it("collapses the expanded preview to the side panel from its X", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "",
+      previewPath: "notes.txt",
+    });
+    render(<App api={fakeApi()} navigation={navigation} />);
+    const panel = await screen.findByRole("complementary", {
+      name: "notes.txt",
+    });
+    await screen.findByText("plain text");
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
+    expect(
+      await screen.findByRole("dialog", { name: "notes.txt" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Close preview of notes.txt" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Exit expanded preview" }),
+    );
+    expect(navigation.visits.at(-1)).toEqual({
+      shareId: "docs",
+      path: "",
+      previewPath: "notes.txt",
+      previewMode: "side",
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "notes.txt" }),
+      ).not.toBeInTheDocument(),
+    );
+    // The same panel stays open on the same file, and focus returns to the
+    // button that expanded it.
+    expect(screen.getByRole("complementary", { name: "notes.txt" })).toBe(
+      panel,
+    );
+    expect(screen.getByText("plain text")).toBeVisible();
+    const expand = screen.getByRole("button", { name: "Expand preview" });
+    await waitFor(() => expect(expand).toHaveFocus());
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close preview of notes.txt" }),
+    );
+    expect(navigation.visits.at(-1)).toEqual({ shareId: "docs", path: "" });
+    expect(
+      screen.queryByRole("complementary", { name: "notes.txt" }),
+    ).not.toBeInTheDocument();
+  });
+
   it.each([
     {
       name: "a PDF",

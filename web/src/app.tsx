@@ -85,6 +85,7 @@ import { CopyPathButton } from "./copy-path-button";
 import {
   browserNavigation,
   directoryUrl,
+  oidcStartUrl,
   parentPath,
   previewRouteUrl,
   renderedHtmlViewUrl,
@@ -247,6 +248,7 @@ export function App({
     return (
       <LoginScreen
         api={api}
+        route={route}
         reason={auth.reason}
         onAuthenticated={(session) =>
           setAuth({ status: "authenticated", session })
@@ -330,11 +332,18 @@ function SessionErrorScreen({ onRetry }: { onRetry: () => void }) {
 
 interface LoginScreenProps {
   api: ApiClient;
+  /** Where the user was, or the direct link they opened; sign-in returns there. */
+  route: BrowserRoute;
   reason?: "expired" | "signed_out";
   onAuthenticated: (session: Session) => void;
 }
 
-function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
+function LoginScreen({
+  api,
+  route,
+  reason,
+  onAuthenticated,
+}: LoginScreenProps) {
   const [pending, setPending] = useState(false);
   const [passkeyPending, setPasskeyPending] = useState(false);
   const [error, setError] = useState<string>();
@@ -443,7 +452,7 @@ function LoginScreen({ api, reason, onAuthenticated }: LoginScreenProps) {
             </Notice>
           )}
           {methods?.oidcEnabled && (
-            <a class="google-signin" href="/api/v1/auth/oidc/start">
+            <a class="google-signin" href={oidcStartUrl(route)}>
               <img src="/google-g.png" width="20" height="20" alt="" />
               <span>Sign in with Google</span>
             </a>
@@ -2282,13 +2291,19 @@ function PreviewPanel({
       document.documentElement.classList.remove("preview-fullscreen-open");
   }, [fullScreen]);
 
+  // The parent passes a new callback on every render; reading it through a
+  // ref keeps the modal effect, and its focus handling, to one run per
+  // expansion.
+  const toggleFullScreen = useRef(onToggleFullScreen);
+  toggleFullScreen.current = onToggleFullScreen;
+
   useEffect(() => {
     if (!fullScreen) return;
     const previousFocus = document.activeElement as HTMLElement | null;
     const focusTimer = window.setTimeout(() => titleRef.current?.focus(), 0);
     const handleModalKeys = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onToggleFullScreen();
+        toggleFullScreen.current();
         return;
       }
       if (event.key !== "Tab" || !panelRef.current) return;
@@ -2309,12 +2324,19 @@ function PreviewPanel({
       }
     };
     window.addEventListener("keydown", handleModalKeys);
+    const panel = panelRef.current;
     return () => {
       window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", handleModalKeys);
-      if (previousFocus?.isConnected) previousFocus.focus();
+      // Collapsing keeps the side panel open: focus returns to its expand
+      // button. A panel that closed outright leaves focus to its opener.
+      const expand = panel?.querySelector<HTMLElement>(
+        ".preview-fullscreen-button",
+      );
+      if (panel?.isConnected && expand) expand.focus();
+      else if (previousFocus?.isConnected) previousFocus.focus();
     };
-  }, [fullScreen, onToggleFullScreen]);
+  }, [fullScreen]);
 
   const metadata =
     metadataState.status === "ready" ? metadataState.metadata : undefined;
@@ -2374,10 +2396,16 @@ function PreviewPanel({
                 <Maximize2 size={18} aria-hidden="true" />
               )}
             </TooltipButton>
+            {/* In the expanded view, X only leaves it, like Escape and the
+                backdrop; the side panel's own X closes the preview. */}
             <TooltipButton
               className="tooltip-below"
-              onClick={onClose}
-              label={`Close preview of ${filename}`}
+              onClick={fullScreen ? onToggleFullScreen : onClose}
+              label={
+                fullScreen
+                  ? "Exit expanded preview"
+                  : `Close preview of ${filename}`
+              }
             >
               <X size={20} aria-hidden="true" />
             </TooltipButton>
