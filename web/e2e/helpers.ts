@@ -1,4 +1,9 @@
-import { expect, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  type Locator,
+  type Page,
+  type TestInfo,
+} from "@playwright/test";
 
 export const E2E_PASSWORD = "e2e-password";
 
@@ -100,4 +105,16 @@ export async function openFolders(page: Page): Promise<Locator> {
   const tree = page.getByLabel("Shared folders", { exact: true });
   await expect(tree).toBeVisible();
   return tree;
+}
+
+/**
+ * Whether this project is the one that changes server state for its browser
+ * engine. Every engine has its own server (see `playwright.config.ts`), so
+ * stateful suites run once per engine, in its desktop project; against one
+ * external server (`CRABINET_E2E_BASE_URL`) they run only in Chromium.
+ */
+export function ownsServerState(testInfo: TestInfo): boolean {
+  return process.env.CRABINET_E2E_BASE_URL
+    ? testInfo.project.name === "desktop-chromium"
+    : testInfo.project.name.startsWith("desktop-");
 }

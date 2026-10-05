@@ -337,9 +337,25 @@ test("a HEIC image is served as the original and explains when the browser canno
     /^sandbox; default-src 'none'/,
   );
 
-  // Chromium does not decode HEIC (Safari does), so the panel says so and
-  // offers the download instead of a generic error.
+  // Apple's Safari decodes HEIC; Chromium, Firefox, and Playwright's Linux
+  // WebKit do not. The panel ends in either the decoded image or, instead of
+  // a generic error, an explanation that offers the download.
   const fallback = panel.getByRole("alert");
+  const outcome = async () => {
+    if (await fallback.isVisible()) return "fallback";
+    const decoded = await panel
+      .locator('img[src*="photo.heic"]')
+      .evaluateAll((images) =>
+        images.some(
+          (image) =>
+            (image as HTMLImageElement).complete &&
+            (image as HTMLImageElement).naturalWidth > 0,
+        ),
+      );
+    return decoded ? "decoded" : "pending";
+  };
+  await expect.poll(outcome).not.toBe("pending");
+  if ((await outcome()) === "decoded") return;
   await expect(fallback).toContainText(
     "This browser can't display HEIC images. Download it to view.",
   );

@@ -2923,19 +2923,30 @@ mod tests {
             access: AccessLevel::ReadOnly,
         };
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
-        // A privileged test user reads the directory regardless of its mode.
+        // A privileged test user (root, or a process with CAP_DAC_OVERRIDE or
+        // CAP_DAC_READ_SEARCH) reads the directory regardless of its mode.
         let unreadable = fs::read_dir(&locked).is_err();
         let size = folder_size_of(&share, &grant, "", SIZE_BUDGET);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod back");
-        if unreadable {
-            assert_eq!(
-                size.expect("the readable part is counted"),
-                FolderSize {
-                    bytes: 4,
-                    complete: false
-                }
+        if !unreadable {
+            // CI runs the tests as an unprivileged user, so the check must
+            // never be skipped there: a silent skip would hide a regression.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "`chmod 000` did not block the CI test user, so the unreadable-subfolder check cannot run"
             );
+            eprintln!(
+                "skipping the unreadable-subfolder check: `chmod 000` does not block this privileged test user"
+            );
+            return;
         }
+        assert_eq!(
+            size.expect("the readable part is counted"),
+            FolderSize {
+                bytes: 4,
+                complete: false
+            }
+        );
     }
 
     #[test]
