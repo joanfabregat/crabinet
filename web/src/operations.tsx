@@ -1,8 +1,10 @@
 import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
+  Download,
   Ellipsis,
   FilePlus2,
+  FolderDown,
   FolderInput,
   FolderPlus,
   Pencil,
@@ -91,19 +93,56 @@ export function WriteToolbar({
   );
 }
 
+/**
+ * A row's download: the file itself, or a folder as a ZIP. A folder's
+ * archive is checked with the server first (`onArchive`), so a refusal is
+ * shown in the app; modified clicks keep the browser's own link behavior.
+ */
+interface EntryDownload {
+  href: string;
+  onArchive?: () => void;
+}
+
+function downloadClick(
+  download: EntryDownload,
+  event: JSX.TargetedMouseEvent<HTMLAnchorElement>,
+  after?: () => void,
+) {
+  const modified =
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey;
+  if (download.onArchive && !modified) {
+    event.preventDefault();
+    download.onArchive();
+  }
+  after?.();
+}
+
+function downloadLabel(entry: DirectoryEntry): string {
+  return entry.kind === "directory"
+    ? `Download ${entry.name} as ZIP`
+    : `Download ${entry.name}`;
+}
+
 export function EntryActionButtons({
   entry,
   path,
   copyPath,
+  download,
   writable,
   onOperation,
 }: {
   entry: DirectoryEntry;
   path: string;
   copyPath: string;
+  download: EntryDownload;
   writable: boolean;
   onOperation: (operation: EntryOperation) => void;
 }) {
+  const Icon = entry.kind === "directory" ? FolderDown : Download;
   return (
     <div
       class="entry-actions"
@@ -111,6 +150,17 @@ export function EntryActionButtons({
       aria-label={`Actions for ${entry.name}`}
     >
       <div class="entry-actions-inline">
+        <a
+          class="entry-action tooltip-action"
+          href={download.href}
+          aria-label={downloadLabel(entry)}
+          data-tooltip={
+            entry.kind === "directory" ? "Download as ZIP" : "Download"
+          }
+          onClick={(event) => downloadClick(download, event)}
+        >
+          <Icon size={18} aria-hidden="true" />
+        </a>
         <CopyPathButton
           value={copyPath}
           label={`Copy full path for ${entry.name}`}
@@ -153,6 +203,7 @@ export function EntryActionButtons({
         entry={entry}
         path={path}
         copyPath={copyPath}
+        download={download}
         writable={writable}
         onOperation={onOperation}
       />
@@ -168,12 +219,14 @@ function EntryActionMenu({
   entry,
   path,
   copyPath,
+  download,
   writable,
   onOperation,
 }: {
   entry: DirectoryEntry;
   path: string;
   copyPath: string;
+  download: EntryDownload;
   writable: boolean;
   onOperation: (operation: EntryOperation) => void;
 }) {
@@ -269,6 +322,22 @@ function EntryActionMenu({
           aria-label={`Actions for ${entry.name}`}
           onKeyDown={handleKeys}
         >
+          <a
+            class="entry-menu-item"
+            role="menuitem"
+            href={download.href}
+            aria-label={downloadLabel(entry)}
+            onClick={(event) =>
+              downloadClick(download, event, () => setOpen(undefined))
+            }
+          >
+            {entry.kind === "directory" ? (
+              <FolderDown size={17} aria-hidden="true" />
+            ) : (
+              <Download size={17} aria-hidden="true" />
+            )}
+            {entry.kind === "directory" ? "Download as ZIP" : "Download"}
+          </a>
           <CopyPathButton
             value={copyPath}
             label={`Copy full path for ${entry.name}`}

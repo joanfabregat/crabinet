@@ -99,24 +99,30 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await expect(
     page.getByRole("heading", { name: "Projects", level: 1 }),
   ).toBeFocused();
-  await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "example.toml", exact: true }),
+  ).toBeVisible();
 
   await page
     .getByLabel("Breadcrumb")
-    .getByRole("link", { name: "Working files" })
+    .getByRole("link", { name: "Working files", exact: true })
     .click();
   await expect(page).toHaveURL(/\/writable$/);
   await page.goBack();
   await expect(page).toHaveURL(/\/writable\/Projects$/);
-  await expect(page.getByRole("link", { name: "example.toml" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "example.toml", exact: true }),
+  ).toBeVisible();
 
   let sidebar = await openFolders(page);
-  await sidebar.getByRole("link", { name: "Reference library" }).click();
+  await sidebar
+    .getByRole("link", { name: "Reference library", exact: true })
+    .click();
   await expect(page).toHaveURL(/\/read-only$/);
   sidebar = await openFolders(page);
   await expect(sidebar.getByRole("img", { name: "Read only" })).toBeVisible();
   // Selecting a folder opens it without expanding it in the tree.
-  const nested = sidebar.getByRole("link", { name: "nested" });
+  const nested = sidebar.getByRole("link", { name: "nested", exact: true });
   await expect(nested).toHaveCount(0);
   await sidebar
     .getByRole("button", { name: "Expand Reference library" })
@@ -130,9 +136,13 @@ test("direct routes, tree share navigation, breadcrumbs, and browser history", a
   await sidebar.getByRole("button", { name: "Expand nested" }).click();
   await expect(sidebar.getByText("No subfolders")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("link", { name: "notes.txt" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "notes.txt", exact: true }),
+  ).toBeVisible();
   await page.goBack();
-  await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Guide.md", exact: true }),
+  ).toBeVisible();
 
   // A link ending in a file name opens its folder with the file previewed.
   await page.goto("/writable/Projects/example.toml");
@@ -282,7 +292,7 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   });
 
   await openSignedIn(page);
-  await page.getByRole("link", { name: "Guide.md" }).click();
+  await page.getByRole("link", { name: "Guide.md", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Guide.md", level: 2 }),
   ).toBeFocused();
@@ -321,7 +331,7 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
   );
   await page.getByRole("button", { name: "Close preview of Guide.md" }).click();
 
-  await page.getByRole("link", { name: "hostile.html" }).click();
+  await page.getByRole("link", { name: "hostile.html", exact: true }).click();
   const frame = page.getByTitle("Sandboxed HTML preview for hostile.html");
   await expect(frame).toHaveAttribute("sandbox", "");
   await expect(frame).toHaveAttribute(
@@ -335,7 +345,9 @@ test("hostile Markdown and HTML remain inert in-panel and in a new tab", async (
 
   const [renderedPage] = await Promise.all([
     page.waitForEvent("popup"),
-    page.getByRole("link", { name: "Open rendered HTML in new tab" }).click(),
+    page
+      .getByRole("link", { name: "Open rendered HTML in new tab", exact: true })
+      .click(),
   ]);
   // The new tab is Crabinet's own viewer, framing the same sandboxed page.
   await expect(renderedPage).toHaveURL(
@@ -446,7 +458,9 @@ test("rendered HTML in a new tab cannot navigate that tab away", async ({
   ).toBeVisible();
   const [viewer] = await Promise.all([
     page.waitForEvent("popup"),
-    page.getByRole("link", { name: "Open rendered HTML in new tab" }).click(),
+    page
+      .getByRole("link", { name: "Open rendered HTML in new tab", exact: true })
+      .click(),
   ]);
   const appOrigin = new URL(page.url()).origin;
   const viewerUrl = `${appOrigin}/read-only/navigation.html?view=rendered`;
@@ -463,10 +477,12 @@ test("rendered HTML in a new tab cannot navigate that tab away", async ({
   // A target=_top link is refused by the iframe sandbox and leaves the page
   // in place; a plain link may only try to move the frame, which the
   // application CSP refuses, so it goes last.
-  await content.getByRole("link", { name: "Continue in this tab" }).click();
+  await content
+    .getByRole("link", { name: "Continue in this tab", exact: true })
+    .click();
   expect(viewer.url()).toBe(viewerUrl);
   await content
-    .getByRole("link", { name: "Continue to the external site" })
+    .getByRole("link", { name: "Continue to the external site", exact: true })
     .click();
   expect(viewer.url()).toBe(viewerUrl);
   // The page also asks for a refresh to the external origin after two
@@ -481,7 +497,9 @@ test("rendered HTML in a new tab cannot navigate that tab away", async ({
   expect(externalRequests).toEqual([]);
 
   // Back returns to the file in its folder.
-  await viewer.getByRole("link", { name: "Back to folder" }).click();
+  await viewer
+    .getByRole("link", { name: "Back to folder", exact: true })
+    .click();
   await expect(viewer).toHaveURL(`${appOrigin}/read-only/navigation.html`);
   await expect(
     viewer.getByRole("heading", { name: "navigation.html", level: 2 }),
@@ -494,7 +512,10 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
 }) => {
   await page.goto("/");
 
-  const homeLink = page.getByRole("link", { name: "Crabinet home" });
+  const homeLink = page.getByRole("link", {
+    name: "Crabinet home",
+    exact: true,
+  });
   await homeLink.focus();
   await expect(homeLink).toBeFocused();
   await page.keyboard.press("Tab");
@@ -508,7 +529,7 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   ).toEqual([]);
 
   await signIn(page, "reader");
-  await page.getByRole("link", { name: "hello.rs" }).click();
+  await page.getByRole("link", { name: "hello.rs", exact: true }).click();
   await expect(page.getByLabel("File source")).toBeVisible();
 
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveCount(0);
@@ -659,7 +680,9 @@ test("a folder downloads as a ZIP of its files", async ({ page }) => {
 
   const [download] = await Promise.all([
     page.waitForEvent("download"),
-    page.getByRole("link", { name: "Download nested as ZIP" }).click(),
+    page
+      .getByRole("link", { name: "Download nested as ZIP", exact: true })
+      .click(),
   ]);
   expect(download.suggestedFilename()).toBe("nested.zip");
   expect(await download.failure()).toBeNull();
@@ -687,7 +710,7 @@ test("an iPad in portrait shows two columns", async ({ page }) => {
   expect(listBox.x).toBeGreaterThanOrEqual(treeBox.x + treeBox.width);
   expect(Math.abs(listBox.y - treeBox.y)).toBeLessThan(2);
 
-  await page.getByRole("link", { name: "hello.rs" }).click();
+  await page.getByRole("link", { name: "hello.rs", exact: true }).click();
   const preview = page.locator(".preview-panel");
   await expect(page.getByLabel("File source")).toBeVisible();
   await expect(tree).toBeHidden();
@@ -728,7 +751,7 @@ test("night mode follows the system, can be pinned, and passes axe", async ({
   expect(await seriousViolations()).toEqual([]);
 
   await signIn(page, "reader");
-  await page.getByRole("link", { name: "hello.rs" }).click();
+  await page.getByRole("link", { name: "hello.rs", exact: true }).click();
   const source = page.getByLabel("File source");
   await expect(source).toHaveAttribute("aria-busy", "false");
   const token = source.locator("span[style*='--shiki-dark']").first();
@@ -805,7 +828,9 @@ test("connection failure can recover and an expired session returns to login", a
   ).toBeVisible();
 
   await signIn(page, "reader");
-  await expect(page.getByRole("link", { name: "Guide.md" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Guide.md", exact: true }),
+  ).toBeVisible();
   await page.route("**/api/v1/shares/*/preview?**", async (route) => {
     await route.fulfill({
       status: 401,
@@ -815,7 +840,7 @@ test("connection failure can recover and an expired session returns to login", a
       }),
     });
   });
-  await page.getByRole("link", { name: "Guide.md" }).click();
+  await page.getByRole("link", { name: "Guide.md", exact: true }).click();
   await expect(
     page.getByText("Your session expired. Sign in again to continue."),
   ).toBeVisible();

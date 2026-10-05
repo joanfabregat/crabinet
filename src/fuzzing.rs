@@ -32,9 +32,12 @@ pub fn phc_policy(data: &[u8]) {
     }
 }
 
+/// Parses the input as one virtual path and as an archive query, whose
+/// repeated percent-encoded `path` parameters go through the same grammar.
 pub fn virtual_path(data: &[u8]) {
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = VirtualPath::parse(text);
+        crate::browse::fuzz_archive_query(text);
     }
 }
 

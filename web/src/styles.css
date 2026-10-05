@@ -2026,6 +2026,126 @@ html.preview-fullscreen-open body {
   padding: 0.7rem 1.25rem;
 }
 
+.selection-checkbox {
+  accent-color: var(--accent);
+  cursor: pointer;
+  height: 1.125rem;
+  margin: 0;
+  width: 1.125rem;
+}
+
+.selection-checkbox:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The row's file-type icon doubles as its checkbox. The checkbox sits on
+   top of the icon, invisible but focusable and clickable, so a tap on the
+   icon toggles the row even on a touch screen. Hovering or focusing the row,
+   or selecting anything in the list, swaps the icon for the visible
+   checkbox in the same place, so nothing shifts. */
+.entry-select {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  justify-items: center;
+  position: relative;
+}
+
+.entry-select > * {
+  grid-area: 1 / 1;
+}
+
+.entry-checkbox {
+  opacity: 0;
+}
+
+.entry-row:hover .entry-checkbox,
+.entry-row:focus-within .entry-checkbox,
+.entry-list.has-checked .entry-checkbox {
+  opacity: 1;
+}
+
+.entry-row:hover .entry-select .entry-icon,
+.entry-row:focus-within .entry-select .entry-icon,
+.entry-list.has-checked .entry-select .entry-icon {
+  visibility: hidden;
+}
+
+/* A larger tap target that still leaves the layout alone. */
+@media (pointer: coarse) {
+  .entry-select {
+    margin: -0.65rem;
+    padding: 0.65rem;
+  }
+}
+
+.entry-row.is-checked,
+.entry-row.is-checked:hover {
+  background: var(--selected-bg);
+}
+
+/* Shown above the list while entries are selected. The tint mixes the
+   accent into the surface, so the theme's ink keeps AA contrast on it in
+   light and dark mode. Its own container query hides the button labels
+   when the bar would not fit on one line. */
+.selection-bar {
+  align-items: center;
+  animation: selection-bar-in 140ms ease-out;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  border-top: 1px solid color-mix(in srgb, var(--accent) 35%, var(--surface));
+  color: var(--ink);
+  container-type: inline-size;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  min-height: 3.25rem;
+  padding: 0.45rem 1.25rem;
+}
+
+.selection-count {
+  flex: 1 1 auto;
+  font-weight: 720;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-bar .toolbar-button {
+  flex: none;
+}
+
+.selection-bar .selection-delete {
+  color: var(--danger);
+}
+
+@container (max-width: 30rem) {
+  .selection-bar .toolbar-button {
+    min-width: 2.5rem;
+    padding: 0;
+    width: 2.5rem;
+  }
+
+  /* Still the accessible name, only not drawn. */
+  .selection-bar .toolbar-label {
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+}
+
+@keyframes selection-bar-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.35rem);
+  }
+}
+
 .entry-actions {
   justify-content: flex-end;
 }
@@ -2071,6 +2191,7 @@ html.preview-fullscreen-open body {
   min-height: 2.75rem;
   padding: 0.5rem 0.75rem;
   text-align: left;
+  text-decoration: none;
 }
 
 .entry-menu-item:hover,
@@ -2407,6 +2528,10 @@ html.preview-fullscreen-open body {
 
   .entry-row {
     grid-template-columns: 1.25rem minmax(0, 1fr) auto auto;
+  }
+
+  .entry-row,
+  .selection-bar {
     padding-left: 1rem;
     padding-right: 1rem;
   }
@@ -2597,6 +2722,7 @@ html.preview-fullscreen-open body {
 
 @media (prefers-reduced-motion: reduce) {
   .directory-skeleton span,
+  .selection-bar,
   .toast {
     animation: none;
   }

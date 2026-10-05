@@ -906,7 +906,10 @@ describe("secure file previews", () => {
       screen.queryByText("sensitive backend detail"),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "Download code.rs" }),
+      within(screen.getByRole("complementary", { name: "code.rs" })).getByRole(
+        "link",
+        { name: "Download code.rs" },
+      ),
     ).toBeVisible();
   });
 

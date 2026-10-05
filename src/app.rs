@@ -505,7 +505,9 @@ pub(crate) mod tests {
                 Share,
                 Safe,
                 Bound::Browse(BrowseGate::Archives),
-            ),
+            )
+            // A selection of two files, the most general request shape.
+            .query("path=page.html&path=pixel.png"),
             Route::new(
                 "GET",
                 "/api/v1/shares/{share_id}/preview",

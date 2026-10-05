@@ -78,7 +78,7 @@ Downloads include a safe ASCII fallback plus RFC 5987 UTF-8 filename in `Content
 
 `GET /api/v1/shares/{shareId}/archive?path=relative/folder` streams a folder and everything beneath it as a ZIP archive; an absent or empty `path` archives the share root. Any grant on the share, read or read-write, may archive it. The archive's top-level entry is the folder's name, or the share ID for the share root, and the attachment is named after it with a `.zip` suffix.
 
-Before the response starts, the server walks the folder through the share capability with the listing's entry policy: links, special files, hard-link aliases, invalid names, and Crabinet's internal entries are omitted, and every scanned entry counts toward the limit, omitted or not. A folder that exceeds a limit (the sum of file sizes above the download maximum, more scanned entries than the archive entry maximum, or more than 4 MiB of relative path names) returns `413` (`too_large`); an entry deeper than the 64-component limit returns `400` (`path_too_deep`); a path that names a file or nothing returns `404`. No archive bytes are produced for a refused folder.
+Before the response starts, the server walks the folder through the share capability with the listing's entry policy: links, special files, hard-link aliases, invalid names, and Crabinet's internal entries are omitted, and every scanned entry counts toward the limit, omitted or not. A folder that exceeds a limit (the sum of file sizes above the download maximum, more scanned entries than the archive entry maximum, or more than 4 MiB of relative path names) returns `413` (`too_large`); an entry deeper than the 64-component limit returns `400` (`path_too_deep`); a path that names nothing returns `404`, and a path that names a file archives that file alone (see [selection archives](#selection-archives)). No archive bytes are produced for a refused folder.
 
 Entries are stored uncompressed, in depth-first order with each directory's children sorted by name and every directory, including empty ones, present as its own entry. Names are UTF-8 (general-purpose flag bit 11), so an extractor sees the same canonical components the browse API returns; the grammar rules out `..`, absolute names, and backslashes. File modes are fixed (`0644` for files, `0755` for directories), and times are the modification times in UTC, both as MS-DOS fields and an extended timestamp. ZIP64 fields appear only where an entry, an offset, or the entry count overflows the classic fields. Because the layout is fixed before streaming, the response carries the archive's exact `Content-Length`.
 
@@ -90,6 +90,12 @@ The browser client first requests the archive with `fetch`, cancels it once the 
 
 Every browse response, including share discovery, listings, metadata, text, downloads, and archives, sets `Cache-Control: no-store, private` so authenticated content does not remain in the browser disk cache after sign-out. ETags remain available for explicit `If-None-Match`, `If-Range`, and mutation `If-Match` requests.
 
+### Selection archives
+
+The same route archives a selection when `path` names a file or repeats: `GET /api/v1/shares/{shareId}/archive?path=reports/a.pdf&path=reports/2024`. Each value is decoded once and parsed with the virtual path grammar, like every other `path` parameter; other parameters are ignored. One empty or absent `path` is still the share root, and one `path` naming a folder is still the folder archive above. Otherwise the archive has no wrapping folder: every selected entry sits at the top level, a file as `name` and a folder as `name/` followed by its contents, in name order. The attachment is named after the selected file for a single file (`a.pdf.zip`), and after the selection's directory for several entries (`reports.zip`, or the share ID at the share root).
+
+Every selected path must have the same parent directory, so a selection cannot overlap itself (a folder together with an entry inside it) and its top-level names cannot collide; mixed parents, a duplicate path, the share root inside a selection, or an invalid path return `400` (`invalid_request`). A query string longer than 256 KiB or naming more than 1,000 paths returns `413` (`too_large`) before any path is parsed. Reverse proxies often cap the request line well below that (8 KiB is a common default), which bounds a selection of long names first; such a proxy answers `414`, and the client shows a generic archive error. A missing selected path, or one naming a link, special file, or hard-link alias, returns the same `404` as a missing folder, so a selection discloses nothing that single requests would not. One walk budget covers the whole selection: each selected entry counts as one scanned entry, and file sizes, entry counts, and name bytes (each name including its selected top-level component) accumulate across all selected entries against the same limits as a folder, with the same depth limit. The same archive gate applies, and files are reopened and checked while streaming exactly as for a folder.
+
 ## Default resource limits
 
 | Limit | Default |
@@ -98,9 +104,11 @@ Every browse response, including share discovery, listings, metadata, text, down
 | Maximum requested page | 200 entries |
 | Maximum directory scan | 10,000 entries |
 | UTF-8 text read | 1 MiB |
-| Download, and the sum of file sizes in one folder archive | 1 GiB |
-| Folder archive scan | 10,000 entries |
-| Folder archive names | 4 MiB |
+| Download, and the sum of file sizes in one folder or selection archive | 1 GiB |
+| Folder or selection archive scan | 10,000 entries |
+| Folder or selection archive names | 4 MiB |
+| Paths in one selection archive | 1,000 |
+| Selection archive query string | 256 KiB |
 | Streaming read chunk | 64 KiB |
 
-All values are startup configuration inputs through `BrowseLimits`; invalid zero or internally inconsistent limits prevent browse-state construction. Startup must also provide a non-zero 32-byte cursor HMAC secret from the authenticated application configuration; it is never accepted from a request.
+All values except the archive name, selection path, and query-string limits, which are fixed, are startup configuration inputs through `BrowseLimits`; invalid zero or internally inconsistent limits prevent browse-state construction. Startup must also provide a non-zero 32-byte cursor HMAC secret from the authenticated application configuration; it is never accepted from a request.

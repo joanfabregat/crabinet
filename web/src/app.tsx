@@ -86,6 +86,15 @@ import { SafeMarkdown } from "./safe-markdown";
 import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 import { ToastProvider, useToast } from "./toast";
+import {
+  bulkTrashMessage,
+  isModifiedClick,
+  moveEntriesToTrash,
+  SelectionBar,
+  useArchiveDownload,
+  useEntrySelection,
+  type TrashedEntry,
+} from "./selection";
 import { TrashView } from "./trash";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 import {
@@ -966,11 +975,6 @@ function DirectoryBrowser({
   const activePreview = useRef(route.previewPath);
   activePreview.current = route.previewPath;
   const writable = share.access === "read-write";
-  // The preview's opening, closing, and full-screen mode change the heading's
-  // width, so they re-measure at once instead of waiting for the observer.
-  const [headingRowRef, headingActionsCompact] = useCompactHeadingActions(
-    `${writable}\0${share.id}\0${route.path}\0${route.previewPath ?? ""}\0${route.previewMode ?? ""}`,
-  );
   const visibleEntries =
     page?.entries.filter(
       (entry) =>
@@ -978,23 +982,119 @@ function DirectoryBrowser({
         (showHiddenFiles || !entry.name.startsWith(".")),
     ) ?? [];
 
+  const selectionLocation = `${share.id}\u0000${route.path}\u0000${showHiddenFiles}`;
+  const {
+    selection,
+    toggle: toggleSelected,
+    toggleAll: toggleAllSelected,
+    deselect,
+    clear: clearSelection,
+  } = useEntrySelection(
+    visibleEntries.map((entry) => entry.name),
+    selectionLocation,
+  );
+  const selectedEntries = visibleEntries.filter((entry) =>
+    selection.names.has(entry.name),
+  );
+  const selecting = selectedEntries.length > 0;
+  // The preview's opening, closing, and full-screen mode change the heading's
+  // width, so they re-measure at once instead of waiting for the observer.
+  const [headingRowRef, headingActionsCompact] = useCompactHeadingActions(
+    `${writable}\0${share.id}\0${route.path}\0${route.previewPath ?? ""}\0${route.previewMode ?? ""}`,
+  );
+  const archive = useArchiveDownload(api, share.id, onSessionExpired);
+  const [pendingBulkDelete, setPendingBulkDelete] =
+    useState<Array<{ entry: DirectoryEntry; path: string }>>();
+  const [bulkProgress, setBulkProgress] = useState<number>();
+
+  /** Moves one entry to Trash if it is still of the listed kind. */
+  const trashOne = async (entry: DirectoryEntry, path: string) => {
+    const metadata = await api.metadata(share.id, path);
+    if (metadata.kind !== entry.kind)
+      throw new ApiError("conflict", "The item changed");
+    const result = await withCsrfRetry(
+      api,
+      csrfToken,
+      userId,
+      onSessionRefreshed,
+      (token) => api.deleteEntry(share.id, path, metadata.etag, token),
+    );
+    return result.trashId;
+  };
+
+  const deleteSelection = async (
+    items: Array<{ entry: DirectoryEntry; path: string }>,
+  ) => {
+    if (bulkProgress !== undefined || !writable) return;
+    const shareId = share.id;
+    setBulkProgress(0);
+    const outcome = await moveEntriesToTrash(items, trashOne, setBulkProgress);
+    setBulkProgress(undefined);
+    setPendingBulkDelete(undefined);
+    deselect(outcome.moved.map((moved) => moved.entry.name));
+    if (outcome.sessionExpired) onSessionExpired();
+    if (outcome.moved.length > 0 || outcome.failed.length > 0) {
+      showToast(bulkTrashMessage(outcome, items.length), {
+        tone:
+          outcome.failed.length === 0
+            ? "success"
+            : outcome.moved.length === 0
+              ? "error"
+              : "warning",
+        ...(outcome.moved.length > 0
+          ? {
+              action: {
+                label: "Undo",
+                onClick: () => void undoBulkDelete(shareId, outcome.moved),
+              },
+            }
+          : {}),
+      });
+    }
+    if (outcome.moved.some((moved) => moved.path === activePreview.current)) {
+      navigation.go({ shareId, path: route.path }, { replace: true });
+    }
+    setRefreshKey((value) => value + 1);
+  };
+
+  const undoBulkDelete = async (shareId: string, moved: TrashedEntry[]) => {
+    let restored = 0;
+    for (const item of moved) {
+      try {
+        await withCsrfRetry(
+          api,
+          csrfToken,
+          userId,
+          onSessionRefreshed,
+          (token) => api.restoreTrash(shareId, item.id, undefined, token),
+        );
+        restored += 1;
+      } catch (cause) {
+        if (isUnauthorized(cause)) {
+          onSessionExpired();
+          return;
+        }
+      }
+    }
+    const items = (count: number) =>
+      `${count} ${count === 1 ? "item" : "items"}`;
+    if (restored === moved.length) showToast(`Restored ${items(restored)}.`);
+    else
+      showToast(
+        `Restored ${restored} of ${items(moved.length)}. Open Trash to restore the rest.`,
+        { tone: "warning" },
+      );
+    setRefreshKey((value) => value + 1);
+  };
+
   const deleteToTrash = async (entry: DirectoryEntry, path: string) => {
     if (deletingPath || !writable) return;
     setDeletingPath(path);
     setDeleteError(undefined);
     try {
-      const metadata = await api.metadata(share.id, path);
-      if (metadata.kind !== entry.kind)
-        throw new ApiError("conflict", "The item changed");
-      const result = await withCsrfRetry(
-        api,
-        csrfToken,
-        userId,
-        onSessionRefreshed,
-        (token) => api.deleteEntry(share.id, path, metadata.etag, token),
-      );
+      const trashId = await trashOne(entry, path);
       setPendingDelete(undefined);
-      const deleted = { shareId: share.id, id: result.trashId, entry, path };
+      const deleted = { shareId: share.id, id: trashId, entry, path };
       showToast(`Moved ${entry.name} to Trash.`, {
         action: { label: "Undo", onClick: () => void undoDelete(deleted) },
       });
@@ -1062,6 +1162,7 @@ function DirectoryBrowser({
       operationLocation.current = nextLocation;
       setOperation(undefined);
       setPendingDelete(undefined);
+      setPendingBulkDelete(undefined);
       setUploadSelection(undefined);
     }
   }, [route.path, share.id]);
@@ -1565,7 +1666,53 @@ function DirectoryBrowser({
               </div>
             </Modal>
           )}
-          <section class="directory-panel" aria-labelledby="directory-title">
+          {pendingBulkDelete && (
+            <Modal
+              title={`Move ${itemCount(pendingBulkDelete.length)} to Trash?`}
+              busy={bulkProgress !== undefined}
+              onClose={() => setPendingBulkDelete(undefined)}
+            >
+              <p>
+                The selected items, including everything in selected folders,
+                will move to Trash. You can restore them from Trash until they
+                expire.
+              </p>
+              <div class="dialog-actions">
+                <button
+                  type="button"
+                  class="button button-secondary"
+                  disabled={bulkProgress !== undefined}
+                  onClick={() => setPendingBulkDelete(undefined)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="button button-danger"
+                  disabled={bulkProgress !== undefined}
+                  onClick={() => void deleteSelection(pendingBulkDelete)}
+                >
+                  {bulkProgress !== undefined
+                    ? `Moving… ${bulkProgress} of ${pendingBulkDelete.length}`
+                    : "Move to Trash"}
+                </button>
+              </div>
+            </Modal>
+          )}
+          <section
+            class="directory-panel"
+            aria-labelledby="directory-title"
+            onKeyDown={(event) => {
+              if (
+                event.key !== "Escape" ||
+                event.defaultPrevented ||
+                !selecting
+              )
+                return;
+              event.preventDefault();
+              clearSelection();
+            }}
+          >
             {deleteError && <Notice tone="danger">{deleteError}</Notice>}
             <nav class="breadcrumbs" aria-label="Breadcrumb">
               <ol>
@@ -1622,11 +1769,16 @@ function DirectoryBrowser({
                   />
                 )}
                 <ArchiveDownloadLink
-                  api={api}
                   shareId={share.id}
                   path={route.path}
                   name={crumbs.at(-1)?.name ?? share.name}
-                  onSessionExpired={onSessionExpired}
+                  checking={archive.checking}
+                  onDownload={() =>
+                    void archive.download(
+                      route.path,
+                      crumbs.at(-1)?.name ?? share.name,
+                    )
+                  }
                 />
                 <CopyPathButton
                   value={`${share.id}${route.path ? `/${route.path}` : ""}`}
@@ -1668,6 +1820,37 @@ function DirectoryBrowser({
               />
             ) : page ? (
               <>
+                {selecting && (
+                  <SelectionBar
+                    count={selectedEntries.length}
+                    total={visibleEntries.length}
+                    writable={writable}
+                    busy={archive.checking || bulkProgress !== undefined}
+                    onToggleAll={toggleAllSelected}
+                    onDownload={() =>
+                      void archive.download(
+                        selectedEntries.map((entry) =>
+                          joinPath(route.path, entry.name),
+                        ),
+                        selectedEntries.length === 1
+                          ? selectedEntries[0]!.name
+                          : undefined,
+                      )
+                    }
+                    onDelete={() =>
+                      setPendingBulkDelete(
+                        selectedEntries.map((entry) => ({
+                          entry,
+                          path: joinPath(route.path, entry.name),
+                        })),
+                      )
+                    }
+                    onClear={() => {
+                      clearSelection();
+                      headingRef.current?.focus();
+                    }}
+                  />
+                )}
                 <EntryList
                   entries={visibleEntries}
                   shareId={share.id}
@@ -1677,6 +1860,11 @@ function DirectoryBrowser({
                   onOpenPreview={openPreview}
                   writable={writable}
                   onOperation={chooseOperation}
+                  checked={selection.names}
+                  onToggleChecked={toggleSelected}
+                  onDownloadArchive={(path, name) =>
+                    void archive.download(path, name)
+                  }
                 />
                 {error && (
                   <Notice tone="danger">
@@ -1790,6 +1978,9 @@ function EntryList({
   onOpenPreview,
   writable,
   onOperation,
+  checked,
+  onToggleChecked,
+  onDownloadArchive,
 }: {
   entries: DirectoryEntry[];
   shareId: string;
@@ -1799,29 +1990,60 @@ function EntryList({
   onOpenPreview: (path: string, trigger: HTMLAnchorElement) => void;
   writable: boolean;
   onOperation: (operation: EntryOperation) => void;
+  /** Names of the entries ticked for bulk actions. */
+  checked: ReadonlySet<string>;
+  /** `range` extends from the last toggled row, as on Shift-click. */
+  onToggleChecked: (name: string, range: boolean) => void;
+  onDownloadArchive: (path: string, name: string) => void;
 }) {
   return (
-    <div class="entry-list" role="list" aria-label="Folder contents">
+    <div
+      class={`entry-list${checked.size > 0 ? " has-checked" : ""}`}
+      role="list"
+      aria-label="Folder contents"
+    >
       {entries.map((entry) => {
         const key = `${entry.kind}:${entry.name}`;
-        const selected =
-          entry.kind === "file" && selectedPath === joinPath(path, entry.name);
+        const entryPath = joinPath(path, entry.name);
+        const selected = entry.kind === "file" && selectedPath === entryPath;
+        const isChecked = checked.has(entry.name);
         return (
           <div
-            class={`entry-row${selected ? " is-selected" : ""}`}
+            class={`entry-row${selected ? " is-selected" : ""}${isChecked ? " is-checked" : ""}`}
             role="listitem"
             key={key}
             draggable={writable}
             onDragStart={(event) =>
-              beginEntryDrag(event, shareId, joinPath(path, entry.name), entry)
+              beginEntryDrag(event, shareId, entryPath, entry)
             }
           >
-            <span
-              class={`entry-icon entry-icon-${entry.kind}`}
-              aria-hidden="true"
+            {/* The icon doubles as the row's checkbox: hovering or focusing
+                the row, or selecting anything, shows the checkbox in its
+                place, and a tap on it toggles the row (see styles.css). */}
+            <label
+              class="entry-select"
+              onMouseDown={(event) => {
+                // Shift-click would otherwise also select the rows' text.
+                if (event.shiftKey) event.preventDefault();
+              }}
             >
-              <EntryIcon entry={entry} size={22} strokeWidth={1.8} />
-            </span>
+              <span
+                class={`entry-icon entry-icon-${entry.kind}`}
+                aria-hidden="true"
+              >
+                <EntryIcon entry={entry} size={22} strokeWidth={1.8} />
+              </span>
+              <input
+                class="selection-checkbox entry-checkbox"
+                type="checkbox"
+                aria-label={`Select ${entry.name}`}
+                checked={isChecked}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleChecked(entry.name, event.shiftKey);
+                }}
+              />
+            </label>
             <div class="entry-primary">
               {entry.kind === "directory" ? (
                 <a
@@ -1880,8 +2102,16 @@ function EntryList({
             </span>
             <EntryActionButtons
               entry={entry}
-              path={joinPath(path, entry.name)}
-              copyPath={`${shareId}/${joinPath(path, entry.name)}`}
+              path={entryPath}
+              copyPath={`${shareId}/${entryPath}`}
+              download={
+                entry.kind === "directory"
+                  ? {
+                      href: archiveUrl(shareId, entryPath),
+                      onArchive: () => onDownloadArchive(entryPath, entry.name),
+                    }
+                  : { href: downloadUrl(shareId, entryPath) }
+              }
               writable={writable}
               onOperation={onOperation}
             />
@@ -3192,59 +3422,33 @@ function TooltipLink({
 
 /**
  * Downloads a folder as a ZIP. The server walks the whole folder before it
- * answers, so the link first asks it to start the archive and shows a
- * refusal (too large, too deep, busy) here instead of navigating to it.
+ * answers, so the link first asks it to start the archive (`onDownload`,
+ * see `useArchiveDownload`) and shows a refusal (too large, too deep, busy)
+ * here instead of navigating to it.
  */
 function ArchiveDownloadLink({
-  api,
   shareId,
   path,
   name,
-  onSessionExpired,
+  checking,
+  onDownload,
 }: {
-  api: ApiClient;
   shareId: string;
   path: string;
   name: string;
-  onSessionExpired: () => void;
+  checking: boolean;
+  onDownload: () => void;
 }) {
-  const showToast = useToast();
-  const [checking, setChecking] = useState(false);
-  const href = archiveUrl(shareId, path);
-
-  const download = async () => {
-    setChecking(true);
-    try {
-      await api.checkArchive(shareId, path);
-      // The response is an attachment, so following it keeps this page.
-      const link = document.createElement("a");
-      link.href = href;
-      link.click();
-    } catch (cause) {
-      if (isUnauthorized(cause)) onSessionExpired();
-      else showToast(archiveErrorMessage(cause, name), { tone: "error" });
-    } finally {
-      setChecking(false);
-    }
-  };
-
   return (
     <TooltipLink
-      href={href}
+      href={archiveUrl(shareId, path)}
       label={`Download ${name} as ZIP`}
       aria-busy={checking || undefined}
       onClick={(event) => {
         // Modified clicks keep the browser's own link behavior.
-        if (
-          event.button !== 0 ||
-          event.metaKey ||
-          event.ctrlKey ||
-          event.shiftKey ||
-          event.altKey
-        )
-          return;
+        if (isModifiedClick(event)) return;
         event.preventDefault();
-        if (!checking) void download();
+        if (!checking) onDownload();
       }}
     >
       <FolderDown size={19} aria-hidden="true" />
@@ -3252,16 +3456,8 @@ function ArchiveDownloadLink({
   );
 }
 
-function archiveErrorMessage(cause: unknown, name: string): string {
-  const error = asApiError(cause);
-  if (error.code === "too_large")
-    return `${name} is too large or has too many items to download as one ZIP.`;
-  if (error.code === "path_too_deep")
-    return `${name} has folders nested too deeply to download as a ZIP.`;
-  if (error.kind === "rate-limited")
-    return "Too many downloads are in progress. Try again shortly.";
-  if (error.kind === "not-found") return `${name} is no longer available.`;
-  return `Could not download ${name} as a ZIP.`;
+function itemCount(count: number): string {
+  return `${count} ${count === 1 ? "item" : "items"}`;
 }
 
 function joinPath(path: string, name: string): string {
