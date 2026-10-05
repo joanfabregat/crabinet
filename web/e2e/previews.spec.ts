@@ -9,7 +9,7 @@ test("a log above the preview limit shows its head, the notice, and opens whole"
   page,
 }) => {
   await openSignedIn(page, "/read-only");
-  await page.getByRole("link", { name: "server.log" }).click();
+  await page.getByRole("link", { name: "server.log", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "server.log", level: 2 }),
   ).toBeFocused();
@@ -102,7 +102,7 @@ test("a hostile SVG renders as an inert image in the panel and in a new tab", as
   const effects = watchHostileEffects(context, origin);
 
   await openSignedIn(page, "/read-only");
-  await page.getByRole("link", { name: "hostile.svg" }).click();
+  await page.getByRole("link", { name: "hostile.svg", exact: true }).click();
   const panel = page.getByRole("complementary", { name: "hostile.svg" });
   const image = panel.getByRole("img", { name: "Preview of hostile.svg" });
   await expect(image).toHaveAttribute(
