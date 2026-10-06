@@ -137,11 +137,17 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
+      - name: Install locked frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Audit frontend dependencies
+        working-directory: web
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run audit:deps -- --audit-level=high
       - name: Build tested production assets
         working-directory: web
         run: |
-          npm ci
-          npm audit --audit-level=high
           npm rebuild esbuild --ignore-scripts=false
           npm test
           npm run build

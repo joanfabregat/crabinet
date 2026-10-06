@@ -23,8 +23,10 @@ podman run --rm \
   --volume "$PWD:/workspace" \
   --workdir /workspace \
   docker.io/library/node:24-bookworm-slim \
-  /bin/sh -c 'npm ci --ignore-scripts && npm audit --audit-level=high'
+  /bin/sh -c 'npm ci --ignore-scripts && npm run audit:deps'
 ```
+
+`web/.npmrc` also sets `min-release-age=7`, so npm resolves only versions published at least seven days ago. `npm run audit:deps` wraps `npm audit` with the same rule: an advisory fails the check when it has no fix or when its fix is old enough to install, and is reported as a warning, with the date the fix becomes installable, while every fix is still newer than that.
 
 Then run esbuild's reviewed install script, the one lifecycle script the build needs, and the checks offline:
 

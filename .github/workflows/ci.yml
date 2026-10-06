@@ -72,7 +72,9 @@ jobs:
         run: npm ci
       - name: Audit dependencies
         working-directory: web
-        run: npm audit --audit-level=high
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run audit:deps -- --audit-level=high
       - name: Install audited esbuild binary
         working-directory: web
         run: npm rebuild esbuild --ignore-scripts=false
@@ -202,7 +204,9 @@ jobs:
         run: npm ci
       - name: Audit frontend dependencies
         working-directory: web
-        run: npm audit --audit-level=high
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run audit:deps -- --audit-level=high
       - name: Install the browser engine
         working-directory: web
         run: npx playwright install --with-deps "${ENGINE}"
