@@ -115,7 +115,9 @@ jobs:
         id: npm
         continue-on-error: true
         working-directory: web
-        run: npm audit --audit-level=moderate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run audit:deps -- --audit-level=moderate
       - name: Enforce weekly findings
         if: steps.semgrep.outcome == 'failure' || steps.trivy.outcome == 'failure' || steps.rust.outcome == 'failure' || steps.fuzz-deps.outcome == 'failure' || steps.npm.outcome == 'failure'
         run: exit 1
