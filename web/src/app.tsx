@@ -1549,6 +1549,21 @@ function DirectoryBrowser({
     requestAnimationFrame(() => previewTriggerRef.current?.focus());
   };
 
+  /**
+   * Closes the preview of a file that is gone, deleted or moved outside
+   * Crabinet: none of its actions can succeed, and a retry cannot bring it
+   * back.
+   */
+  const closeMissingPreview = (path: string) => {
+    if (activePreview.current !== path) return;
+    navigation.go({ shareId: share.id, path: route.path }, { replace: true });
+    showToast(
+      `${path.split("/").at(-1) ?? path} is no longer available. It may have been deleted or moved.`,
+      { tone: "warning" },
+    );
+    requestAnimationFrame(() => headingRef.current?.focus());
+  };
+
   const changed = (
     completedOperation: EntryOperation,
     destinationPath?: string,
@@ -1647,6 +1662,10 @@ function DirectoryBrowser({
         if (controller.signal.aborted || isAborted(cause)) return;
         if (isUnauthorized(cause)) {
           onSessionExpired();
+          return;
+        }
+        if (asApiError(cause).kind === "not-found") {
+          closeMissingPreview(previewPath);
           return;
         }
         setPreviewOperationError(
@@ -1992,6 +2011,7 @@ function DirectoryBrowser({
           onOperation={operateOnPreview}
           operationError={previewOperationError}
           onClose={closePreview}
+          onMissing={closeMissingPreview}
           onToggleFullScreen={() =>
             navigation.go({
               shareId: share.id,
@@ -2240,6 +2260,8 @@ interface PreviewPanelProps {
   onOperation: (kind: "edit" | "rename" | "move" | "delete") => void;
   operationError?: string;
   onClose: () => void;
+  /** The file is gone: the panel has nothing left to show or act on. */
+  onMissing: (path: string) => void;
   onToggleFullScreen: () => void;
   onSessionExpired: () => void;
 }
@@ -2264,6 +2286,7 @@ function PreviewPanel({
   onOperation,
   operationError,
   onClose,
+  onMissing,
   onToggleFullScreen,
   onSessionExpired,
 }: PreviewPanelProps) {
@@ -2276,6 +2299,9 @@ function PreviewPanel({
   const panelRef = useRef<HTMLElement>(null);
   const filename = path.split("/").at(-1) ?? path;
   const shownPath = useRef<string>();
+  // A new callback on every parent render must not reload the preview.
+  const missing = useRef(onMissing);
+  missing.current = onMissing;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -2297,7 +2323,12 @@ function PreviewPanel({
           onSessionExpired();
           return;
         }
-        setState({ status: "error", error: asApiError(cause) });
+        const error = asApiError(cause);
+        if (error.kind === "not-found") {
+          missing.current(path);
+          return;
+        }
+        setState({ status: "error", error });
       }
       if (controller.signal.aborted) return;
       try {

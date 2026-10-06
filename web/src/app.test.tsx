@@ -2563,6 +2563,50 @@ describe("security review regressions", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("closes the preview when an action finds its file gone", async () => {
+    const navigation = projects();
+    navigation.restore({
+      shareId: "work",
+      path: "projects",
+      previewPath: "projects/gone.txt",
+    });
+    const metadata = vi.fn<ApiClient["metadata"]>(async () => {
+      throw new ApiError("not-found", "gone", { status: 404 });
+    });
+    render(
+      <App
+        api={fakeApi({ directory: listing, metadata })}
+        navigation={navigation}
+      />,
+    );
+
+    const preview = await screen.findByRole("complementary", {
+      name: "gone.txt",
+    });
+    fireEvent.click(
+      within(preview).getByRole("button", { name: "Rename gone.txt" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "gone.txt is no longer available. It may have been deleted or moved.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("complementary", { name: "gone.txt" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "This item could not be checked. Reload the folder and try again.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(navigation.visits.at(-1)).toEqual({
+      route: { shareId: "work", path: "projects" },
+      replace: true,
+    });
+  });
+
   it("deletes with a freshly fetched validator", async () => {
     const etags = ['W/"reviewed"', 'W/"changed-later"'];
     const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
