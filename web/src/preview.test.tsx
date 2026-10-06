@@ -171,6 +171,86 @@ describe("secure file previews", () => {
     expect(screen.getByLabelText("File source")).toBe(source);
   });
 
+  it("closes the open preview when its file is deleted outside Crabinet", async () => {
+    class TestEventSource extends EventTarget {
+      static instance: TestEventSource;
+      readyState = 1;
+
+      constructor() {
+        super();
+        TestEventSource.instance = this;
+      }
+
+      close() {}
+    }
+    vi.stubGlobal("EventSource", TestEventSource);
+    const directory = vi
+      .fn<ApiClient["directory"]>()
+      .mockResolvedValueOnce(files)
+      .mockResolvedValue({
+        ...files,
+        entries: files.entries.filter((entry) => entry.name !== "code.rs"),
+      });
+    const preview = vi
+      .fn()
+      .mockResolvedValueOnce(previewDocument("still here"))
+      .mockRejectedValue(
+        new ApiError("not-found", "gone", { code: "not_found", status: 404 }),
+      );
+    const navigation = new MemoryNavigation();
+
+    render(
+      <App api={fakeApi({ directory, preview })} navigation={navigation} />,
+    );
+    fireEvent.click(await screen.findByRole("link", { name: "code.rs" }));
+    expect(await screen.findByLabelText("File source")).toHaveTextContent(
+      "still here",
+    );
+
+    TestEventSource.instance.dispatchEvent(new Event("invalidate"));
+
+    expect(
+      await screen.findByText(
+        "code.rs is no longer available. It may have been deleted or moved.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("complementary", { name: "code.rs" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Try preview again")).not.toBeInTheDocument();
+    expect(navigation.current()).toEqual({ shareId: "docs", path: "" });
+  });
+
+  it("closes a deep-linked preview of a file that no longer exists", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "docs",
+      path: "",
+      previewPath: "gone.txt",
+    });
+    render(
+      <App
+        api={fakeApi({
+          preview: vi
+            .fn()
+            .mockRejectedValue(
+              new ApiError("not-found", "gone", { status: 404 }),
+            ),
+        })}
+        navigation={navigation}
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        "gone.txt is no longer available. It may have been deleted or moved.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("complementary", { name: "gone.txt" }),
+    ).not.toBeInTheDocument();
+    expect(navigation.current()).toEqual({ shareId: "docs", path: "" });
+  });
+
   it("renders hostile code as text, supports wrapping, and never writes storage", async () => {
     const source =
       '<img src=x onerror="alert(1)"><script>localStorage.pwned=1</script>';
@@ -933,14 +1013,12 @@ describe("secure file previews", () => {
     ["binary_file", 415, "Binary preview is not supported"],
     ["invalid_utf8", 415, "Text encoding is not supported"],
     ["unsupported_entry", 415, "This item cannot be previewed"],
-    ["not_found", 404, "Preview no longer available"],
   ])("shows a specific safe error for %s", async (code, status, title) => {
-    const kind = status === 404 ? "not-found" : "server";
     const api = fakeApi({
       preview: vi
         .fn()
         .mockRejectedValue(
-          new ApiError(kind, "sensitive backend detail", { code, status }),
+          new ApiError("server", "sensitive backend detail", { code, status }),
         ),
     });
     render(
