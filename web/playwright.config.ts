@@ -20,6 +20,66 @@ const usesTLS = (engine: Engine) => engine === "webkit";
 const serverURL = (engine: Engine) =>
   externalBaseURL ??
   `${usesTLS(engine) ? "https" : "http"}://localhost:${String(enginePort(engine))}`;
+/**
+ * OpenID Connect sign-in runs against one more server, on the next port,
+ * with OIDC enabled beside passwords and a fake provider (`e2e/fake-oidc.ts`)
+ * that Crabinet trusts through `auth.oidc.ca_file`. Its callback must be
+ * HTTPS, so it is always behind the TLS proxy. Keeping it apart leaves every
+ * other suite's sign-in page and server unchanged. Each engine's `oidc-`
+ * project uses it; the suite changes only sessions and one preference it
+ * restores, so the engines can share it. It needs a provider beside the
+ * server, so it does not run against an external server.
+ */
+const oidcPort = port + engines.length;
+const oidcURL = `https://localhost:${String(oidcPort)}`;
+const oidcSpec = /oidc\.spec\.ts$/;
+
+const engineServers = engines.map((engine) => ({
+  command: "sh ./e2e/run-server.sh",
+  env: {
+    CRABINET_E2E_PORT: String(enginePort(engine)),
+    CRABINET_E2E_TLS: usesTLS(engine) ? "1" : "0",
+  },
+  url: `${serverURL(engine)}/health/ready`,
+  ignoreHTTPSErrors: usesTLS(engine),
+  reuseExistingServer: false,
+  timeout: 120_000,
+  stdout: "pipe" as const,
+  stderr: "pipe" as const,
+}));
+const oidcServer = {
+  command: "sh ./e2e/run-server.sh",
+  env: {
+    CRABINET_E2E_PORT: String(oidcPort),
+    CRABINET_E2E_TLS: "1",
+    CRABINET_E2E_OIDC: "1",
+  },
+  url: `${oidcURL}/health/ready`,
+  ignoreHTTPSErrors: true,
+  reuseExistingServer: false,
+  timeout: 120_000,
+  stdout: "pipe" as const,
+  stderr: "pipe" as const,
+};
+
+const oidcProjects = externalBaseURL
+  ? []
+  : [
+      { name: "oidc-chromium", device: devices["Desktop Chrome"] },
+      { name: "oidc-webkit", device: devices["Desktop Safari"] },
+      { name: "oidc-firefox", device: devices["Desktop Firefox"] },
+    ].map(({ name, device }) => ({
+      name,
+      testMatch: oidcSpec,
+      use: {
+        ...device,
+        baseURL: oidcURL,
+        // The browser does not need to trust the provider or the proxy:
+        // what is under test is Crabinet's trust in the provider.
+        ignoreHTTPSErrors: true,
+        deviceScaleFactor: 1,
+      },
+    }));
 
 export default defineConfig({
   testDir: "./e2e",
@@ -43,24 +103,11 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "retain-on-failure",
   },
-  webServer: externalBaseURL
-    ? undefined
-    : engines.map((engine) => ({
-        command: "sh ./e2e/run-server.sh",
-        env: {
-          CRABINET_E2E_PORT: String(enginePort(engine)),
-          CRABINET_E2E_TLS: usesTLS(engine) ? "1" : "0",
-        },
-        url: `${serverURL(engine)}/health/ready`,
-        ignoreHTTPSErrors: usesTLS(engine),
-        reuseExistingServer: false,
-        timeout: 120_000,
-        stdout: "pipe" as const,
-        stderr: "pipe" as const,
-      })),
+  webServer: externalBaseURL ? undefined : [...engineServers, oidcServer],
   projects: [
     {
       name: "desktop-chromium",
+      testIgnore: oidcSpec,
       use: {
         browserName: "chromium",
         baseURL: serverURL("chromium"),
@@ -69,6 +116,7 @@ export default defineConfig({
     },
     {
       name: "mobile-chromium",
+      testIgnore: oidcSpec,
       use: {
         browserName: "chromium",
         baseURL: serverURL("chromium"),
@@ -82,6 +130,7 @@ export default defineConfig({
     // layout, but Linux networking and a GStreamer media stack.
     {
       name: "desktop-webkit",
+      testIgnore: oidcSpec,
       use: {
         ...devices["Desktop Safari"],
         baseURL: serverURL("webkit"),
@@ -92,6 +141,7 @@ export default defineConfig({
     },
     {
       name: "ipad-webkit",
+      testIgnore: oidcSpec,
       use: {
         ...devices["iPad Pro 11 landscape"],
         baseURL: serverURL("webkit"),
@@ -101,6 +151,7 @@ export default defineConfig({
     },
     {
       name: "desktop-firefox",
+      testIgnore: oidcSpec,
       use: {
         ...devices["Desktop Firefox"],
         baseURL: serverURL("firefox"),
@@ -108,5 +159,6 @@ export default defineConfig({
         deviceScaleFactor: 1,
       },
     },
+    ...oidcProjects,
   ],
 });

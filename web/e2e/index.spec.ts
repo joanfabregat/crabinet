@@ -750,9 +750,11 @@ test("a folder row shows its size, from the listing once the server has it cache
   await expect(row.locator(".entry-meta")).toBeVisible();
   await expect(row.locator(".entry-meta")).toHaveText("64 B");
   // An earlier test may have had the folder walked within the cache's
-  // minute; otherwise the client asked for it.
+  // minute; otherwise the client asked for it, once. Other folders in the
+  // share are sized too, as their rows come on screen.
+  const nestedRequests = () => sizeRequests.filter((path) => path === "nested");
   if ((await listedSize(first)) === undefined) {
-    expect(sizeRequests).toEqual(["nested"]);
+    expect(nestedRequests()).toEqual(["nested"]);
   }
 
   // Now cached, the size comes with the listing and nothing is asked.
@@ -761,10 +763,10 @@ test("a folder row shows its size, from the listing once the server has it cache
   await page.reload();
   expect(await listedSize(second)).toEqual({ size: 64, complete: true });
   await expect(row.locator(".entry-meta")).toHaveText("64 B");
-  await expect(page.getByRole("img", { name: "Calculating size" })).toHaveCount(
+  await expect(row.getByRole("img", { name: "Calculating size" })).toHaveCount(
     0,
   );
-  expect(sizeRequests).toEqual([]);
+  expect(nestedRequests()).toEqual([]);
   const results = await new AxeBuilder({ page })
     .include(".entry-list")
     .analyze();

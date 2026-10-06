@@ -13,6 +13,15 @@ listen_port=$port
 if [ "$tls" = 1 ]; then
   listen_port=$((port + 100))
 fi
+# With CRABINET_E2E_OIDC=1 (which needs CRABINET_E2E_TLS=1), OIDC sign-in is
+# enabled alongside passwords, against a fake provider (fake-oidc.ts) on the
+# port 200 higher that only a per-run test CA, given as auth.oidc.ca_file,
+# vouches for.
+oidc=${CRABINET_E2E_OIDC:-0}
+if [ "$oidc" = 1 ] && [ "$tls" != 1 ]; then
+  echo "CRABINET_E2E_OIDC=1 needs CRABINET_E2E_TLS=1: the callback is HTTPS" >&2
+  exit 1
+fi
 
 if [ ! -x "$binary" ]; then
   echo "E2E production binary not found at $binary" >&2
@@ -23,10 +32,11 @@ fi
 state_dir=$(mktemp -d "${TMPDIR:-/tmp}/crabinet-e2e.XXXXXXXX")
 server_pid=
 proxy_pid=
+provider_pid=
 
 cleanup() {
   trap - EXIT INT TERM
-  for pid in $proxy_pid $server_pid; do
+  for pid in $proxy_pid $server_pid $provider_pid; do
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
@@ -63,6 +73,75 @@ sed \
   -e "s|__STATE_DIR__|$state_dir|g" \
   -e "s|__PORT__|$listen_port|g" \
   "$script_dir/fixtures/config.toml.in" >"$state_dir/config.toml"
+if [ "$oidc" = 1 ]; then
+  # The fake provider (fake-oidc.ts) serves HTTPS with a certificate from a
+  # test CA made for this run. Crabinet trusts that CA only through
+  # auth.oidc.ca_file; the CA's key is deleted once the certificate is signed.
+  provider_port=$((port + 200))
+  public_origin="https://localhost:$port"
+  cat >"$state_dir/oidc-pki.cnf" <<'PKI'
+[req]
+distinguished_name = dn
+[dn]
+[ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+[provider]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = IP:127.0.0.1,DNS:localhost
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+PKI
+  openssl req -x509 -new -config "$state_dir/oidc-pki.cnf" -extensions ca \
+    -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+    -subj "/CN=Crabinet E2E test CA" \
+    -keyout "$state_dir/oidc-ca.key" -out "$state_dir/oidc-ca.crt" 2>/dev/null
+  openssl req -new -config "$state_dir/oidc-pki.cnf" \
+    -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -subj /CN=127.0.0.1 \
+    -keyout "$state_dir/oidc-provider.key" -out "$state_dir/oidc-provider.csr" 2>/dev/null
+  openssl x509 -req -in "$state_dir/oidc-provider.csr" \
+    -CA "$state_dir/oidc-ca.crt" -CAkey "$state_dir/oidc-ca.key" \
+    -set_serial "0x$(openssl rand -hex 8)" -days 1 \
+    -extfile "$state_dir/oidc-pki.cnf" -extensions provider \
+    -out "$state_dir/oidc-provider.crt" 2>/dev/null
+  rm -f -- "$state_dir/oidc-ca.key" "$state_dir/oidc-provider.csr"
+  chmod 644 "$state_dir/oidc-ca.crt"
+  (umask 077 && openssl rand -hex 32 | tr -d '\n' >"$state_dir/oidc-client.secret")
+
+  node "$script_dir/fake-oidc.ts" "$provider_port" \
+    "$state_dir/oidc-provider.crt" "$state_dir/oidc-provider.key" \
+    crabinet-e2e "$state_dir/oidc-client.secret" \
+    "$public_origin/api/v1/auth/oidc/callback" "$state_dir/oidc-ready" &
+  provider_pid=$!
+  # Crabinet reads discovery at startup, so the provider must be up first.
+  attempts=0
+  while [ ! -e "$state_dir/oidc-ready" ]; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 100 ] || ! kill -0 "$provider_pid" 2>/dev/null; then
+      echo "The fake OIDC provider did not start" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+
+  cat >>"$state_dir/config.toml" <<OIDC
+
+[auth]
+oidc_enabled = true
+
+[auth.oidc]
+issuer = "https://127.0.0.1:$provider_port"
+client_id = "crabinet-e2e"
+client_secret_file = "$state_dir/oidc-client.secret"
+redirect_uri = "$public_origin/api/v1/auth/oidc/callback"
+ca_file = "$state_dir/oidc-ca.crt"
+OIDC
+fi
+
 chmod 600 "$state_dir/config.toml"
 
 "$binary" --config "$state_dir/config.toml" &

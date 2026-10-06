@@ -97,7 +97,15 @@ struct RawOidcConfig {
     client_id: String,
     client_secret_file: PathBuf,
     redirect_uri: String,
+    /// Absolute path to a PEM file of one or more CA certificates that the
+    /// connection to the OIDC provider trusts in addition to the public
+    /// roots, for a provider whose certificate an internal CA issued. At most
+    /// 1 MiB; private keys are rejected. HTTPS and hostname checks still apply.
+    ca_file: Option<PathBuf>,
 }
+
+/// Largest `auth.oidc.ca_file` accepted, far above any real CA bundle.
+const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -291,6 +299,9 @@ pub struct OidcConfig {
     client_secret: String,
     client_secret_file: PathBuf,
     redirect_uri: String,
+    ca_file: Option<PathBuf>,
+    /// DER certificates from `ca_file`, trusted only by the OIDC client.
+    ca_certificates: Vec<Vec<u8>>,
 }
 
 impl fmt::Debug for OidcConfig {
@@ -301,6 +312,8 @@ impl fmt::Debug for OidcConfig {
             .field("client_id", &self.client_id)
             .field("client_secret", &"[REDACTED]")
             .field("redirect_uri", &self.redirect_uri)
+            .field("ca_file", &self.ca_file)
+            .field("ca_certificates", &self.ca_certificates.len())
             .finish()
     }
 }
@@ -583,7 +596,14 @@ impl Config {
             if client_secret.trim().is_empty() || client_secret.contains(['\n', '\r']) {
                 return Err(ConfigError::Validation("auth.oidc.client_secret_file contains an invalid secret".into()));
             }
-            Ok(OidcConfig { issuer: value.issuer, client_id: value.client_id, client_secret, client_secret_file, redirect_uri: redirect_uri.to_string() })
+            let (ca_file, ca_certificates) = match &value.ca_file {
+                Some(path) => {
+                    let (path, certificates) = read_ca_file(path)?;
+                    (Some(path), certificates)
+                }
+                None => (None, Vec::new()),
+            };
+            Ok(OidcConfig { issuer: value.issuer, client_id: value.client_id, client_secret, client_secret_file, redirect_uri: redirect_uri.to_string(), ca_file, ca_certificates })
         }).transpose()?;
 
         let mut usernames = HashSet::new();
@@ -731,6 +751,7 @@ impl Config {
             &session_secret_file,
             oidc.as_ref()
                 .map(|value| value.client_secret_file.as_path()),
+            oidc.as_ref().and_then(|value| value.ca_file.as_deref()),
         )?;
         if let Some(cache) = &thumbnail_cache_path {
             for share in &shares {
@@ -973,6 +994,11 @@ impl OidcConfig {
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
     }
+    /// DER-encoded CA certificates from `auth.oidc.ca_file`, if any. Only the
+    /// OIDC HTTP client trusts them, in addition to the public roots.
+    pub fn ca_certificates(&self) -> &[Vec<u8>] {
+        &self.ca_certificates
+    }
 
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
@@ -982,7 +1008,16 @@ impl OidcConfig {
             client_secret: "test-secret".into(),
             client_secret_file: PathBuf::from("test-secret"),
             redirect_uri: "https://files.example.com/api/v1/auth/oidc/callback".into(),
+            ca_file: None,
+            ca_certificates: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_issuer(mut self, issuer: &str, ca_certificates: Vec<Vec<u8>>) -> Self {
+        issuer.clone_into(&mut self.issuer);
+        self.ca_certificates = ca_certificates;
+        self
     }
 }
 
@@ -1484,6 +1519,134 @@ fn validate_https_url(value: &str, field: &str) -> Result<url::Url, ConfigError>
     Ok(parsed)
 }
 
+/// Reads `auth.oidc.ca_file`: an absolute, regular, non-symlink file that no
+/// group or other user can write, of at most `MAX_CA_FILE_BYTES`, holding only
+/// PEM certificates the TLS client accepts as trust anchors. Errors never
+/// quote the file's contents.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "startup-only: reads an operator-trusted configuration path before serving requests"
+)]
+fn read_ca_file(path: &Path) -> Result<(PathBuf, Vec<Vec<u8>>), ConfigError> {
+    use std::io::Read;
+
+    const FIELD: &str = "auth.oidc.ca_file";
+    if !path.is_absolute() {
+        return Err(ConfigError::Validation(format!(
+            "{FIELD} must be an absolute path"
+        )));
+    }
+    // nosemgrep: crabinet-ambient-filesystem-path
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ConfigError::Validation(format!("{FIELD} is missing or unreadable")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ConfigError::Validation(format!(
+            "{FIELD} must be a regular file, not a symbolic link"
+        )));
+    }
+    // The file is not secret, but whoever can change it chooses which
+    // certificates the provider connection trusts.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o022 != 0 {
+            let name = path
+                .file_name()
+                .map_or_else(|| "the file".into(), |name| name.to_string_lossy());
+            return Err(ConfigError::Validation(format!(
+                "{FIELD} must not be writable by group or other users; run `chmod go-w {name}` as its owner"
+            )));
+        }
+    }
+    let too_large = || {
+        ConfigError::Validation(format!(
+            "{FIELD} must not exceed {} KiB",
+            MAX_CA_FILE_BYTES / 1024
+        ))
+    };
+    if metadata.len() > MAX_CA_FILE_BYTES {
+        return Err(too_large());
+    }
+    let mut contents = Vec::new();
+    // nosemgrep: crabinet-ambient-filesystem-path
+    fs::File::open(path)
+        .and_then(|file| file.take(MAX_CA_FILE_BYTES + 1).read_to_end(&mut contents))
+        .map_err(|_| ConfigError::Validation(format!("{FIELD} is missing or unreadable")))?;
+    if contents.len() as u64 > MAX_CA_FILE_BYTES {
+        return Err(too_large());
+    }
+    let certificates = parse_pem_certificates(&contents)
+        .map_err(|reason| ConfigError::Validation(format!("{FIELD} {reason}")))?;
+    // The same TLS stack that will use them must accept every certificate as
+    // a trust anchor, so `check-config` catches what startup would refuse.
+    certificates
+        .iter()
+        .try_fold(reqwest::Client::builder(), |builder, der| {
+            reqwest::Certificate::from_der(der).map(|cert| builder.add_root_certificate(cert))
+        })
+        .and_then(reqwest::ClientBuilder::build)
+        .map_err(|_| {
+            ConfigError::Validation(format!(
+                "{FIELD} contains a certificate that cannot be used as a trust anchor"
+            ))
+        })?;
+    // nosemgrep: crabinet-ambient-filesystem-path
+    let canonical = fs::canonicalize(path)
+        .map_err(|_| ConfigError::Validation(format!("{FIELD} cannot be canonicalized")))?;
+    Ok((canonical, certificates))
+}
+
+/// Decodes a PEM file that contains one or more `CERTIFICATE` blocks and
+/// nothing but text between them. A private key, any other block type, an
+/// unterminated block, or invalid base64 is refused; the reason never quotes
+/// the input.
+fn parse_pem_certificates(contents: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let text = std::str::from_utf8(contents).map_err(|_| "is not a PEM file")?;
+    // Checked over the whole text first, so a key is named as the problem
+    // even inside a malformed block.
+    if text.contains("PRIVATE KEY") {
+        return Err("contains a private key; it must hold only CA certificates");
+    }
+    let mut certificates = Vec::new();
+    let mut lines = text.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        let Some(label) = line
+            .strip_prefix("-----BEGIN ")
+            .and_then(|rest| rest.strip_suffix("-----"))
+        else {
+            if line.starts_with("-----") {
+                return Err("is not a valid PEM file");
+            }
+            continue;
+        };
+        if label != "CERTIFICATE" {
+            return Err("must contain only PEM CERTIFICATE blocks");
+        }
+        let mut body = String::new();
+        loop {
+            match lines.next() {
+                Some("-----END CERTIFICATE-----") => break,
+                Some(line) if !line.starts_with("-----") => body.push_str(line),
+                _ => return Err("is not a valid PEM file"),
+            }
+        }
+        let der = STANDARD
+            .decode(body)
+            .map_err(|_| "is not a valid PEM file")?;
+        if der.is_empty() {
+            return Err("is not a valid PEM file");
+        }
+        certificates.push(der);
+    }
+    if certificates.is_empty() {
+        return Err("must contain at least one PEM CERTIFICATE block");
+    }
+    Ok(certificates)
+}
+
 #[expect(
     clippy::disallowed_methods,
     reason = "startup-only: inspects operator-trusted configuration paths before serving requests"
@@ -1542,6 +1705,7 @@ fn reject_sensitive_paths_inside_shares(
     database: &Path,
     secret: &Path,
     oidc_secret: Option<&Path>,
+    oidc_ca_file: Option<&Path>,
 ) -> Result<(), ConfigError> {
     for share in shares {
         for (label, path) in [
@@ -1559,6 +1723,13 @@ fn reject_sensitive_paths_inside_shares(
         if oidc_secret.is_some_and(|path| path.starts_with(&share.root)) {
             return Err(ConfigError::Validation(format!(
                 "OIDC client secret must not be located inside share {:?}",
+                share.id
+            )));
+        }
+        // A share writer could otherwise add a trust anchor for the provider.
+        if oidc_ca_file.is_some_and(|path| path.starts_with(&share.root)) {
+            return Err(ConfigError::Validation(format!(
+                "auth.oidc.ca_file must not be located inside share {:?}",
                 share.id
             )));
         }
@@ -1994,6 +2165,156 @@ permission = "write"
         assert!(config.auth().oidc().is_some());
         assert_eq!(config.users()[0].email(), Some("alice@example.com"));
         assert_eq!(config.users()[0].password_hash(), None);
+    }
+
+    /// The valid configuration with OIDC enabled and `ca_file` set to `ca`.
+    fn with_oidc_ca_file(tree: &TestTree, ca: &Path) -> String {
+        let secret = tree.root.parent().unwrap().join("oidc.secret");
+        write_private_file(&secret, "example-client-secret");
+        let settings = format!(
+            "[auth]\noidc_enabled = true\n[auth.oidc]\nissuer = \"https://id.example.com\"\nclient_id = \"crabinet\"\nclient_secret_file = {secret:?}\nredirect_uri = \"https://files.example.com/api/v1/auth/oidc/callback\"\nca_file = {ca:?}\n",
+        );
+        tree.valid_text()
+            .replace("[server]", &format!("{settings}[server]"))
+            .replace(
+                &format!("password_hash = \"{HASH}\""),
+                &format!("email = \"alice@example.com\"\npassword_hash = \"{HASH}\""),
+            )
+    }
+
+    /// Writes `contents` as a world-readable, owner-writable CA file.
+    fn write_ca_file(path: &Path, contents: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn oidc_ca_file_loads_a_certificate_bundle() {
+        let tree = TestTree::new();
+        let first = crate::test_pki::Authority::new("First test CA");
+        let second = crate::test_pki::Authority::new("Second test CA");
+        let ca = tree.root.parent().unwrap().join("oidc-ca.pem");
+        let mut bundle = b"# Internal test roots\r\n".to_vec();
+        bundle.extend(first.pem());
+        bundle.extend(b"\nSecond root:\n");
+        bundle.extend(
+            String::from_utf8(second.pem())
+                .unwrap()
+                .replace('\n', "\r\n")
+                .as_bytes(),
+        );
+        write_ca_file(&ca, &bundle);
+        let config = tree.load(&with_oidc_ca_file(&tree, &ca)).unwrap();
+        let oidc = config.auth().oidc().unwrap();
+        assert_eq!(oidc.ca_certificates(), [first.der(), second.der()]);
+        assert!(format!("{oidc:?}").contains("ca_certificates: 2"));
+
+        // Without ca_file nothing beyond the public roots is trusted.
+        let without = with_oidc_ca_file(&tree, &ca).replace(&format!("ca_file = {ca:?}\n"), "");
+        let config = tree.load(&without).unwrap();
+        assert!(config.auth().oidc().unwrap().ca_certificates().is_empty());
+    }
+
+    #[test]
+    fn oidc_ca_file_rejects_unsafe_or_malformed_files_without_quoting_them() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tree = TestTree::new();
+        let directory = tree.root.parent().unwrap();
+        let authority = crate::test_pki::Authority::new("Test CA");
+        let certificate = authority.pem();
+        let key = crate::test_pki::private_key_pem();
+        let error = |path: &Path| {
+            tree.load(&with_oidc_ca_file(&tree, path))
+                .unwrap_err()
+                .to_string()
+        };
+        let file = |name: &str, contents: &[u8]| {
+            let path = directory.join(name);
+            write_ca_file(&path, contents);
+            path
+        };
+
+        let relative = with_oidc_ca_file(&tree, Path::new("/x"))
+            .replace("ca_file = \"/x\"", "ca_file = \"oidc-ca.pem\"");
+        file("oidc-ca.pem", &certificate);
+        assert!(
+            tree.load(&relative)
+                .unwrap_err()
+                .to_string()
+                .contains("auth.oidc.ca_file must be an absolute path")
+        );
+        assert!(error(&directory.join("missing.pem")).contains("is missing or unreadable"));
+        assert!(error(directory).contains("must be a regular file"));
+        let link = directory.join("link.pem");
+        symlink(directory.join("oidc-ca.pem"), &link).unwrap();
+        assert!(error(&link).contains("not a symbolic link"));
+
+        let writable = file("writable.pem", &certificate);
+        for mode in [0o664, 0o646, 0o666] {
+            fs::set_permissions(&writable, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                error(&writable).contains("`chmod go-w writable.pem`"),
+                "{mode:o}"
+            );
+        }
+        for mode in [0o644, 0o444, 0o600, 0o640] {
+            fs::set_permissions(&writable, fs::Permissions::from_mode(mode)).unwrap();
+            tree.load(&with_oidc_ca_file(&tree, &writable)).unwrap();
+        }
+
+        let mut oversized = certificate.clone();
+        oversized.resize(usize::try_from(MAX_CA_FILE_BYTES).unwrap() + 1, b'\n');
+        assert!(error(&file("large.pem", &oversized)).contains("must not exceed 1024 KiB"));
+
+        let mut with_key = certificate.clone();
+        with_key.extend(&key);
+        let marker = String::from_utf8(key.clone()).unwrap();
+        let marker = marker.lines().nth(1).unwrap();
+        for (name, contents, expected) in [
+            ("key.pem", key.clone(), "contains a private key"),
+            ("cert-and-key.pem", with_key, "contains a private key"),
+            (
+                "public-key.pem",
+                crate::test_pki::public_key_pem(),
+                "must contain only PEM CERTIFICATE blocks",
+            ),
+            ("empty.pem", Vec::new(), "at least one PEM CERTIFICATE block"),
+            (
+                "text.pem",
+                b"not a certificate\n".to_vec(),
+                "at least one PEM CERTIFICATE block",
+            ),
+            ("der.pem", authority.der(), "is not a PEM file"),
+            (
+                "unterminated.pem",
+                certificate[..certificate.len() - 26].to_vec(),
+                "is not a valid PEM file",
+            ),
+            (
+                "bad-base64.pem",
+                b"-----BEGIN CERTIFICATE-----\nnot*base64\n-----END CERTIFICATE-----\n".to_vec(),
+                "is not a valid PEM file",
+            ),
+            (
+                "not-x509.pem",
+                b"-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n"
+                    .to_vec(),
+                "cannot be used as a trust anchor",
+            ),
+        ] {
+            let message = error(&file(name, &contents));
+            assert!(message.contains("auth.oidc.ca_file"), "{name}: {message}");
+            assert!(message.contains(expected), "{name}: {message}");
+            assert!(!message.contains(marker), "{name} quoted its key");
+            assert!(!message.contains("bm90"), "{name} quoted its contents");
+        }
+
+        let inside = tree.root.join("ca.pem");
+        write_ca_file(&inside, &certificate);
+        assert!(error(&inside).contains("auth.oidc.ca_file must not be located inside share"));
     }
 
     #[test]

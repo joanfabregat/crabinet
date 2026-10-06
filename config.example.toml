@@ -87,6 +87,10 @@ gravatar_enabled = false
 # client_id = "crabinet"
 # client_secret_file = "secrets/oidc-client-secret"
 # redirect_uri = "https://files.example.com/api/v1/auth/oidc/callback"
+# For a provider whose certificate an internal CA issued: an absolute path to a PEM
+# file of that CA's certificates, trusted in addition to the public roots for the
+# provider connection only. Not secret, but must not be group- or world-writable.
+# ca_file = "/srv/crabinet/oidc-ca.pem"
 
 # Optional passkeys. Use the exact public origin (including a nondefault port).
 # An initial password or OIDC method is still required to enroll and recover keys.

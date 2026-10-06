@@ -120,7 +120,7 @@ podman run --detach \
   --config /etc/crabinet/config.toml
 ```
 
-For a writable share change only that share mount to `:rw,Z`; never make the configuration or secret mount writable. Ensure the mapped host user can traverse/read each share and can create, rename, sync, and delete inside writable shares. Avoid `:U` unless you explicitly intend Podman to change host ownership.
+For a writable share change only that share mount to `:rw,Z`; never make the configuration or secret mount writable. A private OIDC provider's CA certificate for `auth.oidc.ca_file` can sit in `deploy/config` beside the configuration (for example `-v "$PWD/deploy/config/oidc-ca.pem:/etc/crabinet/oidc-ca.pem:ro,Z"` with `ca_file = "/etc/crabinet/oidc-ca.pem"`); it is not secret, but it must not be writable by group or other users or be a symbolic link, so bind-mount the file itself rather than a directory of links such as a Kubernetes ConfigMap volume without `subPath`. Ensure the mapped host user can traverse/read each share and can create, rename, sync, and delete inside writable shares. Avoid `:U` unless you explicitly intend Podman to change host ownership.
 
 Check health from the host or a dedicated proxy/monitor container in the pod:
 
@@ -179,7 +179,7 @@ The start-folder, passkey, and display-preference features migrate the SQLite sc
 
 Crabinet emits structured JSON logs to standard output. Set `RUST_LOG=crabinet=debug` only during controlled diagnosis; logs are designed not to include passwords, password hashes, file contents, host paths, session tokens, or CSRF tokens. Every HTTP response includes a server-generated `X-Request-ID`, replacing any value the client sent; correlate it with the request span. Sign-ins, logouts, expired or revoked sessions, refused share access, and mutations emit audit events marked `audit=true`; see [authentication](authentication.md#audit-events).
 
-- Startup fails before listening: run `crabinet check-config`; verify that the session and OIDC client secrets are owner-only (`chmod 600`; any group or other permission is rejected) and long enough, database parent existence, absolute non-overlapping share roots, that no sensitive path is inside a share, that `.index-staging` has been reviewed and removed from writable shares, and that writable share roots permit creation of private `.crabinet/staging` directories.
+- Startup fails before listening: run `crabinet check-config`; verify that the session and OIDC client secrets are owner-only (`chmod 600`; any group or other permission is rejected) and long enough, that an `auth.oidc.ca_file` is an absolute path to a file of PEM certificates only that no group or other user can write, database parent existence, absolute non-overlapping share roots, that no sensitive path is inside a share, that `.index-staging` has been reviewed and removed from writable shares, and that writable share roots permit creation of private `.crabinet/staging` directories.
 - Login succeeds but the browser returns to login: confirm end-to-end HTTPS, preserved `Host`, and matching `Origin`; `Secure` cookies are not for plain network HTTP.
 - A user cannot see a share: grants are case-sensitive and absent-by-default; restart after changing the immutable configuration.
 - Writes return `403`: verify a `write` grant, `read_only = false`, a current session/CSRF token, and host filesystem permissions.
