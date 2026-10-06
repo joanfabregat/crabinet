@@ -133,6 +133,13 @@
     "RawOidcConfig": {
       "type": "object",
       "properties": {
+        "ca_file": {
+          "description": "Absolute path to a PEM file of one or more CA certificates that the\nconnection to the OIDC provider trusts in addition to the public\nroots, for a provider whose certificate an internal CA issued. At most\n1 MiB; private keys are rejected. HTTPS and hostname checks still apply.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "client_id": {
           "type": "string"
         },

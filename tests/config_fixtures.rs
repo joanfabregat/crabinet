@@ -62,8 +62,21 @@ fn render(template: &str, temp: &Path) -> String {
     fs::write(&file, b"not a directory").unwrap();
     write_secret(&secret, [9_u8; 32]);
     symlink(&root, &link).unwrap();
+    let oidc_secret = temp.join("oidc.secret");
+    fs::write(&oidc_secret, "example-client-secret").unwrap();
+    fs::set_permissions(&oidc_secret, fs::Permissions::from_mode(0o600)).unwrap();
+    // Generated for this run, so no private key is ever committed.
+    let with_key = temp.join("ca-with-key.pem");
+    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+    let key = openssl::ec::EcKey::generate(&group).unwrap();
+    fs::write(&with_key, key.private_key_to_pem().unwrap()).unwrap();
+    let not_pem = temp.join("not-pem.pem");
+    fs::write(&not_pem, b"not a certificate\n").unwrap();
     let (server, user, share) = fragments(&root, &secret);
     template
+        .replace("{{OIDC_SECRET}}", oidc_secret.to_str().unwrap())
+        .replace("{{CA_WITH_PRIVATE_KEY}}", with_key.to_str().unwrap())
+        .replace("{{NOT_PEM}}", not_pem.to_str().unwrap())
         .replace("{{SERVER}}", &server)
         .replace("{{USER}}", &user)
         .replace("{{SHARE}}", &share)
@@ -127,6 +140,10 @@ fn every_invalid_fixture_is_rejected() {
         include_str!("fixtures/config/invalid/oidc-subject-without-email.toml"),
         include_str!("fixtures/config/invalid/folder-sizes-type.toml"),
         include_str!("fixtures/config/invalid/archive-compression-value.toml"),
+        include_str!("fixtures/config/invalid/oidc-ca-file-relative.toml"),
+        include_str!("fixtures/config/invalid/oidc-ca-file-missing.toml"),
+        include_str!("fixtures/config/invalid/oidc-ca-file-private-key.toml"),
+        include_str!("fixtures/config/invalid/oidc-ca-file-not-pem.toml"),
     ];
     for (index, template) in fixtures.into_iter().enumerate() {
         let temp = tempfile::tempdir().unwrap();
@@ -136,6 +153,37 @@ fn every_invalid_fixture_is_rejected() {
         assert!(
             Config::load(path).is_err(),
             "invalid fixture {index} loaded"
+        );
+    }
+}
+
+#[test]
+fn invalid_oidc_ca_file_fixtures_fail_on_the_ca_file() {
+    for (template, expected) in [
+        (
+            include_str!("fixtures/config/invalid/oidc-ca-file-relative.toml"),
+            "must be an absolute path",
+        ),
+        (
+            include_str!("fixtures/config/invalid/oidc-ca-file-missing.toml"),
+            "is missing or unreadable",
+        ),
+        (
+            include_str!("fixtures/config/invalid/oidc-ca-file-private-key.toml"),
+            "contains a private key",
+        ),
+        (
+            include_str!("fixtures/config/invalid/oidc-ca-file-not-pem.toml"),
+            "at least one PEM CERTIFICATE block",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        fs::write(&path, render(template, temp.path())).unwrap();
+        let error = Config::load(path).unwrap_err().to_string();
+        assert!(
+            error.contains("auth.oidc.ca_file") && error.contains(expected),
+            "{error}"
         );
     }
 }

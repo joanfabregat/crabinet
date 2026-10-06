@@ -173,12 +173,7 @@ impl OidcService {
     /// `transaction_key` authenticates sign-in transaction cookies; derive it
     /// from the session secret with a domain separate from other uses.
     pub async fn discover(config: OidcConfig, transaction_key: Vec<u8>) -> Result<Self, String> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .no_proxy()
-            .build()
-            .map_err(|_| "cannot initialize OIDC HTTP client")?;
+        let http = http_client(&config)?;
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
             config.issuer().trim_end_matches('/')
@@ -596,6 +591,26 @@ impl OidcService {
     }
 }
 
+/// The client for every request to the provider. It trusts the public roots
+/// and, only here, the operator's `auth.oidc.ca_file` certificates as well;
+/// hostname verification and the HTTPS-only endpoint rules are unchanged.
+fn http_client(config: &OidcConfig) -> Result<reqwest::Client, String> {
+    config
+        .ca_certificates()
+        .iter()
+        .try_fold(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(10))
+                .no_proxy(),
+            |builder, der| {
+                reqwest::Certificate::from_der(der).map(|cert| builder.add_root_certificate(cert))
+            },
+        )
+        .and_then(reqwest::ClientBuilder::build)
+        .map_err(|_| "cannot initialize OIDC HTTP client".into())
+}
+
 fn safe_https_url(value: &str) -> Result<(), String> {
     let url = Url::parse(value).map_err(|_| "OIDC provider returned an invalid endpoint")?;
     if url.scheme() != "https"
@@ -954,6 +969,70 @@ mod tests {
                 .unwrap()
                 .verified_email()
                 .is_none()
+        );
+    }
+
+    /// A provider over HTTPS whose certificate `authority` issued for
+    /// `addresses` and `names`, serving discovery and an empty key set.
+    fn https_provider(
+        authority: &crate::test_pki::Authority,
+        addresses: &[IpAddr],
+        names: &[&str],
+    ) -> String {
+        let address =
+            crate::test_pki::serve_https(authority.issue(addresses, names), |address, path| {
+                let issuer = format!("https://{address}");
+                match path {
+                    "/.well-known/openid-configuration" => Some(
+                        json!({
+                            "issuer": issuer,
+                            "authorization_endpoint": format!("{issuer}/authorize"),
+                            "token_endpoint": format!("{issuer}/token"),
+                            "jwks_uri": format!("{issuer}/jwks"),
+                            "token_endpoint_auth_methods_supported": ["client_secret_basic"],
+                        })
+                        .to_string(),
+                    ),
+                    "/jwks" => Some(json!({"keys": []}).to_string()),
+                    _ => None,
+                }
+            });
+        format!("https://{address}")
+    }
+
+    #[tokio::test]
+    async fn discovery_trusts_the_configured_ca_only_for_matching_hosts() {
+        let authority = crate::test_pki::Authority::new("Crabinet test CA");
+        let loopback = [IpAddr::from([127, 0, 0, 1])];
+        let issuer = https_provider(&authority, &loopback, &["localhost"]);
+        let trusting = OidcConfig::for_test().with_test_issuer(&issuer, vec![authority.der()]);
+        let service = OidcService::discover(trusting, vec![1; 32]).await.unwrap();
+        assert_eq!(
+            service.inner.metadata.token_endpoint,
+            format!("{issuer}/token")
+        );
+
+        // Without the CA only the public roots apply, which do not include it.
+        let public_only = OidcConfig::for_test().with_test_issuer(&issuer, Vec::new());
+        assert!(
+            OidcService::discover(public_only, vec![1; 32])
+                .await
+                .is_err()
+        );
+
+        // Another CA is no substitute for the one that issued the certificate.
+        let other = crate::test_pki::Authority::new("Another test CA");
+        let wrong_ca = OidcConfig::for_test().with_test_issuer(&issuer, vec![other.der()]);
+        assert!(OidcService::discover(wrong_ca, vec![1; 32]).await.is_err());
+
+        // A trusted CA does not relax hostname verification: a certificate
+        // for another name is refused at this address.
+        let elsewhere = https_provider(&authority, &[], &["id.example.com"]);
+        let mismatched = OidcConfig::for_test().with_test_issuer(&elsewhere, vec![authority.der()]);
+        assert!(
+            OidcService::discover(mismatched, vec![1; 32])
+                .await
+                .is_err()
         );
     }
 

@@ -1,0 +1,15 @@
+version = 1
+{{SERVER}}
+[auth]
+oidc_enabled = true
+[auth.oidc]
+issuer = "https://id.example.com"
+client_id = "crabinet"
+client_secret_file = "{{OIDC_SECRET}}"
+redirect_uri = "https://files.example.com/api/v1/auth/oidc/callback"
+ca_file = "oidc-ca.pem"
+[[users]]
+username = "alice"
+email = "alice@example.com"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=1$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG"
+{{SHARE}}

@@ -64,6 +64,14 @@ By default an OIDC sign-in maps to the user whose `email` equals the provider's 
 
 The subject is the `sub` value in the ID token the provider issues for that account; Crabinet does not log it. Google's `sub` is a stable numeric account ID that does not change when the account's email address changes, and Google documents it as the identifier to key accounts on. Obtain it from the provider's administration tools or from an ID token issued to the user, then add it to the configuration and restart. Binding the subject means a verified email address that the provider later reassigns to another account can no longer sign in as this user.
 
+### A private provider with an internal CA
+
+Crabinet reaches the provider only over HTTPS: the issuer, the discovery document's authorization, token, JWKS, UserInfo, and end-session endpoints must all be `https` URLs, and the server certificate must be valid for the endpoint's host name. By default the connection trusts only the public web PKI roots compiled into the binary, not the operating system's certificate store. A self-hosted provider whose certificate an internal CA issued therefore fails discovery at startup.
+
+Set `auth.oidc.ca_file` to the absolute path of a PEM file with that CA's certificate, or several, to trust them as well. The file is read once at startup and by `check-config`. It must be a regular file, not a symbolic link, of at most 1 MiB, that no group or other user can write (it is not secret, so it may be world-readable), outside every share, and contain only `CERTIFICATE` blocks, with optional text between them; a file holding a private key is refused. Errors name the problem but never quote the file. The certificates are added to the public roots, not substituted for them, and only for the connection to the provider: no other outbound request uses them, and the browser's own trust is unaffected. The HTTPS-only endpoint rules and host name verification stay exactly as they are, and there is no option to disable certificate checks.
+
+Name the CA that issues the provider's certificate, preferably a dedicated intermediate, rather than a broad corporate root that also issues certificates for unrelated hosts: whoever holds the key of any CA in this file can impersonate the provider to Crabinet and thereby sign in as any OIDC user. See the [threat model](threat-model.md).
+
 ## Audit events
 
 Security events are written to the structured log with `audit = true`, an `operation`, an `outcome`, and for refusals a stable `reason`, in the same shape as the mutation events described in [mutations](mutations.md). They are emitted inside the request span, so each JSON line also carries the server-generated `request_id`. Sign-in events include `client_address`, the resolved address the login limiters use (see [the configuration guide](configuration.md#trusted-reverse-proxies)).
