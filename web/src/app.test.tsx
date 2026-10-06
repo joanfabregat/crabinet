@@ -1466,6 +1466,84 @@ describe("directory browser", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("looks up a file link before listing, so it never lists the file", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "read-only",
+      path: "media/clip.webm",
+      unresolved: true,
+    });
+    const directory = vi.fn<ApiClient["directory"]>(async (_shareId, path) => ({
+      shareId: "read-only",
+      path,
+      entries: [],
+    }));
+    const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      name: "clip.webm",
+      kind: "file" as const,
+      etag: 'W/"clip"',
+    }));
+
+    render(
+      <App api={fakeApi({ directory, metadata })} navigation={navigation} />,
+    );
+    await waitFor(() =>
+      expect(navigation.visits.at(-1)).toEqual({
+        route: {
+          shareId: "read-only",
+          path: "media",
+          previewPath: "media/clip.webm",
+        },
+        replace: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(directory).toHaveBeenCalledWith(
+        "read-only",
+        "media",
+        undefined,
+        expect.any(AbortSignal),
+        true,
+      ),
+    );
+    expect(
+      directory.mock.calls.some(([, path]) => path === "media/clip.webm"),
+    ).toBe(false);
+  });
+
+  it("lists a folder link once the lookup finds a folder", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "read-only",
+      path: "docs",
+      unresolved: true,
+    });
+    const directory = vi.fn<ApiClient["directory"]>(async () => ({
+      shareId: "read-only",
+      path: "docs",
+      entries: [{ name: "notes.txt", kind: "file", size: 3 }],
+    }));
+    const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+      shareId,
+      path,
+      name: "docs",
+      kind: "directory" as const,
+      etag: 'W/"docs"',
+    }));
+
+    render(
+      <App api={fakeApi({ directory, metadata })} navigation={navigation} />,
+    );
+    expect(await screen.findByText("notes.txt")).toBeVisible();
+    expect(navigation.visits).toEqual([
+      { route: { shareId: "read-only", path: "docs" }, replace: true },
+    ]);
+    expect(metadata).toHaveBeenCalledOnce();
+    expect(
+      directory.mock.calls.filter(([, path]) => path === "docs"),
+    ).toHaveLength(1);
+  });
+
   it("shows a recoverable generic error and retries the current folder", async () => {
     const directory = vi
       .fn<ApiClient["directory"]>()

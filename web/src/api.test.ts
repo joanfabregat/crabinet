@@ -880,6 +880,48 @@ describe("API client", () => {
     },
   );
 
+  it("keeps the codecs the server named for audio and video", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "video",
+        source: "",
+        language: null,
+        mimeType: "video/mp4",
+        codecs: "avc1.42E01E, mp4a.40.2",
+        size: 10,
+        truncated: false,
+        openable: false,
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).preview("docs", "clip.mp4"),
+    ).resolves.toMatchObject({ codecs: "avc1.42E01E, mp4a.40.2" });
+  });
+
+  it.each([
+    // Only audio and video carry codecs.
+    { kind: "pdf", mimeType: "application/pdf", codecs: "vp9" },
+    // The value goes into a quoted media type parameter.
+    { kind: "video", mimeType: "video/webm", codecs: 'vp9"; x="' },
+    { kind: "video", mimeType: "video/webm", codecs: "vp9,opus" },
+    { kind: "video", mimeType: "video/webm", codecs: "" },
+    { kind: "video", mimeType: "video/webm", codecs: 9 },
+    {
+      kind: "video",
+      mimeType: "video/webm",
+      codecs: Array(9).fill("vp9").join(", "),
+    },
+  ])("rejects malformed codecs %#", async (fields) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json({ source: "", size: 1, truncated: false, ...fields }),
+      );
+    await expect(
+      createApiClient({ fetch }).preview("docs", "file.bin"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
   it("keeps the server's openable flag on text previews", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       Response.json({

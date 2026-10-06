@@ -253,6 +253,11 @@ export interface PreviewDocument {
   language?: string;
   /** Derived by the server from the file's signature, never its name. */
   mimeType?: PreviewMimeType;
+  /**
+   * Audio and video only: the codecs named in the container header, as an
+   * RFC 6381 list (`vp9, opus`). Absent when the server could not name them.
+   */
+  codecs?: string;
   width?: number;
   height?: number;
   /** The whole file's size, also when `source` is only its head. */
@@ -1100,7 +1105,8 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
       value.kind as PreviewKind,
       language as string | undefined,
     ) ||
-    !previewMediaMetadataIsValid(value)
+    !previewMediaMetadataIsValid(value) ||
+    !previewCodecsAreValid(value)
   ) {
     throw invalidResponse();
   }
@@ -1128,9 +1134,28 @@ function parsePreviewDocument(value: unknown): PreviewDocument {
     ...(typeof value.mimeType === "string"
       ? { mimeType: value.mimeType as PreviewMimeType }
       : {}),
+    ...(typeof value.codecs === "string" ? { codecs: value.codecs } : {}),
     ...(typeof value.width === "number" ? { width: value.width } : {}),
     ...(typeof value.height === "number" ? { height: value.height } : {}),
   };
+}
+
+/**
+ * A comma-separated list of RFC 6381 codec names, such as `vp9, opus` or
+ * `avc1.42E01E, mp4a.40.2`, and only on audio or video. The value goes into
+ * a `codecs="…"` media type parameter, so quotes and other punctuation are
+ * refused.
+ */
+const previewCodecsPattern =
+  /^[A-Za-z0-9.-]{1,64}(?:, [A-Za-z0-9.-]{1,64}){0,7}$/;
+
+function previewCodecsAreValid(value: Record<string, unknown>): boolean {
+  if (value.codecs === undefined || value.codecs === null) return true;
+  return (
+    (value.kind === "audio" || value.kind === "video") &&
+    typeof value.codecs === "string" &&
+    previewCodecsPattern.test(value.codecs)
+  );
 }
 
 function previewLanguageMatchesKind(

@@ -163,3 +163,9 @@ pub fn thumbnail_decode(data: &[u8]) {
     let budget = (64 * 1024_u64) << ((selector >> 1) & 0x07);
     let _ = crate::thumbnail::decode::render_bytes(image, long_edge, budget);
 }
+
+/// The audio and video codec walks over Matroska EBML and ISO base media
+/// boxes in an arbitrary bounded header.
+pub fn media_codecs(data: &[u8]) {
+    crate::preview::fuzz_media_codecs(data);
+}

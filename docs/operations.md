@@ -4,7 +4,7 @@ This guide covers installation, configuration, deployment, backups, upgrades, an
 
 ## Direct-binary quick start
 
-Release archives contain the executable, license, third-party licenses, README, this guide (`docs/operations.md`), annotated configuration, and JSON Schema. Linux `x86_64` and `aarch64` are supported; other operating systems and libc targets are not release targets. The commands below describe Crabinet-branded releases; prereleases published before the rename retain their original `index` artifact names.
+Release archives contain the executable, license, third-party licenses, README, the security policy and contributing guide, every page under `docs/` (this guide included) with the images they show, annotated configuration, and JSON Schema, at the paths the documents link to, so every relative link resolves in the extracted archive. Linux `x86_64` and `aarch64` are supported; other operating systems and libc targets are not release targets. The commands below describe Crabinet-branded releases; prereleases published before the rename retain their original `index` artifact names.
 
 ```sh
 curl -fLO https://github.com/joanfabregat/crabinet/releases/download/v0.6.0/crabinet-v0.6.0-linux-amd64.tar.gz

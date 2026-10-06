@@ -212,11 +212,15 @@ jobs:
           package="release/crabinet-linux-${ARCH}"
           mkdir -p "${package}"
           install -m 0555 "${binary}" "${package}/crabinet"
-          install -m 0444 README.md LICENSE THIRD_PARTY_LICENSES.md config.example.toml "${package}/"
-          # README links the operator guide by this relative path.
-          install -D -m 0444 docs/operations.md "${package}/docs/operations.md"
+          install -m 0444 README.md SECURITY.md CONTRIBUTING.md LICENSE THIRD_PARTY_LICENSES.md config.example.toml "${package}/"
+          # README and the docs link each other, the files above, and their
+          # images by relative paths, so every page reads offline.
+          mkdir -p "${package}/docs/images"
+          install -m 0444 docs/*.md "${package}/docs/"
+          install -m 0444 docs/images/* "${package}/docs/images/"
           "${package}/crabinet" print-config-schema > "${package}/config.schema.json"
           "${package}/crabinet" --help >/dev/null
+          sh .github/scripts/check-doc-links.sh "${package}"
           tar -C release -czf "release/crabinet-${VERSION}-linux-${ARCH}.tar.gz" "crabinet-linux-${ARCH}"
       - name: Generate package SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2

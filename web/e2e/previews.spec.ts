@@ -366,3 +366,55 @@ test("a HEIC image is served as the original and explains when the browser canno
     "/api/v1/shares/read-only/download?path=photo.heic",
   );
 });
+
+test("a WebM deep link opens its player without listing the file as a folder", async ({
+  page,
+}) => {
+  const failed: string[] = [];
+  page.on("response", (response) => {
+    if (response.status() === 404) failed.push(response.url());
+  });
+  await openSignedIn(page, "/read-only/media/test-pattern.webm");
+  const panel = page.getByRole("complementary", { name: "test-pattern.webm" });
+  const video = panel.getByLabel("Video preview of test-pattern.webm");
+  await expect(video).toBeVisible();
+  await expect(panel.getByText("video/webm · vp9, opus")).toBeVisible();
+  // Chromium decodes VP9 and Opus, so the metadata loads and no fallback
+  // replaces the player.
+  await expect
+    .poll(() =>
+      video.evaluate((element: HTMLVideoElement) => element.readyState),
+    )
+    .toBeGreaterThanOrEqual(1);
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/read-only\/media\/test-pattern\.webm$/);
+
+  // A fresh load of the same link resolves it the same way.
+  await page.goto("about:blank");
+  await page.goto("/read-only/media/test-pattern.webm");
+  await expect(video).toBeVisible();
+  expect(failed).toEqual([]);
+});
+
+test("a video whose codecs the browser rules out offers its download", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    HTMLMediaElement.prototype.canPlayType = () => "";
+  });
+  await openSignedIn(page, "/read-only/media/test-pattern.webm");
+  const panel = page.getByRole("complementary", { name: "test-pattern.webm" });
+  const alert = panel.getByRole("alert");
+  await expect(alert).toContainText(
+    "This browser can't play this WebM video (VP9/Opus). Download it to play it in another app.",
+  );
+  await expect(
+    alert.getByRole("link", { name: "Download video" }),
+  ).toHaveAttribute(
+    "href",
+    "/api/v1/shares/read-only/download?path=media%2Ftest-pattern.webm",
+  );
+  await expect(
+    panel.getByLabel("Video preview of test-pattern.webm"),
+  ).toHaveCount(0);
+});

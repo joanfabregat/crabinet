@@ -1327,7 +1327,8 @@ function DirectoryBrowser({
     const controller = new AbortController();
     const location = `${share.id}\u0000${route.path}`;
     const shouldFocusHeading = focusedLocation.current !== location;
-    focusedLocation.current = location;
+    // A folder link focuses its heading once it is resolved and listed.
+    if (!route.unresolved) focusedLocation.current = location;
     loadMoreController.current?.abort();
     // A change event reloads the listing already on screen. Keep it until the
     // new one arrives, so the rows are replaced in place instead of flashing
@@ -1339,6 +1340,43 @@ function DirectoryBrowser({
       setPage(undefined);
     }
     setError(undefined);
+
+    // A path read from a URL may name a file as well as a folder. Look it up
+    // first, so a file link opens its folder and preview without asking for
+    // a listing of the file itself.
+    if (route.unresolved && route.path) {
+      const fullScreen =
+        route.previewMode === "full" ? { previewMode: "full" as const } : {};
+      api.metadata(share.id, route.path, controller.signal).then(
+        (entry) => {
+          if (controller.signal.aborted) return;
+          navigation.go(
+            entry.kind === "file"
+              ? {
+                  shareId: share.id,
+                  path: parentPath(route.path),
+                  previewPath: route.path,
+                  ...fullScreen,
+                }
+              : { shareId: share.id, path: route.path, ...fullScreen },
+            { replace: true },
+          );
+        },
+        (cause: unknown) => {
+          if (controller.signal.aborted || isAborted(cause)) return;
+          if (isUnauthorized(cause)) {
+            onSessionExpired();
+            return;
+          }
+          setError(asApiError(cause));
+          setLoading(false);
+        },
+      );
+      return () => {
+        controller.abort();
+        loadMoreController.current?.abort();
+      };
+    }
 
     api
       .directory(
@@ -1412,13 +1450,14 @@ function DirectoryBrowser({
     onSessionExpired,
     refreshKey,
     route.path,
+    route.unresolved,
     route.view,
     share.id,
     showHiddenFiles,
   ]);
 
   useEffect(() => {
-    if (route.view === "trash") return;
+    if (route.view === "trash" || route.unresolved) return;
     if (typeof EventSource === "undefined") return;
     const events = new EventSource(directoryEventsUrl(share.id, route.path));
     let debounce: number | undefined;
@@ -1462,7 +1501,7 @@ function DirectoryBrowser({
       document.removeEventListener("visibilitychange", visibilityChanged);
       events.close();
     };
-  }, [route.path, route.view, share.id]);
+  }, [route.path, route.unresolved, route.view, share.id]);
 
   const loadMore = async () => {
     if (!page?.nextCursor || loadingMore) return;
@@ -2603,6 +2642,7 @@ function PreviewContent({
         document={document}
         url={inlineUrl}
         filename={filename}
+        downloadUrl={downloadUrl}
       />
     );
   }
@@ -2625,29 +2665,137 @@ function PreviewContent({
   return <SourcePreview document={document} />;
 }
 
-/** Audio or video from the inline route, with a spinner until its metadata. */
+/** `MediaError` codes, which jsdom and older engines may not expose by name. */
+const mediaErrDecode = 3;
+const mediaErrSrcNotSupported = 4;
+
+/** Names for the media types the server derives, used in the fallback. */
+const mediaFormatNames: Record<string, string> = {
+  "audio/flac": "FLAC audio",
+  "audio/mp4": "MP4 audio",
+  "audio/mpeg": "MP3 audio",
+  "audio/ogg": "Ogg audio",
+  "audio/wav": "WAV audio",
+  "video/mp4": "MP4 video",
+  "video/ogg": "Ogg video",
+  "video/webm": "WebM video",
+};
+
+/** Readable names for RFC 6381 codec names, matched by prefix. */
+const codecNames: ReadonlyArray<readonly [string, string]> = [
+  ["vp8", "VP8"],
+  ["vp9", "VP9"],
+  ["vp09", "VP9"],
+  ["av01", "AV1"],
+  ["avc1", "H.264"],
+  ["avc3", "H.264"],
+  ["hvc1", "HEVC"],
+  ["hev1", "HEVC"],
+  ["mp4a.40", "AAC"],
+  ["mp4a.6b", "MP3"],
+  ["mp4a.69", "MP3"],
+  ["opus", "Opus"],
+  ["vorbis", "Vorbis"],
+  ["flac", "FLAC"],
+  ["ac-3", "AC-3"],
+  ["ec-3", "E-AC-3"],
+];
+
+/** `VP9/Opus` for `vp9, opus`. */
+function codecLabel(codecs: string): string {
+  const labels = codecs.split(", ").map((codec) => {
+    const lower = codec.toLowerCase();
+    return (
+      codecNames.find(
+        ([prefix]) => lower === prefix || lower.startsWith(`${prefix}.`),
+      )?.[1] ?? codec
+    );
+  });
+  return [...new Set(labels)].join("/");
+}
+
+/**
+ * Whether the browser says outright that it cannot decode this file's
+ * codecs. `maybe` and `probably` both get the player; only an empty answer
+ * for codecs the server named skips it.
+ */
+function browserCannotPlay(document: PreviewDocument): boolean {
+  if (!document.codecs || !document.mimeType) return false;
+  const element = window.document.createElement(
+    document.kind === "audio" ? "audio" : "video",
+  );
+  return (
+    element.canPlayType(`${document.mimeType}; codecs="${document.codecs}"`) ===
+    ""
+  );
+}
+
+/**
+ * Audio or video from the inline route, with a spinner until its metadata.
+ * The server streams the original without transcoding, so a file whose
+ * codecs the browser cannot decode offers its download instead: known
+ * before loading from `canPlayType`, or when the element reports a decode
+ * or unsupported-source error.
+ */
 function MediaPreview({
   document,
   url,
   filename,
+  downloadUrl,
 }: {
   document: PreviewDocument;
   url: string;
   filename: string;
+  downloadUrl?: string;
 }) {
+  const [unplayable, setUnplayable] = useState(() =>
+    browserCannotPlay(document),
+  );
   const [loading, setLoading] = useState(true);
   const done = () => setLoading(false);
+  const failed = (event: JSX.TargetedEvent<HTMLMediaElement>) => {
+    setLoading(false);
+    const code = event.currentTarget.error?.code;
+    // A network failure or an aborted load says nothing about the codecs.
+    if (code === mediaErrDecode || code === mediaErrSrcNotSupported) {
+      setUnplayable(true);
+    }
+  };
+  const isAudio = document.kind === "audio";
+
+  if (unplayable) {
+    const format =
+      mediaFormatNames[document.mimeType ?? ""] ??
+      (isAudio ? "audio file" : "video");
+    const codecs = document.codecs ? ` (${codecLabel(document.codecs)})` : "";
+    return (
+      <div class="preview-error" role="alert">
+        <h3>No preview in this browser</h3>
+        <p>
+          This browser can't play this {format}
+          {codecs}. Download it to play it in another app.
+        </p>
+        {downloadUrl && (
+          <a class="button button-secondary" href={downloadUrl}>
+            <Download size={17} aria-hidden="true" />
+            {isAudio ? "Download audio" : "Download video"}
+          </a>
+        )}
+      </div>
+    );
+  }
+
   return (
     <figure class="media-preview">
       <div class="preview-loading-frame">
-        {document.kind === "audio" ? (
+        {isAudio ? (
           <audio
             src={url}
             controls
             preload="metadata"
             aria-label={`Audio preview of ${filename}`}
             onLoadedMetadata={done}
-            onError={done}
+            onError={failed}
           />
         ) : (
           <video
@@ -2657,12 +2805,15 @@ function MediaPreview({
             playsInline
             aria-label={`Video preview of ${filename}`}
             onLoadedMetadata={done}
-            onError={done}
+            onError={failed}
           />
         )}
         {loading && <LoadingSpinner />}
       </div>
-      <figcaption>{document.mimeType}</figcaption>
+      <figcaption>
+        {document.mimeType}
+        {document.codecs ? ` · ${document.codecs}` : ""}
+      </figcaption>
     </figure>
   );
 }
