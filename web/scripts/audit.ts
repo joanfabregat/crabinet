@@ -98,7 +98,7 @@ async function verdict(advisory: Advisory, minDays: number): Promise<Verdict> {
   const versions = await patchedVersions(advisory);
   if (!versions) return { kind: "blocking", reason: "no patched version" };
   const packument = await fetchJson(
-    `https://registry.npmjs.org/${advisory.name.replace("/", "%2f")}`,
+    `https://registry.npmjs.org/${advisory.name.replaceAll("/", "%2f")}`,
   );
   const now = Date.now();
   let earliest = Infinity;
