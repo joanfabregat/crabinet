@@ -131,7 +131,10 @@ function singleParameters(
 }
 
 function refuse(response: ServerResponse, status: number, reason: string) {
-  console.error(`fake-oidc: refused (${String(status)}): ${reason}`);
+  // The reason can quote request parameters; drop line breaks so one cannot
+  // forge another log line.
+  const logged = reason.replace(/[\r\n]+/g, " ");
+  console.error(`fake-oidc: refused (${String(status)}): ${logged}`);
   response.writeHead(status, {
     "Content-Type": "text/plain; charset=utf-8",
     "Cache-Control": "no-store",
