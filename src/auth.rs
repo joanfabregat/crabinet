@@ -118,6 +118,7 @@ pub struct EffectiveShare {
     pub id: String,
     pub name: String,
     pub access: &'static str,
+    pub search_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -159,6 +160,7 @@ struct ShareRecord {
     name: String,
     grants: HashMap<String, Permission>,
     read_only: bool,
+    search_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -452,6 +454,7 @@ impl AuthService {
             .map(|share| ShareRecord {
                 id: share.id().to_owned(),
                 name: share.name().to_owned(),
+                search_enabled: share.search_enabled(),
                 grants: config
                     .users()
                     .iter()
@@ -901,6 +904,7 @@ impl AuthService {
                 share.grants.get(username).map(|permission| EffectiveShare {
                     id: share.id.clone(),
                     name: share.name.clone(),
+                    search_enabled: share.search_enabled,
                     access: if share.read_only || *permission == Permission::Read {
                         "read"
                     } else {
@@ -1946,12 +1950,14 @@ mod tests {
                     ("disabled".to_owned(), Permission::Read),
                 ]),
                 read_only: false,
+                search_enabled: true,
             },
             ShareRecord {
                 id: "private".to_owned(),
                 name: "Private".to_owned(),
                 grants: HashMap::from([("Bob".to_owned(), Permission::Write)]),
                 read_only: false,
+                search_enabled: true,
             },
         ];
         let clock = Arc::new(TestClock::new(1_000_000));

@@ -91,6 +91,8 @@ async fn main() -> Result<()> {
     let mutation_state = MutationState::from_max_upload_bytes(config.server().max_upload_size())
         .context("configured upload limit is unsafe")?;
     let browse = browse_state(&config).context("cannot initialize configured shares")?;
+    let search = crabinet::search::SearchService::open(&config, &browse)
+        .context("cannot initialize search index")?;
     let thumbnails = thumbnail_service(&config).context("cannot initialize image thumbnails")?;
     let listen = config.server().listen();
     let auth = AuthService::from_config(&config).context("cannot initialize authentication")?;
@@ -110,6 +112,7 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     let mut state = AppState::new(true)
         .with_browse(browse)
+        .with_search(search.clone())
         .with_preview_policy(preview_policy)
         .with_thumbnails(thumbnails)
         .with_mutations(mutation_state)
@@ -121,6 +124,7 @@ async fn main() -> Result<()> {
     let gc_state = state.clone();
     let app = router(state);
     let gc_task = tokio::spawn(async move { trash_gc_loop(gc_state).await });
+    let search_task = tokio::spawn(search.clone().run());
 
     let limits = ServerLimits {
         max_connections: config.server().max_connections(),
@@ -136,6 +140,8 @@ async fn main() -> Result<()> {
     // The accept loop runs until the process is terminated.
     server::serve(listener, app, limits).await;
     gc_task.abort();
+    search.stop();
+    search_task.abort();
     Ok(())
 }
 

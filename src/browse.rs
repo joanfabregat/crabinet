@@ -253,6 +253,19 @@ impl ConfiguredShare {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Background indexing uses configured authority, never request input.
+    pub(crate) fn index_view(&self) -> OwnedAuthorizedShare {
+        self.filesystem
+            .authorize_owned(
+                Some(&crate::filesystem::ShareGrant {
+                    share_id: self.id().clone(),
+                    access: AccessLevel::ReadOnly,
+                }),
+                GlobalPolicy::default(),
+            )
+            .expect("a configured share authorizes its own read grant")
+    }
 }
 
 pub struct BrowseState {
@@ -345,6 +358,9 @@ impl Drop for SubjectLease {
 }
 
 impl BrowseState {
+    pub(crate) fn configured_shares(&self) -> impl Iterator<Item = &Arc<ConfiguredShare>> {
+        self.shares.values()
+    }
     pub fn trash_gc_targets(&self) -> Vec<(ShareId, Arc<ShareFs>)> {
         self.shares
             .iter()

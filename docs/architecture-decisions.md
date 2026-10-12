@@ -16,6 +16,8 @@ Users, shares, grants, limits, and secret-file references are operator configura
 
 Files remain normal files in explicitly mounted roots. SQLite stores server-side sessions, per-user start-folder and display preferences, and passkey credentials and user handles, while structured audit events go to standard output with the rest of the application logs. This avoids a database service while keeping runtime state separate from immutable configuration.
 
+Filename and metadata search uses a separate, rebuildable SQLite index so scans, storage limits, and rebuilding do not affect account state. One background worker reconciles configured share capabilities directory by directory, with inotify prompting targeted refreshes. Every search candidate still requires a current grant and a live capability-based filesystem check. See [Search](search.md) for consistency and resource limits.
+
 ## Argon2id
 
 Passwords are one-way hashed with Argon2id v19 and unique salts in PHC format. The application enforces lower and upper parameter bounds and limits concurrent verification to preserve availability.

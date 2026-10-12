@@ -7,6 +7,9 @@ version = 1
 listen = "127.0.0.1:8080"
 # Relative paths are resolved against this configuration file's directory.
 database_path = "data/crabinet.sqlite3"
+# Rebuildable filename/metadata index, by default search.sqlite3 beside database_path.
+# Keep it and its SQLite sidecars outside shares, in private local storage.
+# search_index_path = "data/search.sqlite3"
 # Create this separately with at least 32 random bytes. It must be owner-only
 # (`chmod 600`); a secret any group or other user can access is rejected.
 session_secret_file = "secrets/session.key"
@@ -119,6 +122,8 @@ name = "Documents"
 path = "/srv/crabinet/documents"
 # This overrides write grants, which become read-only at runtime.
 read_only = false
+# Index filenames and metadata in this share. Set false to exclude it from search.
+search_enabled = true
 
 [[shares.grants]]
 user = "alice"

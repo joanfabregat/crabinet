@@ -139,6 +139,8 @@ fn every_invalid_fixture_is_rejected() {
         include_str!("fixtures/config/invalid/share-id-leading-dot.toml"),
         include_str!("fixtures/config/invalid/oidc-subject-without-email.toml"),
         include_str!("fixtures/config/invalid/folder-sizes-type.toml"),
+        include_str!("fixtures/config/invalid/search-enabled-type.toml"),
+        include_str!("fixtures/config/invalid/search-index-in-share.toml"),
         include_str!("fixtures/config/invalid/archive-compression-value.toml"),
         include_str!("fixtures/config/invalid/oidc-ca-file-relative.toml"),
         include_str!("fixtures/config/invalid/oidc-ca-file-missing.toml"),

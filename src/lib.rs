@@ -18,6 +18,7 @@ pub mod mutations;
 pub mod oidc;
 pub mod password;
 pub mod preview;
+pub mod search;
 pub mod server;
 #[cfg(test)]
 mod test_pki;

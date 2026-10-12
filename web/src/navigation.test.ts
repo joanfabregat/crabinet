@@ -41,6 +41,23 @@ describe("browser navigation", () => {
     });
   });
 
+  it("keeps the starting share when searching another one", () => {
+    expect(
+      at("/docs/projects?search=read&scope=share&searchShare=images"),
+    ).toMatchObject({
+      shareId: "docs",
+      path: "projects",
+      searchQuery: "read",
+      searchScope: "share",
+      searchShareId: "images",
+    });
+    for (const query of [
+      "scope=all&searchShare=images",
+      "scope=share&searchShare=docs",
+      "scope=share&searchShare=a%2Fb",
+    ])
+      expect(at(`/docs?search=read&${query}`).searchShareId).toBeUndefined();
+  });
   it("falls back safely for the root, reserved, and malformed routes", () => {
     for (const href of [
       "/",

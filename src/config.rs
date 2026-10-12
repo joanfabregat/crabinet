@@ -114,6 +114,8 @@ struct RawServerConfig {
     listen: String,
     /// SQLite file. Relative paths are resolved from the configuration directory.
     database_path: PathBuf,
+    /// Rebuildable search SQLite file; defaults to search.sqlite3 beside database_path.
+    search_index_path: Option<PathBuf>,
     /// File containing 32 to 4096 random bytes. Its contents are never printed.
     session_secret_file: PathBuf,
     /// Maximum request upload size, for example "100 MiB".
@@ -233,6 +235,9 @@ struct RawShare {
     /// If true, every grant on this share is effectively read-only.
     #[serde(default)]
     read_only: bool,
+    /// Include this share in filename and metadata search.
+    #[serde(default = "default_true")]
+    search_enabled: bool,
     #[serde(default)]
     grants: Vec<RawGrant>,
 }
@@ -348,6 +353,7 @@ impl fmt::Debug for Config {
 pub struct ServerConfig {
     listen: SocketAddr,
     database_path: PathBuf,
+    search_index_path: PathBuf,
     session_secret_file: PathBuf,
     max_upload_size: u64,
     max_preview_size: u64,
@@ -398,6 +404,7 @@ pub struct Share {
     name: String,
     root: PathBuf,
     read_only: bool,
+    search_enabled: bool,
     grants: HashMap<String, Permission>,
 }
 
@@ -543,6 +550,30 @@ impl Config {
 
         let database_path = resolve_path(base, &raw.server.database_path);
         let database_path = validate_database_path(&database_path)?;
+        let requested_search = raw
+            .server
+            .search_index_path
+            .as_ref()
+            .map(|path| resolve_path(base, path))
+            .unwrap_or_else(|| {
+                database_path
+                    .parent()
+                    .expect("validated database parent")
+                    .join("search.sqlite3")
+            });
+        let search_index_path =
+            validate_database_path(&requested_search).map_err(|error| match error {
+                ConfigError::Validation(message) => ConfigError::Validation(
+                    message.replace("server.database_path", "server.search_index_path"),
+                ),
+                other => other,
+            })?;
+        if search_index_path == database_path || search_index_path == source {
+            return Err(ConfigError::Validation(
+                "server.search_index_path must be separate from the database and configuration"
+                    .into(),
+            ));
+        }
         let thumbnail_cache_path = if max_thumbnail_cache_size == 0 {
             None
         } else {
@@ -557,6 +588,11 @@ impl Config {
         };
         let session_secret_file = resolve_path(base, &raw.server.session_secret_file);
         let (session_secret_file, session_secret) = read_session_secret(&session_secret_file)?;
+        if search_index_path == session_secret_file {
+            return Err(ConfigError::Validation(
+                "server.search_index_path must be separate from the session secret".into(),
+            ));
+        }
 
         if !raw.auth.password_enabled && !raw.auth.oidc_enabled {
             return Err(ConfigError::Validation(
@@ -740,10 +776,47 @@ impl Config {
                 name: share.name,
                 root,
                 read_only: share.read_only,
+                search_enabled: share.search_enabled,
                 grants,
             });
         }
         reject_overlapping_roots(&shares)?;
+        let search_paths = sqlite_paths(&search_index_path);
+        let database_paths = sqlite_paths(&database_path);
+        let mut sensitive = vec![source.as_path(), session_secret_file.as_path()];
+        sensitive.extend(database_paths.iter().map(PathBuf::as_path));
+        if let Some(settings) = &oidc {
+            sensitive.push(settings.client_secret_file.as_path());
+            if let Some(ca) = &settings.ca_file {
+                sensitive.push(ca);
+            }
+        }
+        if search_paths
+            .iter()
+            .any(|path| sensitive.contains(&path.as_path()))
+        {
+            return Err(ConfigError::Validation("search index and its SQLite sidecars must be separate from configuration, secrets, and account state".into()));
+        }
+        for share in &shares {
+            if search_index_path.starts_with(&share.root) {
+                return Err(ConfigError::Validation(
+                    "server.search_index_path must be outside every share".into(),
+                ));
+            }
+        }
+        if thumbnail_cache_path
+            .as_ref()
+            .is_some_and(|cache| search_index_path.starts_with(cache))
+            || oidc.as_ref().is_some_and(|settings| {
+                settings.client_secret_file == search_index_path
+                    || settings.ca_file.as_ref() == Some(&search_index_path)
+            })
+        {
+            return Err(ConfigError::Validation(
+                "server.search_index_path must be separate from secrets and the thumbnail cache"
+                    .into(),
+            ));
+        }
         reject_sensitive_paths_inside_shares(
             &shares,
             &source,
@@ -786,6 +859,7 @@ impl Config {
             server: ServerConfig {
                 listen,
                 database_path,
+                search_index_path,
                 session_secret_file,
                 max_upload_size,
                 max_preview_size,
@@ -845,7 +919,18 @@ impl Config {
     }
 }
 
+pub(crate) fn sqlite_paths(path: &Path) -> [PathBuf; 3] {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
+}
+
 impl ServerConfig {
+    pub fn search_index_path(&self) -> &Path {
+        &self.search_index_path
+    }
     pub fn listen(&self) -> SocketAddr {
         self.listen
     }
@@ -1101,6 +1186,9 @@ fn default_max_thumbnail_cache_size() -> String {
 }
 
 impl Share {
+    pub fn search_enabled(&self) -> bool {
+        self.search_enabled
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1820,6 +1908,54 @@ permission = "write"
             fs::write(&self.config, text).unwrap();
             Config::load(&self.config)
         }
+    }
+
+    #[test]
+    fn search_defaults_opt_out_and_private_path_constraints() {
+        let tree = TestTree::new();
+        let config = tree.load(&tree.valid_text()).unwrap();
+        assert_eq!(
+            config.server().search_index_path(),
+            tree.config.parent().unwrap().join("search.sqlite3")
+        );
+        assert!(config.shares()[0].search_enabled());
+        assert!(
+            !tree
+                .load(&tree.valid_text().replace(
+                    "read_only = false",
+                    "read_only = false\nsearch_enabled = false"
+                ))
+                .unwrap()
+                .shares()[0]
+                .search_enabled()
+        );
+        for path in [
+            "crabinet.sqlite3",
+            "crabinet.sqlite3-wal",
+            "crabinet.sqlite3-shm",
+            "session.key",
+            "config.toml",
+            "share/index.sqlite3",
+            "thumbnails/index.sqlite3",
+            "missing/index.sqlite3",
+        ] {
+            let text = tree.valid_text().replace(
+                "database_path = \"crabinet.sqlite3\"",
+                &format!("database_path = \"crabinet.sqlite3\"\nsearch_index_path = {path:?}"),
+            );
+            assert!(tree.load(&text).is_err(), "accepted {path}");
+        }
+        let target = tree.config.parent().unwrap().join("index.sqlite3");
+        fs::write(&target, b"").unwrap();
+        let link = tree.config.parent().unwrap().join("index-link.sqlite3");
+        symlink(&target, &link).unwrap();
+        assert!(
+            tree.load(&tree.valid_text().replace(
+                "database_path = \"crabinet.sqlite3\"",
+                "database_path = \"crabinet.sqlite3\"\nsearch_index_path = \"index-link.sqlite3\""
+            ))
+            .is_err()
+        );
     }
 
     #[test]

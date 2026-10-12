@@ -107,3 +107,7 @@ An unrecognized identity sees an error page with a Disconnect link. When discove
 4. For password sign-in, generate each password hash with `crabinet hash-password`. For OIDC, configure a verified email binding, optionally an `oidc_subject`, and register the exact callback URL with the provider.
 5. Run `crabinet check-config --config PATH` as the same OS user that will run the service.
 6. Restart the service after every configuration change.
+
+## Search indexing
+
+Shares enable filename and metadata indexing by default. Set `search_enabled = false` in a share to exclude it. `server.search_index_path` defaults to `search.sqlite3` beside `database_path`; its parent must exist and the index and sidecars must stay outside shares and separate from configuration, secrets, account state, and the thumbnail cache. The index is private, disposable state and can be rebuilt without losing accounts. See [Search](search.md) for filter syntax, notification/reconciliation behavior, and resource limits.

@@ -1569,6 +1569,9 @@ fn audited(
         && let Ok(share_id) = ShareId::new(raw_share_id.to_owned())
     {
         state.browse().invalidate_folder_sizes(&share_id);
+        if let Some(search) = state.search() {
+            search.invalidate(&share_id);
+        }
     }
     result.map_err(|rejection| {
         // Only a syntactically valid share ID is logged verbatim.

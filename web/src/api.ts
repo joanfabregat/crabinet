@@ -20,6 +20,32 @@ export interface Share {
   id: string;
   name: string;
   access: AccessMode;
+  searchEnabled?: boolean;
+}
+
+export interface SearchEntry {
+  shareId: string;
+  path: string;
+  name: string;
+  kind: "file" | "directory";
+  size?: number;
+  modified?: string;
+}
+
+export interface SearchPage {
+  entries: SearchEntry[];
+  indexing: boolean;
+  incomplete: boolean;
+  nextOffset?: number;
+}
+
+export interface SearchRequest {
+  q: string;
+  share?: string;
+  path?: string;
+  showHidden?: boolean;
+  limit?: number;
+  offset?: number;
 }
 
 export interface Session {
@@ -327,6 +353,7 @@ export class ApiError extends Error {
 }
 
 export interface ApiClient {
+  search(request: SearchRequest, signal?: AbortSignal): Promise<SearchPage>;
   session(signal?: AbortSignal): Promise<Session>;
   authMethods(signal?: AbortSignal): Promise<AuthMethods>;
   login(credentials: LoginCredentials, signal?: AbortSignal): Promise<Session>;
@@ -568,6 +595,18 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         signal,
         headers: { "X-CSRF-Token": csrfToken },
       }),
+    search: async (query, signal) => {
+      const params = new URLSearchParams({ q: query.q });
+      if (query.share !== undefined) params.set("share", query.share);
+      if (query.path !== undefined) params.set("path", query.path);
+      if (query.showHidden) params.set("showHidden", "true");
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      if (query.offset !== undefined)
+        params.set("offset", String(query.offset));
+      return parseSearchPage(
+        await request<unknown>(`/api/v1/search?${params}`, { signal }, true),
+      );
+    },
     passkeys: async (signal) =>
       parsePasskeyList(
         await request<unknown>("/api/v1/auth/passkeys", { signal }, true),
@@ -1361,6 +1400,38 @@ function fileApiUrl(shareId: string, path: string, action: string): string {
   return `/api/v1/shares/${encodeURIComponent(shareId)}/${action}?${query.toString()}`;
 }
 
+function parseSearchPage(value: unknown): SearchPage {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.entries) ||
+    value.entries.length > 100 ||
+    typeof value.indexing !== "boolean" ||
+    typeof value.incomplete !== "boolean" ||
+    (value.nextOffset !== undefined &&
+      (!Number.isSafeInteger(value.nextOffset) ||
+        (value.nextOffset as number) < 0)) ||
+    !value.entries.every(
+      (entry: unknown) =>
+        isRecord(entry) &&
+        typeof entry.shareId === "string" &&
+        isValidVirtualPath(entry.path) &&
+        isValidPathComponent(entry.name) &&
+        entry.path.split("/").at(-1) === entry.name &&
+        (entry.kind === "file" || entry.kind === "directory") &&
+        (entry.size === undefined ||
+          (typeof entry.size === "number" &&
+            Number.isFinite(entry.size) &&
+            entry.size >= 0)) &&
+        (entry.modified === undefined ||
+          (typeof entry.modified === "string" &&
+            Number.isFinite(Date.parse(entry.modified)))),
+    )
+  ) {
+    throw invalidResponse();
+  }
+  return value as unknown as SearchPage;
+}
+
 function parseSession(value: unknown): Session {
   if (
     !isRecord(value) ||
@@ -1773,7 +1844,9 @@ function isShare(value: unknown): boolean {
     isRecord(value) &&
     typeof value.id === "string" &&
     typeof value.name === "string" &&
-    (value.access === "read" || value.access === "read-write")
+    (value.access === "read" || value.access === "read-write") &&
+    (value.searchEnabled === undefined ||
+      typeof value.searchEnabled === "boolean")
   );
 }
 
