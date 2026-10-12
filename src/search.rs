@@ -240,6 +240,9 @@ impl SearchService {
     pub fn invalidate(&self, id: &ShareId) {
         if let Some(share) = self.shares.get(id.as_str()) {
             share.invalidated.store(true, Ordering::Release);
+            // Report indexing until the worker has taken in the mutation's
+            // notifications, so a search sent right after it keeps polling.
+            share.indexing.store(true, Ordering::Release);
         }
     }
 
@@ -309,7 +312,9 @@ impl SearchService {
         let indexing = !work.indexed_once
             || (!work.pending.is_empty() && !work.reconciling)
             || !work.dirty.is_empty()
-            || work.full_requested;
+            || work.full_requested
+            // A mutation that landed after this step drained its events.
+            || share.invalidated.load(Ordering::Acquire);
         share.indexing.store(indexing, Ordering::Release);
         result.map(|()| !work.pending.is_empty())
     }
@@ -1448,12 +1453,14 @@ mod tests {
         let before = fixture.changes();
         fixture.full_pass("documents");
         assert_eq!(fixture.changes(), before);
-        // A fully watched share leaves mutations to its notifications.
+        // A fully watched share leaves mutations to its notifications, and
+        // reports indexing only until the worker has taken them in.
         fixture
             .service
             .invalidate(&ShareId::new("documents").unwrap());
-        assert_eq!(fixture.request("q=x", true).await.1["indexing"], false);
+        assert_eq!(fixture.request("q=x", true).await.1["indexing"], true);
         fixture.settle("documents");
+        assert_eq!(fixture.request("q=x", true).await.1["indexing"], false);
         assert!(
             !fixture.service.shares["documents"]
                 .work

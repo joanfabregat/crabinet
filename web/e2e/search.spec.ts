@@ -44,6 +44,8 @@ test("visual filters work and search results are accessible", async ({
   await openSignedIn(page, "/read-only");
   const search = page.getByRole("banner").getByRole("search");
   await expect(search).toBeVisible();
+  // The idle bar hides its scope and filter controls until it has focus.
+  await page.getByRole("combobox", { name: "Search files" }).focus();
   await page.getByRole("button", { name: "Search filters" }).click();
   const dialog = page.getByRole("dialog", { name: "Search filters" });
   await expect(dialog).toBeVisible();
@@ -82,6 +84,7 @@ test("all-share results use granted shares and preview the result's own share", 
 }) => {
   await openSignedIn(page, "/read-only", "writer");
   const input = page.getByRole("combobox", { name: "Search files" });
+  await input.focus();
   await page
     .getByRole("combobox", { name: "Search scope" })
     .selectOption("all");
