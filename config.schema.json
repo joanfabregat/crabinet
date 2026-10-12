@@ -274,6 +274,13 @@
           "description": "Maximum request upload size, for example \"100 MiB\".",
           "type": "string"
         },
+        "search_index_path": {
+          "description": "Rebuildable search SQLite file; defaults to search.sqlite3 beside database_path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "session_absolute_timeout_seconds": {
           "description": "Session absolute lifetime in seconds.",
           "type": "integer",
@@ -363,6 +370,11 @@
           "description": "If true, every grant on this share is effectively read-only.",
           "type": "boolean",
           "default": false
+        },
+        "search_enabled": {
+          "description": "Include this share in filename and metadata search.",
+          "type": "boolean",
+          "default": true
         }
       },
       "additionalProperties": false,

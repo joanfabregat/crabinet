@@ -12,6 +12,12 @@ export interface BrowserRoute {
   /** A virtual file path selected for preview, or null when browsing only. */
   previewPath?: string | null;
   previewMode?: "side" | "full";
+  searchQuery?: string;
+  searchScope?: "share" | "folder" | "all";
+  searchOffset?: number;
+  previewShareId?: string;
+  /** A share searched from another one; the route keeps the share where the search started. */
+  searchShareId?: string;
   /**
    * The path was read from a URL without a saved route, so it may name a
    * file as well as a folder. The app looks it up before listing it.
@@ -119,13 +125,43 @@ export function routeFromUrl(url: URL): BrowserRoute {
       shareId: decodeURIComponent(match[1]!),
       path: isValidVirtualPath(path) ? path : "",
     };
+    if (url.searchParams.has("search")) {
+      route.searchQuery = (url.searchParams.get("search") ?? "").slice(0, 1024);
+      const scope = url.searchParams.get("scope");
+      route.searchScope =
+        scope === "all" || scope === "folder" ? scope : "share";
+      const offset = Number(url.searchParams.get("offset"));
+      if (Number.isSafeInteger(offset) && offset > 0 && offset <= 10000)
+        route.searchOffset = offset;
+      const searchShare = url.searchParams.get("searchShare");
+      if (
+        route.searchScope === "share" &&
+        searchShare &&
+        searchShare !== route.shareId &&
+        !isReservedShareId(searchShare) &&
+        !searchShare.includes("/")
+      )
+        route.searchShareId = searchShare;
+      const previewShare = url.searchParams.get("previewShare");
+      if (
+        previewShare &&
+        !isReservedShareId(previewShare) &&
+        !previewShare.includes("/")
+      )
+        route.previewShareId = previewShare;
+    }
     if (previewPath !== null && isValidVirtualPath(previewPath)) {
       route.previewPath = previewPath;
     }
     // Without ?preview= the last segment may still name a file; the app
     // resolves that and keeps the requested full-screen mode.
     if (url.searchParams.get("view") === "full") route.previewMode = "full";
-    if (route.path && route.previewPath === undefined) route.unresolved = true;
+    if (
+      route.path &&
+      route.previewPath === undefined &&
+      route.searchQuery === undefined
+    )
+      route.unresolved = true;
     return route;
   } catch {
     return { shareId: null, path: "" };
@@ -182,6 +218,14 @@ function browserUrl(route: BrowserRoute): string {
   if (route.view === "trash") return trashUrl();
   if (!shareId) return "/";
   const query = new URLSearchParams();
+  if (route.searchQuery !== undefined) {
+    query.set("search", route.searchQuery);
+    query.set("scope", route.searchScope ?? "share");
+    if (route.searchOffset) query.set("offset", String(route.searchOffset));
+    if (route.searchShareId && route.searchScope === "share")
+      query.set("searchShare", route.searchShareId);
+    if (route.previewShareId) query.set("previewShare", route.previewShareId);
+  }
   const safePath = isValidVirtualPath(route.path) ? route.path : "";
   if (route.view === "rendered" && safePath) {
     query.set("view", "rendered");
@@ -192,7 +236,10 @@ function browserUrl(route: BrowserRoute): string {
       ? route.previewPath
       : null;
   // A file previewed from its own folder is addressed by its own path.
-  const inline = previewPath !== null && parentPath(previewPath) === safePath;
+  const inline =
+    route.searchQuery === undefined &&
+    previewPath !== null &&
+    parentPath(previewPath) === safePath;
   if (previewPath !== null && !inline) query.set("preview", previewPath);
   // Also kept before a file link resolves, so full screen survives it.
   if (route.previewMode === "full") query.set("view", "full");

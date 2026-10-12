@@ -1,10 +1,10 @@
 # Crabinet
 
+![Crabinet — Your server files, in your browser. Self-hosted, single Rust binary, rootless Podman.](docs/images/crabinet-header.png)
+
 [![CI](https://github.com/joanfabregat/crabinet/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/joanfabregat/crabinet/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/joanfabregat/crabinet?sort=semver)](https://github.com/joanfabregat/crabinet/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
-<img src="web/public/crabinet.png" alt="Crabinet logo: a crab on a filing cabinet" width="96">
 
 **A self-hosted web file browser in a single Rust binary.**
 
@@ -21,6 +21,7 @@ Crabinet started as a small project to replace File Browser. Ideas, feature sugg
 ## What you can do
 
 - **Browse your existing files.** Files remain in normal server directories. Navigate a folder tree, see folder sizes as they are counted in the background, and show hidden files when needed.
+- **Find files quickly.** Search filenames within a folder, a share, or all your shares, with suggestions as you type and visual type, extension, size, and date filters. A private SQLite index updates in the background; see [Search](docs/search.md).
 - **Download one file or many.** Download files with range support, or whole folders as streamed ZIP archives. Select several entries, with Shift-click for a range, to download them as one ZIP. Text inside archives is compressed automatically; photos and video are stored as they are, so those downloads keep an exact size and progress.
 - **Upload and organize.** Drag and drop uploads, create folders, rename and move entries within a share, edit UTF-8 text, and move files or folders to Trash, one at a time or as a selection, with restore support.
 - **Preview before downloading.** Read highlighted code and text, rendered GitHub Flavored Markdown, HTML with rendered/source views, and SVG with image/source views; large text files preview their first lines, and large HTML and SVG open in full in a new tab. See the first page of a PDF and play audio and video. Open images, SVG, PDFs, and text in the browser's own viewer, or download them. Preview sizes are bounded; HTML and SVG previews block scripts and network requests.

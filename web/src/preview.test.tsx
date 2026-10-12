@@ -88,6 +88,9 @@ function previewDocument(
 
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
+    search:
+      overrides.search ??
+      vi.fn(async () => ({ entries: [], indexing: false, incomplete: false })),
     session: overrides.session ?? vi.fn(async () => session),
     authMethods:
       overrides.authMethods ??
@@ -309,7 +312,9 @@ describe("secure file previews", () => {
       "top.location",
     );
     expect(
-      document.querySelector("main script, main img, main form"),
+      screen
+        .getByTestId("markdown-document")
+        .querySelector("script, img, form"),
     ).toBeNull();
     expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
 

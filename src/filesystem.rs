@@ -737,6 +737,14 @@ pub struct AuthorizedShare<'share> {
 }
 
 impl AuthorizedShare<'_> {
+    pub(crate) fn root_identity(&self) -> [u8; 16] {
+        let mut identity = [0; 16];
+        if let Ok(metadata) = self.share.root.dir_metadata() {
+            identity[..8].copy_from_slice(&metadata.dev().to_le_bytes());
+            identity[8..].copy_from_slice(&metadata.ino().to_le_bytes());
+        }
+        identity
+    }
     #[must_use]
     pub const fn access(&self) -> AccessLevel {
         self.access
@@ -795,6 +803,34 @@ impl AuthorizedShare<'_> {
         }
         result.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(result)
+    }
+
+    /// Adds one capability-opened directory to the background index watcher
+    /// and returns its watch descriptor. Watching an already watched directory
+    /// returns its existing descriptor.
+    pub(crate) fn watch_index_directory(
+        &self,
+        watcher: &rustix::fd::OwnedFd,
+        path: &VirtualPath,
+    ) -> FsResult<i32> {
+        use rustix::fs::inotify::{self, WatchFlags};
+        use std::os::fd::{AsFd as _, AsRawFd as _};
+        let directory = self.share.open_directory(&path.0)?;
+        let capability_path = format!("/proc/self/fd/{}", directory.as_fd().as_raw_fd());
+        inotify::add_watch(
+            watcher,
+            capability_path,
+            WatchFlags::ATTRIB
+                | WatchFlags::CLOSE_WRITE
+                | WatchFlags::CREATE
+                | WatchFlags::DELETE
+                | WatchFlags::DELETE_SELF
+                | WatchFlags::MOVE_SELF
+                | WatchFlags::MOVED_FROM
+                | WatchFlags::MOVED_TO
+                | WatchFlags::ONLYDIR,
+        )
+        .map_err(|error| map_io(error.into()))
     }
 
     /// Lists every entry beneath the directory `path` for a folder archive,

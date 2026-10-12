@@ -1,0 +1,8 @@
+version = 1
+{{SERVER}}
+{{USER}}
+[[shares]]
+id = "documents"
+name = "Documents"
+path = "{{ROOT}}"
+search_enabled = "yes"

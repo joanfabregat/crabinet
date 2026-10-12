@@ -93,6 +93,9 @@ async function confirmMoveToTrash() {
 
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
+    search:
+      overrides.search ??
+      vi.fn(async () => ({ entries: [], indexing: false, incomplete: false })),
     session: overrides.session ?? vi.fn(async () => session),
     authMethods:
       overrides.authMethods ??
@@ -519,6 +522,16 @@ describe("authentication", () => {
 });
 
 describe("directory browser", () => {
+  it("places the combined search controls in the top bar", async () => {
+    render(<App api={fakeApi()} navigation={new MemoryNavigation()} />);
+    const input = await screen.findByRole("combobox", { name: "Search files" });
+    const header = screen.getByRole("banner");
+    expect(header).toContainElement(input);
+    expect(header).toContainElement(
+      screen.getByRole("combobox", { name: "Search scope" }),
+    );
+    expect(screen.getByRole("main")).not.toContainElement(input);
+  });
   it("opens the saved start folder only when entering through the app home", async () => {
     const account = {
       ...session,

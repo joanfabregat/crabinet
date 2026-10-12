@@ -28,6 +28,7 @@ import {
   Maximize2,
   Minimize2,
   Pencil,
+  Search,
   Settings2,
   SunMoon,
   Trash2,
@@ -106,6 +107,7 @@ import {
   type TrashedEntry,
 } from "./selection";
 import { TrashView } from "./trash";
+import { SearchPanel } from "./search";
 import { isWebAuthnCancellation, PasskeySettings } from "./passkey-settings";
 import {
   applyThemePreference,
@@ -747,7 +749,10 @@ function AuthenticatedShell({
     );
   }
 
-  return (
+  const layout = (
+    searchControls?: preact.ComponentChildren,
+    searchResults?: preact.ComponentChildren,
+  ) => (
     <div class="app-frame app-shell">
       {import.meta.env.DEV && (
         <div class="development-banner" role="status">
@@ -756,6 +761,7 @@ function AuthenticatedShell({
         </div>
       )}
       <AppHeader>
+        {searchControls && <div class="header-search">{searchControls}</div>}
         <div class="account-actions">
           <span class="account-name">{session.user.displayName}</span>
           {session.user.pictureUrl && (
@@ -915,6 +921,7 @@ function AuthenticatedShell({
           />
         ) : selectedShare ? (
           <DirectoryBrowser
+            searchResults={searchResults}
             api={api}
             csrfToken={session.csrfToken}
             navigation={navigation}
@@ -937,9 +944,26 @@ function AuthenticatedShell({
       )}
     </div>
   );
+  return selectedShare &&
+    route.view !== "trash" &&
+    (selectedShare.searchEnabled !== false ||
+      route.searchQuery !== undefined) ? (
+    <SearchPanel
+      api={api}
+      route={route}
+      navigation={navigation}
+      shares={session.shares}
+      hidden={showHiddenFiles}
+      onSessionExpired={onSessionExpired}
+      renderLayout={layout}
+    />
+  ) : (
+    layout()
+  );
 }
 
 interface DirectoryBrowserProps {
+  searchResults?: preact.ComponentChildren;
   api: ApiClient;
   csrfToken: string;
   navigation: BrowserNavigation;
@@ -955,6 +979,7 @@ interface DirectoryBrowserProps {
 }
 
 function DirectoryBrowser({
+  searchResults,
   api,
   csrfToken,
   navigation,
@@ -1393,7 +1418,15 @@ function DirectoryBrowser({
           setListingRevision((value) => value + 1);
           setLoading(false);
           if (shouldFocusHeading) {
-            requestAnimationFrame(() => headingRef.current?.focus());
+            requestAnimationFrame(() => {
+              if (
+                !document.activeElement?.closest(
+                  ".search-controls, .search-filter-form",
+                )
+              ) {
+                headingRef.current?.focus();
+              }
+            });
           }
         },
         (cause: unknown) => {
@@ -1538,6 +1571,15 @@ function DirectoryBrowser({
   };
 
   const crumbs = breadcrumbItems(route.path);
+  // Search results replace the folder view; the breadcrumb names their scope.
+  const searching = route.searchQuery !== undefined;
+  const searchScope = searching ? (route.searchScope ?? "share") : undefined;
+  // A search of another share keeps this share as the route's; the breadcrumb
+  // and the tree show the share being searched.
+  const searchedShare =
+    (route.searchShareId &&
+      shares.find((candidate) => candidate.id === route.searchShareId)) ||
+    share;
 
   const openPreview = (path: string, trigger: HTMLAnchorElement) => {
     previewTriggerRef.current = trigger;
@@ -1545,7 +1587,16 @@ function DirectoryBrowser({
   };
 
   const closePreview = () => {
-    navigation.go({ shareId: share.id, path: route.path });
+    navigation.go(
+      route.searchQuery === undefined
+        ? { shareId: share.id, path: route.path }
+        : {
+            ...route,
+            previewPath: undefined,
+            previewShareId: undefined,
+            previewMode: undefined,
+          },
+    );
     requestAnimationFrame(() => previewTriggerRef.current?.focus());
   };
 
@@ -1556,7 +1607,17 @@ function DirectoryBrowser({
    */
   const closeMissingPreview = (path: string) => {
     if (activePreview.current !== path) return;
-    navigation.go({ shareId: share.id, path: route.path }, { replace: true });
+    navigation.go(
+      route.searchQuery === undefined
+        ? { shareId: share.id, path: route.path }
+        : {
+            ...route,
+            previewPath: undefined,
+            previewShareId: undefined,
+            previewMode: undefined,
+          },
+      { replace: true },
+    );
     showToast(
       `${path.split("/").at(-1) ?? path} is no longer available. It may have been deleted or moved.`,
       { tone: "warning" },
@@ -1719,8 +1780,8 @@ function DirectoryBrowser({
           shares={shares}
           revision={refreshKey}
           showHidden={showHiddenFiles}
-          activeShareId={share.id}
-          activePath={route.path}
+          activeShareId={searchScope === "all" ? "" : searchedShare.id}
+          activePath={searchScope === "share" ? "" : route.path}
           activeView={route.view === "trash" ? "trash" : undefined}
           navigation={navigation}
           onMove={(entry, path, destinationDirectory) =>
@@ -1810,7 +1871,9 @@ function DirectoryBrowser({
           )}
           <section
             class="directory-panel"
-            aria-labelledby="directory-title"
+            aria-labelledby={
+              searching ? "search-results-title" : "directory-title"
+            }
             onKeyDown={(event) => {
               if (
                 event.key !== "Escape" ||
@@ -1825,86 +1888,119 @@ function DirectoryBrowser({
             {deleteError && <Notice tone="danger">{deleteError}</Notice>}
             <nav class="breadcrumbs" aria-label="Breadcrumb">
               <ol>
-                <li>
-                  <a
-                    href={directoryUrl(share.id, "")}
-                    aria-current={route.path === "" ? "page" : undefined}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      navigation.go({ shareId: share.id, path: "" });
-                    }}
-                  >
-                    {share.name}
-                  </a>
-                </li>
-                {crumbs.map((crumb, index) => (
-                  <li key={crumb.path}>
-                    <span aria-hidden="true">/</span>
+                {searchScope === "all" ? (
+                  <li>
+                    <span class="breadcrumb-scope">All shares</span>
+                  </li>
+                ) : (
+                  <li>
                     <a
-                      href={directoryUrl(share.id, crumb.path)}
+                      href={directoryUrl(searchedShare.id, "")}
                       aria-current={
-                        index === crumbs.length - 1 ? "page" : undefined
+                        !searching && route.path === "" ? "page" : undefined
                       }
                       onClick={(event) => {
                         event.preventDefault();
-                        navigation.go({ shareId: share.id, path: crumb.path });
+                        navigation.go({ shareId: searchedShare.id, path: "" });
                       }}
                     >
-                      {crumb.name}
+                      {searchedShare.name}
                     </a>
                   </li>
-                ))}
+                )}
+                {(!searching || searchScope === "folder") &&
+                  crumbs.map((crumb, index) => (
+                    <li key={crumb.path}>
+                      <span aria-hidden="true">/</span>
+                      <a
+                        href={directoryUrl(share.id, crumb.path)}
+                        aria-current={
+                          !searching && index === crumbs.length - 1
+                            ? "page"
+                            : undefined
+                        }
+                        onClick={(event) => {
+                          event.preventDefault();
+                          navigation.go({
+                            shareId: share.id,
+                            path: crumb.path,
+                          });
+                        }}
+                      >
+                        {crumb.name}
+                      </a>
+                    </li>
+                  ))}
+                {searching && (
+                  <li>
+                    <span aria-hidden="true">/</span>
+                    <span class="breadcrumb-search" aria-current="page">
+                      <Search size={15} aria-hidden="true" />
+                      {route.searchQuery?.trim()
+                        ? `Search “${route.searchQuery.trim()}”`
+                        : "Search"}
+                    </span>
+                  </li>
+                )}
               </ol>
             </nav>
 
-            <div class="directory-heading" ref={headingRowRef}>
-              <div>
-                <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
-                  {crumbs.at(-1)?.name ?? share.name}
-                </h1>
-              </div>
-              <div
-                class={`directory-heading-actions${headingActionsCompact ? " is-compact" : ""}`}
-              >
-                {writable && (
-                  <WriteToolbar
-                    onCreateFile={() => setOperation({ kind: "create-file" })}
-                    onCreateFolder={() =>
-                      setOperation({ kind: "create-folder" })
-                    }
-                    onUpload={(files) =>
-                      setUploadSelection({ id: crypto.randomUUID(), files })
-                    }
-                  />
-                )}
-                <ArchiveDownloadLink
-                  shareId={share.id}
-                  path={route.path}
-                  name={crumbs.at(-1)?.name ?? share.name}
-                  checking={archive.checking}
-                  onDownload={() =>
-                    void archive.download(
-                      route.path,
-                      crumbs.at(-1)?.name ?? share.name,
-                    )
-                  }
-                />
-                <CopyPathButton
-                  value={`${share.id}${route.path ? `/${route.path}` : ""}`}
-                  label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
-                />
-              </div>
-            </div>
+            {!searching && (
+              <>
+                <div class="directory-heading" ref={headingRowRef}>
+                  <div>
+                    <h1 id="directory-title" ref={headingRef} tabIndex={-1}>
+                      {crumbs.at(-1)?.name ?? share.name}
+                    </h1>
+                  </div>
+                  <div
+                    class={`directory-heading-actions${headingActionsCompact ? " is-compact" : ""}`}
+                  >
+                    {writable && (
+                      <WriteToolbar
+                        onCreateFile={() =>
+                          setOperation({ kind: "create-file" })
+                        }
+                        onCreateFolder={() =>
+                          setOperation({ kind: "create-folder" })
+                        }
+                        onUpload={(files) =>
+                          setUploadSelection({ id: crypto.randomUUID(), files })
+                        }
+                      />
+                    )}
+                    <ArchiveDownloadLink
+                      shareId={share.id}
+                      path={route.path}
+                      name={crumbs.at(-1)?.name ?? share.name}
+                      checking={archive.checking}
+                      onDownload={() =>
+                        void archive.download(
+                          route.path,
+                          crumbs.at(-1)?.name ?? share.name,
+                        )
+                      }
+                    />
+                    <CopyPathButton
+                      value={`${share.id}${route.path ? `/${route.path}` : ""}`}
+                      label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
+                    />
+                  </div>
+                </div>
 
-            <div class="sr-only" role="status" aria-live="polite">
-              {loading
-                ? "Loading folder"
-                : page
-                  ? `${visibleEntries.length} items loaded`
-                  : "Folder unavailable"}
-            </div>
+                <div class="sr-only" role="status" aria-live="polite">
+                  {loading
+                    ? "Loading folder"
+                    : page
+                      ? `${visibleEntries.length} items loaded`
+                      : "Folder unavailable"}
+                </div>
+              </>
+            )}
 
-            {loading ? (
+            {searchResults}
+
+            {route.searchQuery !== undefined ? null : loading ? (
               <DirectorySkeleton />
             ) : error && !page ? (
               <DirectoryError
@@ -2001,12 +2097,12 @@ function DirectoryBrowser({
       )}
       {route.view !== "trash" && route.previewPath && (
         <PreviewPanel
-          key={`${share.id}:${route.previewPath}`}
+          key={`${route.previewShareId ?? share.id}:${route.previewPath}`}
           api={api}
           path={route.previewPath}
-          shareId={share.id}
+          shareId={route.previewShareId ?? share.id}
           revision={refreshKey}
-          writable={writable}
+          writable={writable && route.searchQuery === undefined}
           fullScreen={route.previewMode === "full"}
           onOperation={operateOnPreview}
           operationError={previewOperationError}
@@ -2014,6 +2110,7 @@ function DirectoryBrowser({
           onMissing={closeMissingPreview}
           onToggleFullScreen={() =>
             navigation.go({
+              ...route,
               shareId: share.id,
               path: route.path,
               previewPath: route.previewPath,

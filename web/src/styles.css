@@ -230,6 +230,7 @@ a {
   background: var(--header-bg);
   border-bottom: 1px solid var(--line);
   display: flex;
+  gap: 1.5rem;
   justify-content: space-between;
   min-height: 4.5rem;
   padding: 0.75rem max(1rem, calc((100vw - 100rem) / 2));
@@ -965,7 +966,8 @@ select {
 }
 
 /* A divider naming the shared folder whose items follow. */
-.trash-group-title {
+.trash-group-title,
+.search-group-title {
   align-items: baseline;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
@@ -979,7 +981,8 @@ select {
   text-transform: uppercase;
 }
 
-.trash-group-count {
+.trash-group-count,
+.search-group-count {
   font-weight: 400;
   letter-spacing: normal;
   text-transform: none;
@@ -2859,6 +2862,499 @@ html.preview-fullscreen-open body {
   }
 
   .app-footer {
+    transition: none;
+  }
+}
+
+/*
+ * Search sits in the header as a narrow field until it is used, then widens
+ * to show its scope and filter controls. Results keep the directory and
+ * preview layout.
+ */
+.header-search {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+.header-search:empty {
+  display: none;
+}
+.search-controls {
+  position: relative;
+  transition: width 160ms ease;
+  width: min(100%, 17rem);
+  z-index: 20;
+}
+.search-controls.is-expanded {
+  width: min(100%, 44rem);
+}
+.search-row {
+  display: flex;
+  align-items: center;
+}
+.search-input-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  padding: 0 0.2rem;
+  background: var(--surface-subtle);
+  height: 2.35rem;
+}
+.search-controls:not(.is-expanded) .search-input-wrap {
+  cursor: text;
+}
+.search-controls:not(.is-expanded) .search-input-wrap:hover {
+  border-color: var(--control-border);
+}
+.search-controls.is-expanded .search-input-wrap {
+  background: var(--surface);
+  border-color: var(--control-border);
+}
+.search-input-wrap > input {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 0.15rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.9rem;
+}
+.search-input-wrap > input:focus-visible {
+  outline: none;
+}
+.search-input-wrap > .icon-button {
+  flex-shrink: 0;
+  width: 1.9rem;
+  height: 1.9rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--muted);
+}
+.search-input-wrap > .icon-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+.search-input-wrap:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.search-input-wrap > select {
+  width: auto;
+  max-width: 13rem;
+  min-height: 0;
+  height: 1.6rem;
+  padding: 0 0.3rem 0 0.55rem;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.search-controls:not(.is-expanded) .search-input-wrap > select,
+.search-controls:not(.is-expanded) .search-filter-toggle {
+  display: none;
+}
+.search-shortcut {
+  flex-shrink: 0;
+  margin-right: 0.3rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+.search-input-wrap > .search-filter-toggle {
+  position: relative;
+}
+.search-filter-count {
+  position: absolute;
+  top: -0.1rem;
+  right: -0.15rem;
+  min-width: 0.95rem;
+  height: 0.95rem;
+  padding: 0 0.2rem;
+  border-radius: 999px;
+  background: var(--accent-fill);
+  color: white;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 0.95rem;
+  text-align: center;
+}
+.search-input-wrap > .search-filter-toggle[aria-expanded="true"] {
+  background: var(--selected-bg);
+  color: var(--accent);
+}
+.search-suggestions {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  right: 0;
+  min-width: min(20rem, 70vw);
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow);
+  z-index: 5;
+}
+.search-suggestions [role="option"],
+.search-all-results {
+  display: flex;
+  align-items: center;
+  text-align: left;
+  gap: 0.7rem;
+  width: 100%;
+  padding: 0.55rem 0.8rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.search-suggestions [role="option"]:hover,
+.search-suggestions [aria-selected="true"] {
+  background: var(--selected-bg);
+}
+.search-suggestions [role="option"] > span {
+  min-width: 0;
+}
+.search-suggestions strong,
+.search-suggestions small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.search-suggestions small,
+.search-result-name small {
+  color: var(--muted);
+}
+.search-suggestions p {
+  margin: 0.6rem 0.8rem;
+  font-size: 0.85rem;
+}
+.search-all-results {
+  border-top: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+/* The filter panel is a popover anchored under the filter button. */
+.search-filter-popover {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  width: min(29rem, calc(100vw - 2rem));
+  max-height: 75dvh;
+  overflow-y: auto;
+  padding: 0.7rem 0.85rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.search-filter-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.45rem;
+}
+.search-filter-heading h2 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+.search-filter-heading .icon-button {
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.search-filter-form {
+  display: grid;
+  gap: 0.55rem;
+  font-size: 0.85rem;
+}
+.search-filter-row {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+}
+.search-filter-label {
+  color: var(--muted);
+  font-weight: 650;
+}
+/* Type pills can wrap, so their label stays on the first line. */
+.search-filter-row:has(.search-type-options) {
+  align-items: start;
+}
+.search-filter-row:has(.search-type-options) > .search-filter-label {
+  padding-top: 0.2rem;
+}
+.search-filter-label small {
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+.search-filter-form input:not([type="checkbox"]),
+.search-filter-form select {
+  min-height: 0;
+  height: 2rem;
+  padding: 0 0.5rem;
+  border-radius: 0.45rem;
+  font-size: 0.85rem;
+}
+.search-filter-form select {
+  padding-right: 0.25rem;
+}
+.search-filter-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.search-filter-fields > input[type="number"] {
+  flex: 1 1 4rem;
+  width: 4rem;
+  min-width: 3.5rem;
+}
+.search-filter-fields > input[type="date"] {
+  flex: 1 1 8.5rem;
+  min-width: 0;
+}
+.search-filter-fields > span {
+  color: var(--muted);
+}
+
+/* Type checkboxes render as toggle pills; the native box stays focusable. */
+.search-type-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.search-type-option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
+}
+.search-type-option:hover {
+  background: var(--surface-hover);
+}
+.search-type-option input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.search-type-option:has(input:checked) {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  color: white;
+}
+.search-type-option:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.search-filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+}
+.search-filter-actions .button {
+  min-height: 2rem;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+/* Results replace the folder view; rows follow the folder listing's layout. */
+.breadcrumb-scope,
+.breadcrumb-search {
+  font-weight: 680;
+}
+.breadcrumb-search {
+  align-items: center;
+  color: var(--ink);
+  display: inline-flex;
+  gap: 0.35rem;
+}
+.search-results {
+  padding: 0 1.25rem 1.25rem;
+}
+.search-results-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 1.25rem 0 0.5rem;
+}
+.search-results-heading h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  overflow-wrap: anywhere;
+}
+.search-results-heading .icon-button {
+  flex-shrink: 0;
+}
+.search-status {
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.search-result-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin-top: 0.75rem;
+}
+.search-result-group .search-result-list {
+  border-top: 0;
+  margin-bottom: 0;
+}
+.search-result-list {
+  margin: 0.25rem 0 0.75rem;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.search-result-list > li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto 7rem;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.7rem 0.25rem;
+  border-bottom: 1px solid var(--line);
+}
+.search-result-list > li:hover {
+  background: var(--surface-hover);
+}
+.search-result-list > li > svg {
+  flex-shrink: 0;
+}
+.search-result-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.search-result-name > a:first-child {
+  font-weight: 650;
+}
+.search-result-name mark,
+.search-suggestions mark {
+  background: var(--selected-strong-bg);
+  border-radius: 0.2rem;
+  color: inherit;
+  font-weight: 750;
+}
+.search-result-location {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+  text-decoration: none;
+}
+.search-result-location:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.search-result-location > svg {
+  flex-shrink: 0;
+}
+.search-result-size,
+.search-result-date {
+  font-size: 0.8rem;
+  white-space: nowrap;
+  color: var(--muted);
+  text-align: right;
+}
+.search-pagination {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+@media (pointer: coarse) {
+  .search-input-wrap {
+    height: 2.75rem;
+  }
+  .search-input-wrap > .icon-button {
+    width: 2.4rem;
+    height: 2.4rem;
+  }
+  .search-shortcut {
+    display: none;
+  }
+  .search-filter-form input:not([type="checkbox"]),
+  .search-filter-form select {
+    height: 2.5rem;
+  }
+  .search-type-option {
+    padding: 0.4rem 0.75rem;
+  }
+}
+@media (max-width: 600px) {
+  .app-header {
+    flex-wrap: wrap;
+    column-gap: 0.75rem;
+    row-gap: 0.65rem;
+  }
+  /* Idle, the field shares the header row; in use, it takes a row of its own. */
+  .header-search:has(.is-expanded) {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .search-controls,
+  .search-controls.is-expanded {
+    width: 100%;
+  }
+  .search-shortcut {
+    display: none;
+  }
+  .search-input-wrap > select {
+    max-width: 8.5rem;
+  }
+  .search-results {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+  .search-result-list > li {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .search-result-date {
+    display: none;
+  }
+  .search-filter-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .search-controls {
     transition: none;
   }
 }

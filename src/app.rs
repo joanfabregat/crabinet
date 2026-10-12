@@ -17,7 +17,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{assets, auth, browse, error, mutations, oidc, preview, thumbnail};
+use crate::{assets, auth, browse, error, mutations, oidc, preview, search, thumbnail};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -32,6 +32,7 @@ pub struct AppState {
     mutations: Arc<mutations::MutationState>,
     trash_retention_days: u16,
     thumbnails: Arc<thumbnail::ThumbnailService>,
+    search: Option<Arc<search::SearchService>>,
 }
 
 impl AppState {
@@ -45,6 +46,7 @@ impl AppState {
             mutations: Arc::new(mutations::MutationState::default()),
             trash_retention_days: 30,
             thumbnails: Arc::new(thumbnail::ThumbnailService::default()),
+            search: None,
         }
     }
 
@@ -52,6 +54,16 @@ impl AppState {
     pub fn with_browse(mut self, browse: browse::BrowseState) -> Self {
         self.browse = Arc::new(browse);
         self
+    }
+
+    #[must_use]
+    pub fn with_search(mut self, search: Arc<search::SearchService>) -> Self {
+        self.search = Some(search);
+        self
+    }
+
+    pub fn search(&self) -> Option<&Arc<search::SearchService>> {
+        self.search.as_ref()
     }
 
     #[must_use]
@@ -189,6 +201,7 @@ pub fn router(state: AppState) -> Router {
     let reads = browse::router()
         .merge(preview::router())
         .merge(thumbnail::router())
+        .merge(search::router())
         .merge(mutations::read_router());
     let writes = mutations::router(state.mutations().http_body_limit());
     let (reads, writes) = if state.auth().is_some() {
@@ -411,6 +424,15 @@ pub(crate) mod tests {
             )
             .body(Sample::Json("{}")),
             Route::new("GET", "/api/v1/session", Session, Safe, SESSION_STORE),
+            Route::new(
+                "GET",
+                "/api/v1/search",
+                Session,
+                Safe,
+                Bound::Exempt(
+                    "search has its own 4-process/2-subject gate and one-second SQLite work budget",
+                ),
+            ),
             Route::new("PUT", "/api/v1/preferences", Session, Csrf, SESSION_STORE)
                 .body(Sample::Json(r#"{"defaultFolder":null}"#)),
             Route::new(
