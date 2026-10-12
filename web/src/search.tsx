@@ -70,19 +70,42 @@ const shortcutLabel =
     : "Ctrl K";
 const PAGE_SIZE = 50;
 /**
- * Up to five page numbers around the current page, with a gap on each side
- * that has more pages. The server reports at most five pages ahead and no
- * total, so the last page is never shown.
+ * The first and last pages around a window of `size` pages centred on the
+ * current one, with a gap wherever pages are skipped:
+ * 1 … 5 6 7 8 9 … 25.
  */
-function pageWindow(current: number, pagesAfter: number): (number | "gap")[] {
-  const last = current + pagesAfter;
-  const start = Math.max(1, Math.min(current - 2, last - 4));
-  const end = Math.min(last, start + 4);
+function pageItems(
+  current: number,
+  last: number,
+  size: number,
+): (number | "gap")[] {
+  const half = Math.floor(size / 2);
+  const start = Math.max(1, Math.min(current - half, last - size + 1));
+  const end = Math.min(last, start + size - 1);
   const pages: (number | "gap")[] = [];
-  if (start > 1) pages.push("gap");
+  if (start > 1) pages.push(1);
+  if (start > 2) pages.push("gap");
   for (let page = start; page <= end; page++) pages.push(page);
-  if (end < last) pages.push("gap");
+  if (end < last - 1) pages.push("gap");
+  if (end < last) pages.push(last);
   return pages;
+}
+const NARROW = "(max-width: 600px)";
+/** Whether the viewport is phone-sized; the page bar keeps one row there. */
+function useNarrow() {
+  const media = () =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(NARROW)
+      : undefined;
+  const [narrow, setNarrow] = useState(() => media()?.matches ?? false);
+  useEffect(() => {
+    const query = media();
+    if (!query) return;
+    const update = () => setNarrow(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return narrow;
 }
 const tokens = (query: string): string[] => query.match(/"[^"]*"|\S+/g) ?? [];
 const filterToken = (token: string) =>
@@ -270,6 +293,7 @@ export function SearchPanel({
             PAGE_SIZE,
           ),
           offset: route.searchOffset ?? 0,
+          count: true,
         }
       : undefined,
     onSessionExpired,
@@ -501,7 +525,9 @@ export function SearchPanel({
                         <strong>
                           <Highlighted name={entry.name} query={draft} />
                         </strong>
-                        <small>{resultLocation(entry, shares)}</small>
+                        <small>
+                          {resultLocation(entry, shares, scope === "all")}
+                        </small>
                       </span>
                     </button>
                   ))
@@ -609,11 +635,15 @@ export function SearchPanel({
   );
   const offset = route.searchOffset ?? 0;
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
-  const pagesAfter =
-    results.page?.pagesAfter ??
-    (results.page?.nextOffset === undefined ? 0 : 1);
-  // Under a share heading, a result's location leaves out the share name.
-  const resultRow = (entry: SearchEntry, grouped: boolean) => (
+  const narrow = useNarrow();
+  // Without a count, the next page is the last one known.
+  const lastPage = Math.max(
+    currentPage,
+    results.page?.pageCount ??
+      currentPage + (results.page?.nextOffset === undefined ? 0 : 1),
+  );
+  // The page header or a share heading names the share, so rows show paths.
+  const resultRow = (entry: SearchEntry) => (
     <li key={`${entry.shareId}/${entry.path}`}>
       <EntryIcon entry={entry} size={20} aria-hidden="true" />
       <div class="search-result-name">
@@ -643,7 +673,7 @@ export function SearchPanel({
           }}
         >
           <FolderOpen size={13} aria-hidden="true" />
-          {resultLocation(entry, shares, grouped)}
+          {resultLocation(entry, shares)}
         </a>
       </div>
       <span class="search-result-size">
@@ -729,14 +759,14 @@ export function SearchPanel({
                       </span>
                     </h2>
                     <ul class="search-result-list">
-                      {group.entries.map((entry) => resultRow(entry, true))}
+                      {group.entries.map((entry) => resultRow(entry))}
                     </ul>
                   </section>
                 ))}
             </div>
           ) : (
             <ul class="search-result-list">
-              {resultEntries.map((entry) => resultRow(entry, false))}
+              {resultEntries.map((entry) => resultRow(entry))}
             </ul>
           )}
           {(offset > 0 || results.page.nextOffset !== undefined) && (
@@ -756,38 +786,39 @@ export function SearchPanel({
                 <ChevronLeft size={18} aria-hidden="true" />
                 <span class="search-page-step-label">Previous</span>
               </button>
-              {pageWindow(currentPage, pagesAfter).map((item, index) =>
-                item === "gap" ? (
-                  <span
-                    key={`gap-${index}`}
-                    class="search-page-gap"
-                    aria-hidden="true"
-                  >
-                    …
-                  </span>
-                ) : (
-                  <button
-                    key={item}
-                    type="button"
-                    class={`button button-secondary search-page${
-                      item === currentPage ? " is-current" : ""
-                    }`}
-                    aria-label={`Page ${item}`}
-                    aria-current={item === currentPage ? "page" : undefined}
-                    onClick={() =>
-                      item !== currentPage &&
-                      navigation.go({
-                        ...route,
-                        searchOffset: Math.max(
-                          0,
-                          offset + (item - currentPage) * PAGE_SIZE,
-                        ),
-                      })
-                    }
-                  >
-                    {item}
-                  </button>
-                ),
+              {pageItems(currentPage, lastPage, narrow ? 3 : 5).map(
+                (item, index) =>
+                  item === "gap" ? (
+                    <span
+                      key={`gap-${index}`}
+                      class="search-page-gap"
+                      aria-hidden="true"
+                    >
+                      …
+                    </span>
+                  ) : (
+                    <button
+                      key={item}
+                      type="button"
+                      class={`button button-secondary search-page${
+                        item === currentPage ? " is-current" : ""
+                      }`}
+                      aria-label={`Page ${item}`}
+                      aria-current={item === currentPage ? "page" : undefined}
+                      onClick={() =>
+                        item !== currentPage &&
+                        navigation.go({
+                          ...route,
+                          searchOffset: Math.max(
+                            0,
+                            offset + (item - currentPage) * PAGE_SIZE,
+                          ),
+                        })
+                      }
+                    >
+                      {item}
+                    </button>
+                  ),
               )}
               <button
                 type="button"
@@ -834,12 +865,16 @@ export function SearchPanel({
   );
 }
 
-function resultLocation(entry: SearchEntry, shares: Share[], grouped = false) {
+/**
+ * The containing folder as a path. Where results mix shares, the share name
+ * comes first, set apart by a colon; a share's root shows its name.
+ */
+function resultLocation(entry: SearchEntry, shares: Share[], mixed = false) {
   const shareName =
     shares.find((share) => share.id === entry.shareId)?.name ?? entry.shareId;
   const folder = parentPath(entry.path);
-  if (grouped) return folder || shareName;
-  return folder ? `${shareName} / ${folder}` : shareName;
+  if (!folder) return shareName;
+  return mixed ? `${shareName}: ${folder}` : folder;
 }
 
 // Matches the folder listing's units.

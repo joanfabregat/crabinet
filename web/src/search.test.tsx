@@ -259,23 +259,21 @@ describe("search", () => {
       within(images).getByRole("link", { name: "Images" }),
     ).toBeInTheDocument();
   });
-  it("numbers five pages around the current one, with gaps where more exist", async () => {
-    const results = (offset: number, pagesAfter: number) => {
-      const { go } = setup(
-        vi.fn(async () => ({
-          ...page,
-          nextOffset: pagesAfter ? offset + 50 : undefined,
-          pagesAfter,
-        })),
-        {
-          shareId: "documents",
-          path: "",
-          searchQuery: "invoice",
-          searchScope: "share",
-          searchOffset: offset,
-        },
-      );
-      return go;
+  it("numbers the first, last, and five pages around the current one", async () => {
+    const results = (offset: number, pageCount: number) => {
+      const search = vi.fn<ApiClient["search"]>(async () => ({
+        ...page,
+        nextOffset: offset + 50 < pageCount * 50 ? offset + 50 : undefined,
+        pageCount,
+      }));
+      const { go } = setup(search, {
+        shareId: "documents",
+        path: "",
+        searchQuery: "invoice",
+        searchScope: "share",
+        searchOffset: offset,
+      });
+      return { go, search };
     };
     const labels = async () => {
       const nav = await screen.findByRole("navigation", {
@@ -288,8 +286,9 @@ describe("search", () => {
       );
     };
 
-    // First page: the next four pages, then a gap since more follow.
-    let go = results(0, 5);
+    // First page: the window starts at 1, then a gap and the last page.
+    const first = results(0, 25);
+    let go = first.go;
     expect(await labels()).toEqual([
       "Previous",
       "1",
@@ -298,8 +297,11 @@ describe("search", () => {
       "4",
       "5",
       "…",
+      "25",
       "Next",
     ]);
+    // Full results ask for the page count; suggestions never do.
+    expect(first.search.mock.calls[0]?.[0]).toMatchObject({ count: true });
     expect(
       screen.getByRole("button", { name: "Previous page" }),
     ).toBeDisabled();
@@ -313,10 +315,11 @@ describe("search", () => {
     );
     cleanup();
 
-    // Middle: two pages each side and a gap on both.
-    go = results(450, 5);
+    // Middle: two pages each side, with the first and last past the gaps.
+    go = results(450, 25).go;
     expect(await labels()).toEqual([
       "Previous",
+      "1",
       "…",
       "8",
       "9",
@@ -324,18 +327,25 @@ describe("search", () => {
       "11",
       "12",
       "…",
+      "25",
       "Next",
     ]);
+    fireEvent.click(screen.getByRole("button", { name: "Page 25" }));
+    expect(go).toHaveBeenCalledWith(
+      expect.objectContaining({ searchOffset: 1200 }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     expect(go).toHaveBeenCalledWith(
       expect.objectContaining({ searchOffset: 500 }),
     );
     cleanup();
 
-    // Last page: the window ends here and the next step is off.
-    results(300, 0);
+    // Last page: the window ends here and the next step is off. Page 2 is
+    // shown rather than a gap that would hide a single page.
+    results(300, 7);
     expect(await labels()).toEqual([
       "Previous",
+      "1",
       "…",
       "3",
       "4",
@@ -345,6 +355,50 @@ describe("search", () => {
       "Next",
     ]);
     expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+    cleanup();
+
+    // Phones keep one row with three pages around the current one.
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }));
+    results(450, 25);
+    expect(await labels()).toEqual([
+      "Previous",
+      "1",
+      "…",
+      "9",
+      "10",
+      "11",
+      "…",
+      "25",
+      "Next",
+    ]);
+    vi.unstubAllGlobals();
+  });
+  it("shows result folders as paths, naming the share only where shares mix", async () => {
+    const nested = { ...entry, path: "a/b/invoice.pdf" };
+    const { input } = setup(
+      vi.fn(async () => ({ ...page, entries: [nested] })),
+      {
+        shareId: "documents",
+        path: "",
+        searchQuery: "invoice",
+        searchScope: "share",
+      },
+    );
+    expect(
+      await screen.findByRole("link", { name: "a/b", exact: true }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search scope"), {
+      target: { value: "all" },
+    });
+    fireEvent.focus(input);
+    fireEvent.input(input, { target: { value: "invoice" } });
+    expect(
+      await screen.findByRole("option", { name: /Documents: a\/b/ }),
+    ).toBeInTheDocument();
   });
   it("renders hostile filenames as text and reports incomplete coverage", async () => {
     const name = "<img src=x onerror=alert(1)>.pdf";

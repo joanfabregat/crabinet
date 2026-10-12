@@ -37,8 +37,8 @@ export interface SearchPage {
   indexing: boolean;
   incomplete: boolean;
   nextOffset?: number;
-  /** Following pages known to exist, at most five; there is no total. */
-  pagesAfter?: number;
+  /** Pages of indexed candidates, capped at the largest offset; only when asked. */
+  pageCount?: number;
 }
 
 export interface SearchRequest {
@@ -48,6 +48,8 @@ export interface SearchRequest {
   showHidden?: boolean;
   limit?: number;
   offset?: number;
+  /** Ask for `pageCount`, which costs one more bounded scan. */
+  count?: boolean;
 }
 
 export interface Session {
@@ -605,6 +607,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       if (query.limit !== undefined) params.set("limit", String(query.limit));
       if (query.offset !== undefined)
         params.set("offset", String(query.offset));
+      if (query.count) params.set("count", "true");
       return parseSearchPage(
         await request<unknown>(`/api/v1/search?${params}`, { signal }, true),
       );
@@ -1412,9 +1415,9 @@ function parseSearchPage(value: unknown): SearchPage {
     (value.nextOffset !== undefined &&
       (!Number.isSafeInteger(value.nextOffset) ||
         (value.nextOffset as number) < 0)) ||
-    (value.pagesAfter !== undefined &&
-      (!Number.isSafeInteger(value.pagesAfter) ||
-        (value.pagesAfter as number) < 0)) ||
+    (value.pageCount !== undefined &&
+      (!Number.isSafeInteger(value.pageCount) ||
+        (value.pageCount as number) < 0)) ||
     !value.entries.every(
       (entry: unknown) =>
         isRecord(entry) &&
