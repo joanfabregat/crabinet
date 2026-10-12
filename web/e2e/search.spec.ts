@@ -32,7 +32,7 @@ test("search suggestions open nested files and preserve the query when closing p
   await expect(
     page.getByRole("link", { name: "notes.txt", exact: true }),
   ).toBeVisible();
-  await page.getByRole("link", { name: "Reference library / nested" }).click();
+  await page.getByRole("link", { name: "nested", exact: true }).click();
   await expect(page).toHaveURL(/\/read-only\/nested$/);
   await page.goBack();
   await expect(input).toHaveValue("notes");

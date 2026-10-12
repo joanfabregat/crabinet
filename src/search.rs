@@ -36,9 +36,6 @@ const APPLICATION_ID: i64 = 0x4352_5348;
 const SCHEMA_VERSION: i64 = 2;
 const MAX_ENTRIES: i64 = 200_000;
 const MAX_OFFSET: usize = 10_000;
-/// How many following pages a query looks for, so the page bar can number
-/// them without an exact global count.
-const PAGES_AHEAD: usize = 5;
 const MAX_WATCHES: usize = 4096;
 const MAX_PENDING: usize = 4096;
 const MAX_LISTING: usize = 10_000;
@@ -860,6 +857,8 @@ struct RequestQuery {
     show_hidden: bool,
     limit: Option<usize>,
     offset: Option<usize>,
+    #[serde(default)]
+    count: bool,
 }
 
 #[derive(Serialize)]
@@ -883,8 +882,10 @@ struct SearchPage {
     incomplete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_offset: Option<usize>,
-    /// Following pages known to hold candidates, at most `PAGES_AHEAD`.
-    pages_after: usize,
+    /// Pages of indexed candidates, up to the page at the largest offset;
+    /// only when the request asks for a count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_count: Option<usize>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -935,7 +936,17 @@ async fn search(
         .ok_or(AppError::Busy)?;
     let result = crate::browse::run_blocking(move || {
         let _lease = lease;
-        service.query(&allowed, &path, &query, request.show_hidden, limit, offset)
+        service.query(
+            &allowed,
+            &path,
+            &query,
+            request.show_hidden,
+            Paging {
+                limit,
+                offset,
+                count: request.count,
+            },
+        )
     })
     .await??;
     let mut response = Json(result).into_response();
@@ -950,6 +961,13 @@ async fn search(
     Ok(response)
 }
 
+/// One page of results, and whether to count the pages of candidates.
+struct Paging {
+    limit: usize,
+    offset: usize,
+    count: bool,
+}
+
 impl SearchService {
     fn query(
         &self,
@@ -957,8 +975,11 @@ impl SearchService {
         path: &VirtualPath,
         query: &SearchQuery,
         hidden: bool,
-        limit: usize,
-        offset: usize,
+        Paging {
+            limit,
+            offset,
+            count,
+        }: Paging,
     ) -> Result<SearchPage, AppError> {
         let indexing = allowed.keys().any(|id| {
             let share = &self.shares[id];
@@ -974,7 +995,7 @@ impl SearchService {
             indexing,
             incomplete,
             next_offset: None,
-            pages_after: 0,
+            page_count: None,
         };
         if allowed.is_empty() {
             return Ok(page);
@@ -982,9 +1003,8 @@ impl SearchService {
         if allowed.len() > 1024 {
             return Err(AppError::TooLarge);
         }
-        let mut sql = String::from(
-            "SELECT e.share,e.path,e.name,e.kind,e.size,e.modified FROM entries e WHERE e.share IN (",
-        );
+        // The filter is shared by the page query and the optional count.
+        let mut sql = String::from("FROM entries e WHERE e.share IN (");
         let mut values: Vec<Value> = Vec::new();
         for id in allowed.keys() {
             if !values.is_empty() {
@@ -1044,12 +1064,24 @@ impl SearchService {
                 values.push((*value).into());
             }
         }
+        // Counting stops at the page holding the largest offset, so the count
+        // costs at most one more bounded scan of the matches.
+        let count = count.then(|| {
+            let mut values = values.clone();
+            values.push(((MAX_OFFSET + limit) as i64).into());
+            (
+                format!("SELECT count(*) FROM (SELECT 1 {sql} LIMIT ?)"),
+                values,
+            )
+        });
         let needle = query.terms.join(" ");
-        sql.push_str(" ORDER BY CASE WHEN e.normalized=? THEN 0 WHEN instr(e.normalized,?)=1 THEN 1 ELSE 2 END,e.normalized,e.share,e.path LIMIT ? OFFSET ?");
+        let sql = format!(
+            "SELECT e.share,e.path,e.name,e.kind,e.size,e.modified {sql} ORDER BY CASE WHEN e.normalized=? THEN 0 WHEN instr(e.normalized,?)=1 THEN 1 ELSE 2 END,e.normalized,e.share,e.path LIMIT ? OFFSET ?"
+        );
         values.extend([
             needle.clone().into(),
             needle.into(),
-            ((limit * PAGES_AHEAD + 1) as i64).into(),
+            ((limit + 1) as i64).into(),
             (offset as i64).into(),
         ]);
         // The gate admits at most READERS searches, so a free reader exists
@@ -1068,8 +1100,8 @@ impl SearchService {
             .progress_handler(1000, Some(move || Instant::now() >= deadline))
             .map_err(|_| AppError::Internal)?;
         type Candidate = (String, String, String, String, Option<i64>, Option<i64>);
-        let candidates = (|| -> Result<Vec<Candidate>, rusqlite::Error> {
-            connection
+        let candidates = (|| -> Result<(Vec<Candidate>, Option<usize>), rusqlite::Error> {
+            let candidates = connection
                 .prepare(&sql)?
                 .query_map(rusqlite::params_from_iter(values), |r| {
                     Ok((
@@ -1081,23 +1113,32 @@ impl SearchService {
                         r.get(5)?,
                     ))
                 })?
-                .collect()
+                .collect::<Result<_, _>>()?;
+            let total = match count {
+                Some((sql, values)) => Some(connection.query_row(
+                    &sql,
+                    rusqlite::params_from_iter(values),
+                    |r| r.get::<_, i64>(0),
+                )?),
+                None => None,
+            };
+            Ok((
+                candidates,
+                total.map(|total| usize::try_from(total).unwrap_or(0)),
+            ))
         })();
         connection
             .progress_handler(0, None::<fn() -> bool>)
             .map_err(|_| AppError::Internal)?;
-        let candidates = candidates.map_err(query_error)?;
+        let (candidates, total) = candidates.map_err(query_error)?;
         drop(connection);
         // Only the first page is validated; the rest only says that more
         // pages exist, up to the largest offset a request may ask for.
-        page.pages_after = candidates
-            .len()
-            .saturating_sub(limit)
-            .div_ceil(limit)
-            .min((MAX_OFFSET - offset) / limit);
-        if page.pages_after > 0 {
+        if candidates.len() > limit && offset + limit <= MAX_OFFSET {
             page.next_offset = Some(offset + limit);
         }
+        // Like pages, the count is of indexed candidates, not validated matches.
+        page.page_count = total.map(|total| total.div_ceil(limit).max(1));
         for (id, path, name, kind, _, _) in candidates.into_iter().take(limit) {
             let Ok(virtual_path) = VirtualPath::parse(&path) else {
                 continue;
@@ -1526,15 +1567,17 @@ mod tests {
         drop(writer);
         let (_, result) = fixture.request("q=&limit=1", true).await;
         assert_eq!(result["nextOffset"], 1);
-        // The page bar sees up to five following pages, never past the offset cap.
+        // Only a request for a count gets a page count, of indexed candidates.
+        assert!(result.get("pageCount").is_none());
         let (_, all) = fixture.request("q=&limit=100&showHidden=true", true).await;
         let total = all["entries"].as_array().unwrap().len();
-        let (_, result) = fixture.request("q=&limit=1&showHidden=true", true).await;
-        assert_eq!(result["pagesAfter"], (total - 1).min(5));
-        let (_, result) = fixture.request("q=&limit=1&offset=9999", true).await;
-        assert!(result["pagesAfter"].as_u64().unwrap() <= 1);
+        let (_, result) = fixture
+            .request("q=&limit=2&showHidden=true&count=true", true)
+            .await;
+        assert_eq!(result["pageCount"], total.div_ceil(2));
+        let (_, result) = fixture.request("q=nothing&count=true", true).await;
+        assert_eq!(result["pageCount"], 1);
         let (_, result) = fixture.request("q=&limit=1&offset=10000", true).await;
-        assert_eq!(result["pagesAfter"], 0);
         assert!(result.get("nextOffset").is_none());
         fixture.service.shares["documents"]
             .complete
