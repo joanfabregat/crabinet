@@ -37,6 +37,8 @@ export interface SearchPage {
   indexing: boolean;
   incomplete: boolean;
   nextOffset?: number;
+  /** Following pages known to exist, at most five; there is no total. */
+  pagesAfter?: number;
 }
 
 export interface SearchRequest {
@@ -1410,6 +1412,9 @@ function parseSearchPage(value: unknown): SearchPage {
     (value.nextOffset !== undefined &&
       (!Number.isSafeInteger(value.nextOffset) ||
         (value.nextOffset as number) < 0)) ||
+    (value.pagesAfter !== undefined &&
+      (!Number.isSafeInteger(value.pagesAfter) ||
+        (value.pagesAfter as number) < 0)) ||
     !value.entries.every(
       (entry: unknown) =>
         isRecord(entry) &&

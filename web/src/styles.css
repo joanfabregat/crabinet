@@ -3294,8 +3294,36 @@ html.preview-fullscreen-open body {
 }
 .search-pagination {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
   gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+.search-pagination:empty {
+  display: none;
+}
+.search-page {
+  min-width: 2.65rem;
+  padding-inline: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.search-page.is-current {
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  color: white;
+  cursor: default;
+}
+.search-page-step {
+  padding-inline: 0.75rem;
+}
+.search-page-step:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.search-page-gap {
+  color: var(--muted);
+  padding-inline: 0.15rem;
 }
 
 @media (pointer: coarse) {
@@ -3337,6 +3365,21 @@ html.preview-fullscreen-open body {
   }
   .search-input-wrap > select {
     max-width: 8.5rem;
+  }
+  /* Steps drop their words so five pages and both gaps fit one row. */
+  .search-pagination {
+    gap: 0.2rem;
+  }
+  .search-page-step-label {
+    display: none;
+  }
+  .search-page,
+  .search-page-step {
+    min-width: 2rem;
+    padding-inline: 0.25rem;
+  }
+  .search-page-gap {
+    padding-inline: 0;
   }
   .search-results {
     padding-left: 1rem;

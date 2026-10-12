@@ -1,4 +1,5 @@
 import {
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -257,6 +258,93 @@ describe("search", () => {
     expect(
       within(images).getByRole("link", { name: "Images" }),
     ).toBeInTheDocument();
+  });
+  it("numbers five pages around the current one, with gaps where more exist", async () => {
+    const results = (offset: number, pagesAfter: number) => {
+      const { go } = setup(
+        vi.fn(async () => ({
+          ...page,
+          nextOffset: pagesAfter ? offset + 50 : undefined,
+          pagesAfter,
+        })),
+        {
+          shareId: "documents",
+          path: "",
+          searchQuery: "invoice",
+          searchScope: "share",
+          searchOffset: offset,
+        },
+      );
+      return go;
+    };
+    const labels = async () => {
+      const nav = await screen.findByRole("navigation", {
+        name: "Result pages",
+      });
+      return Array.from(nav.children, (item) =>
+        item.matches(".search-page-gap")
+          ? "…"
+          : (item.textContent ?? "").trim(),
+      );
+    };
+
+    // First page: the next four pages, then a gap since more follow.
+    let go = results(0, 5);
+    expect(await labels()).toEqual([
+      "Previous",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "…",
+      "Next",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "Previous page" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Page 1" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Page 4" }));
+    expect(go).toHaveBeenCalledWith(
+      expect.objectContaining({ searchOffset: 150 }),
+    );
+    cleanup();
+
+    // Middle: two pages each side and a gap on both.
+    go = results(450, 5);
+    expect(await labels()).toEqual([
+      "Previous",
+      "…",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "…",
+      "Next",
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(go).toHaveBeenCalledWith(
+      expect.objectContaining({ searchOffset: 500 }),
+    );
+    cleanup();
+
+    // Last page: the window ends here and the next step is off.
+    results(300, 0);
+    expect(await labels()).toEqual([
+      "Previous",
+      "…",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "Next",
+    ]);
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
   });
   it("renders hostile filenames as text and reports incomplete coverage", async () => {
     const name = "<img src=x onerror=alert(1)>.pdf";

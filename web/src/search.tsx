@@ -1,5 +1,12 @@
 import { useEffect, useId, useRef, useState } from "preact/hooks";
-import { Search, SlidersHorizontal, X, FolderOpen } from "lucide-preact";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Search,
+  SlidersHorizontal,
+  X,
+  FolderOpen,
+} from "lucide-preact";
 import {
   ApiError,
   type ApiClient,
@@ -61,6 +68,22 @@ const shortcutLabel =
   /Mac|iPhone|iPad/.test(navigator.userAgent)
     ? "⌘K"
     : "Ctrl K";
+const PAGE_SIZE = 50;
+/**
+ * Up to five page numbers around the current page, with a gap on each side
+ * that has more pages. The server reports at most five pages ahead and no
+ * total, so the last page is never shown.
+ */
+function pageWindow(current: number, pagesAfter: number): (number | "gap")[] {
+  const last = current + pagesAfter;
+  const start = Math.max(1, Math.min(current - 2, last - 4));
+  const end = Math.min(last, start + 4);
+  const pages: (number | "gap")[] = [];
+  if (start > 1) pages.push("gap");
+  for (let page = start; page <= end; page++) pages.push(page);
+  if (end < last) pages.push("gap");
+  return pages;
+}
 const tokens = (query: string): string[] => query.match(/"[^"]*"|\S+/g) ?? [];
 const filterToken = (token: string) =>
   /^(type|ext|size|modified):/i.test(token);
@@ -244,7 +267,7 @@ export function SearchPanel({
             routeScope(route),
             route,
             hidden,
-            50,
+            PAGE_SIZE,
           ),
           offset: route.searchOffset ?? 0,
         }
@@ -584,6 +607,11 @@ export function SearchPanel({
   const resultEntries = (results.page?.entries ?? []).filter((entry) =>
     shares.some((share) => share.id === entry.shareId),
   );
+  const offset = route.searchOffset ?? 0;
+  const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
+  const pagesAfter =
+    results.page?.pagesAfter ??
+    (results.page?.nextOffset === undefined ? 0 : 1);
   // Under a share heading, a result's location leaves out the share name.
   const resultRow = (entry: SearchEntry, grouped: boolean) => (
     <li key={`${entry.shareId}/${entry.path}`}>
@@ -711,25 +739,61 @@ export function SearchPanel({
               {resultEntries.map((entry) => resultRow(entry, false))}
             </ul>
           )}
-          <div class="search-pagination">
-            {(route.searchOffset ?? 0) > 0 && (
+          {(offset > 0 || results.page.nextOffset !== undefined) && (
+            <nav class="search-pagination" aria-label="Result pages">
               <button
                 type="button"
-                class="button button-secondary"
+                class="button button-secondary search-page-step"
+                aria-label="Previous page"
+                disabled={offset === 0}
                 onClick={() =>
                   navigation.go({
                     ...route,
-                    searchOffset: Math.max(0, (route.searchOffset ?? 0) - 50),
+                    searchOffset: Math.max(0, offset - PAGE_SIZE),
                   })
                 }
               >
-                Previous
+                <ChevronLeft size={18} aria-hidden="true" />
+                <span class="search-page-step-label">Previous</span>
               </button>
-            )}
-            {results.page.nextOffset !== undefined && (
+              {pageWindow(currentPage, pagesAfter).map((item, index) =>
+                item === "gap" ? (
+                  <span
+                    key={`gap-${index}`}
+                    class="search-page-gap"
+                    aria-hidden="true"
+                  >
+                    …
+                  </span>
+                ) : (
+                  <button
+                    key={item}
+                    type="button"
+                    class={`button button-secondary search-page${
+                      item === currentPage ? " is-current" : ""
+                    }`}
+                    aria-label={`Page ${item}`}
+                    aria-current={item === currentPage ? "page" : undefined}
+                    onClick={() =>
+                      item !== currentPage &&
+                      navigation.go({
+                        ...route,
+                        searchOffset: Math.max(
+                          0,
+                          offset + (item - currentPage) * PAGE_SIZE,
+                        ),
+                      })
+                    }
+                  >
+                    {item}
+                  </button>
+                ),
+              )}
               <button
                 type="button"
-                class="button button-secondary"
+                class="button button-secondary search-page-step"
+                aria-label="Next page"
+                disabled={results.page.nextOffset === undefined}
                 onClick={() =>
                   navigation.go({
                     ...route,
@@ -737,9 +801,12 @@ export function SearchPanel({
                   })
                 }
               >
-                Next
+                <span class="search-page-step-label">Next</span>
+                <ChevronRight size={18} aria-hidden="true" />
               </button>
-            )}
+            </nav>
+          )}
+          <div class="search-pagination">
             {!results.page.entries.length && route.searchScope !== "all" && (
               <button
                 type="button"
