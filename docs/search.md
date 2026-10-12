@@ -40,7 +40,7 @@ The UI reports indexing until a share's first pass finishes, from a successful C
 
 `GET /api/v1/search?q=invoice&share=documents&path=reports&showHidden=false&limit=8&offset=0` requires authentication. Omit `share` to search all granted indexed shares; `path` is only valid with a share and includes all descendants. Unknown, disabled, and ungranted specific shares have the same 404 response. A request without a selected share and no granted indexed shares returns an empty result. Responses are private and not cached.
 
-The response contains `entries` (shareId, relative path, name, kind, optional size and RFC 3339 modified time), `indexing`, `incomplete`, and an optional `nextOffset`. Pagination is a best-effort view of a changing index; offsets refer to indexed candidates, so pages may contain fewer matches after live validation. No exact global count is exposed.
+The response contains `entries` (shareId, relative path, name, kind, optional size and RFC 3339 modified time), `indexing`, `incomplete`, `pagesAfter`, and an optional `nextOffset`. `pagesAfter` counts the following pages that hold candidates, up to five and never past the largest offset; the query reads up to five pages of candidates ahead to tell, but validates only the page it returns. The results page numbers up to five pages around the current one, with an ellipsis on each side that has more. Pagination is a best-effort view of a changing index; offsets refer to indexed candidates, so pages may contain fewer matches after live validation. No exact global count is exposed, so the last page number is never shown.
 
 | Bound | Limit |
 | --- | ---: |

@@ -35,6 +35,10 @@ const APPLICATION_ID: i64 = 0x4352_5348;
 /// Older layouts are dropped and rebuilt; newer ones are refused.
 const SCHEMA_VERSION: i64 = 2;
 const MAX_ENTRIES: i64 = 200_000;
+const MAX_OFFSET: usize = 10_000;
+/// How many following pages a query looks for, so the page bar can number
+/// them without an exact global count.
+const PAGES_AHEAD: usize = 5;
 const MAX_WATCHES: usize = 4096;
 const MAX_PENDING: usize = 4096;
 const MAX_LISTING: usize = 10_000;
@@ -879,6 +883,8 @@ struct SearchPage {
     incomplete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_offset: Option<usize>,
+    /// Following pages known to hold candidates, at most `PAGES_AHEAD`.
+    pages_after: usize,
 }
 
 pub fn router() -> Router<AppState> {
@@ -894,7 +900,7 @@ async fn search(
     let limit = request.limit.unwrap_or(8);
     let offset = request.offset.unwrap_or(0);
     if !(1..=100).contains(&limit)
-        || offset > 10_000
+        || offset > MAX_OFFSET
         || (request.share.is_none() && !request.path.is_empty())
     {
         return Err(AppError::InvalidRequest);
@@ -968,6 +974,7 @@ impl SearchService {
             indexing,
             incomplete,
             next_offset: None,
+            pages_after: 0,
         };
         if allowed.is_empty() {
             return Ok(page);
@@ -1042,7 +1049,7 @@ impl SearchService {
         values.extend([
             needle.clone().into(),
             needle.into(),
-            ((limit + 1) as i64).into(),
+            ((limit * PAGES_AHEAD + 1) as i64).into(),
             (offset as i64).into(),
         ]);
         // The gate admits at most READERS searches, so a free reader exists
@@ -1081,7 +1088,14 @@ impl SearchService {
             .map_err(|_| AppError::Internal)?;
         let candidates = candidates.map_err(query_error)?;
         drop(connection);
-        if candidates.len() > limit && offset + limit <= 10_000 {
+        // Only the first page is validated; the rest only says that more
+        // pages exist, up to the largest offset a request may ask for.
+        page.pages_after = candidates
+            .len()
+            .saturating_sub(limit)
+            .div_ceil(limit)
+            .min((MAX_OFFSET - offset) / limit);
+        if page.pages_after > 0 {
             page.next_offset = Some(offset + limit);
         }
         for (id, path, name, kind, _, _) in candidates.into_iter().take(limit) {
@@ -1512,6 +1526,16 @@ mod tests {
         drop(writer);
         let (_, result) = fixture.request("q=&limit=1", true).await;
         assert_eq!(result["nextOffset"], 1);
+        // The page bar sees up to five following pages, never past the offset cap.
+        let (_, all) = fixture.request("q=&limit=100&showHidden=true", true).await;
+        let total = all["entries"].as_array().unwrap().len();
+        let (_, result) = fixture.request("q=&limit=1&showHidden=true", true).await;
+        assert_eq!(result["pagesAfter"], (total - 1).min(5));
+        let (_, result) = fixture.request("q=&limit=1&offset=9999", true).await;
+        assert!(result["pagesAfter"].as_u64().unwrap() <= 1);
+        let (_, result) = fixture.request("q=&limit=1&offset=10000", true).await;
+        assert_eq!(result["pagesAfter"], 0);
+        assert!(result.get("nextOffset").is_none());
         fixture.service.shares["documents"]
             .complete
             .store(false, Ordering::Release);
