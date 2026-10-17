@@ -1798,7 +1798,14 @@ mod tests {
                     json_request("POST", &uri, body),
                 )
                 .await;
-                assert_eq!(response.status(), StatusCode::CONFLICT);
+                if action == "extract" {
+                    assert_eq!(response.status(), StatusCode::CREATED);
+                    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(result["path"], format!("{destination}-2"));
+                } else {
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                }
             }
             let child = if format == "gz" {
                 "local"
@@ -3755,9 +3762,16 @@ async fn local_archive(
     let quota = state.mutations().quota();
     let limits = state.browse().archive_limits();
     let target = destination.clone();
-    let result = run_blocking(move || -> MutationResult<()> {
+    let result = run_blocking(move || -> MutationResult<VirtualPath> {
         let (_lease, _commit) = (lease, commit);
         let share = authorized.view();
+        let target = if extracting {
+            let next = share.unused_archive_destination(&target, &|| work.check().is_ok());
+            work.check().map_err(archive_rejection)?;
+            next?
+        } else {
+            target
+        };
         // Check quota before staging; the available space also bounds private
         // output and extraction snapshots, so failures cannot bypass quota.
         let max_charge = match quota.max_share_bytes {
@@ -3787,17 +3801,19 @@ async fn local_archive(
         }
         .map_err(archive_rejection)?;
         work.check().map_err(archive_rejection)?;
-        staged.publish().map_err(archive_rejection)
+        staged.publish().map_err(archive_rejection)?;
+        Ok(target)
     })
     .await?;
     // Keep the cancellation guard alive through the worker and publication.
     drop(cancellation);
+    let destination = result?;
     finish_mutation(
         identity,
         &share_id,
         &destination,
         if extracting { "extract" } else { "compress" },
-        result,
+        Ok(()),
         StatusCode::CREATED,
     )
 }

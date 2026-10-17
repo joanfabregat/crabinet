@@ -790,6 +790,9 @@ test("compresses a folder and extracts each supported folder archive on the serv
     await expect(dialog).toHaveCount(0);
     await entryAction(page, name, "Extract").click();
     const extracting = page.getByRole("dialog", { name: "Extract archive" });
+    await expect(extracting.getByLabel("Folder name")).toHaveValue(
+      `e2e-local-${format}`,
+    );
     const destination = `e2e-extracted-${format}`;
     await extracting.getByLabel("Folder name").fill(destination);
     await extracting
@@ -799,5 +802,27 @@ test("compresses a folder and extracts each supported folder archive on the serv
     expect(
       await readText(page, "writable", `${destination}/Projects/example.toml`),
     ).toBe(await readText(page, "writable", "Projects/example.toml"));
+    if (format === "zip") {
+      await entryAction(page, name, "Extract").click();
+      await page
+        .getByRole("dialog", { name: "Extract archive" })
+        .getByLabel("Folder name")
+        .fill(destination);
+      await page
+        .getByRole("dialog", { name: "Extract archive" })
+        .getByRole("button", { name: "Extract", exact: true })
+        .click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(
+        page.getByText(`Extracted to ${destination}-2.`, { exact: true }),
+      ).toBeVisible();
+      expect(
+        await readText(
+          page,
+          "writable",
+          `${destination}-2/Projects/example.toml`,
+        ),
+      ).toBe(await readText(page, "writable", "Projects/example.toml"));
+    }
   }
 });

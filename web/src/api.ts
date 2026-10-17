@@ -814,17 +814,19 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       format,
       csrfToken,
       signal,
-    ) =>
-      parseMutationResult(
-        await request<unknown>(shareApiUrl(shareId, action), {
-          method: "POST",
-          signal,
-          headers: mutationJsonHeaders(csrfToken),
-          body: JSON.stringify({ sources, destination, format }),
-        }),
-        shareId,
-        destination,
-      ),
+    ) => {
+      const result = await request<unknown>(shareApiUrl(shareId, action), {
+        method: "POST",
+        signal,
+        headers: mutationJsonHeaders(csrfToken),
+        body: JSON.stringify({ sources, destination, format }),
+      });
+      const actualPath =
+        action === "extract"
+          ? extractionResultPath(result, destination)
+          : destination;
+      return parseMutationResult(result, shareId, actualPath);
+    },
     createDirectory: async (shareId, path, csrfToken, signal) =>
       parseMutationResult(
         await request<unknown>(shareApiUrl(shareId, "directories"), {
@@ -1782,6 +1784,36 @@ function parseTextDocument(
     throw invalidResponse();
   }
   return value as unknown as TextDocument;
+}
+
+/** Extraction can choose a numbered sibling, including a UTF-8-safe shortened
+ * base for maximum-length names. Keep response validation bound to that set. */
+function extractionResultPath(value: unknown, destination: string): string {
+  if (
+    !isRecord(value) ||
+    typeof value.path !== "string" ||
+    !isValidVirtualPath(value.path)
+  )
+    throw invalidResponse();
+  if (value.path === destination) return destination;
+  const slash = destination.lastIndexOf("/");
+  const parent = destination.slice(0, slash + 1);
+  if (value.path.slice(0, value.path.lastIndexOf("/") + 1) !== parent)
+    throw invalidResponse();
+  const actualName = value.path.slice(parent.length);
+  const match = /-([2-9]|[1-9][0-9]{1,2}|1000)$/.exec(actualName);
+  if (!match) throw invalidResponse();
+  const suffix = match[0];
+  const encoder = new TextEncoder();
+  const maxBytes = Math.min(255, 4096 - encoder.encode(parent).length);
+  const characters = Array.from(destination.slice(parent.length));
+  while (
+    characters.length &&
+    encoder.encode(characters.join("") + suffix).length > maxBytes
+  )
+    characters.pop();
+  if (actualName !== characters.join("") + suffix) throw invalidResponse();
+  return value.path;
 }
 
 function parseMutationResult(

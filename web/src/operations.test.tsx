@@ -333,6 +333,12 @@ describe("local archive dialogs", () => {
     const localArchive = vi.fn().mockResolvedValue({});
     renderDialog(folder, { api: fakeApi({ localArchive }) });
     expect(screen.getByLabelText("Archive name")).toHaveFocus();
+    expect(
+      screen
+        .getByLabelText("Archive name")
+        .compareDocumentPosition(screen.getByLabelText("Format")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.queryByRole("option", { name: "GZ (one file)" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Format"), {
       target: { value: "tar-zst" },
@@ -373,11 +379,44 @@ describe("local archive dialogs", () => {
         "work",
         "extract",
         ["projects/backup.tgz"],
-        "projects/backup-extracted",
+        "projects/backup",
         "tar-gz",
         "csrf",
         expect.any(AbortSignal),
       ),
+    );
+  });
+  it("reports the numbered destination chosen by extraction", async () => {
+    const changed = vi.fn();
+    const operation: EntryOperation = {
+      kind: "extract",
+      entry: { name: "backup.zip", kind: "file" },
+      path: "projects/backup.zip",
+    };
+    render(
+      <OperationDialog
+        api={fakeApi({
+          localArchive: vi
+            .fn()
+            .mockResolvedValue({ path: "projects/backup-3" }),
+        })}
+        csrfToken="csrf"
+        operation={operation}
+        directory="projects"
+        shareId="work"
+        userId="test"
+        onChanged={changed}
+        onClose={vi.fn()}
+        onSessionExpired={vi.fn()}
+        onSessionRefreshed={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Folder name")).toHaveValue("backup");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Extract", exact: true }),
+    );
+    await waitFor(() =>
+      expect(changed).toHaveBeenCalledWith(operation, "projects/backup-3"),
     );
   });
   it("cancels the active request and ignores a late completion", async () => {

@@ -18,6 +18,58 @@ pub(crate) struct PendingTree {
 }
 
 impl AuthorizedShare<'_> {
+    /// Choose a sibling without opening the candidate: dangling links and
+    /// special entries occupy names too. Publication still uses NOREPLACE.
+    pub(crate) fn unused_archive_destination(
+        &self,
+        path: &VirtualPath,
+        check: &dyn Fn() -> bool,
+    ) -> FsResult<VirtualPath> {
+        self.require_write()?;
+        let (parent, name) = self.share.open_parent(path)?;
+        name.ensure_creatable()?;
+        let (virtual_parent, _) = path
+            .split_parent()
+            .ok_or_else(|| FsError::new(FsErrorCode::InvalidPath))?;
+        let prefix_bytes = if virtual_parent.is_root() {
+            0
+        } else {
+            virtual_parent.to_string().len() + 1
+        };
+        let max_name_bytes =
+            MAX_COMPONENT_BYTES.min(MAX_VIRTUAL_PATH_BYTES.saturating_sub(prefix_bytes));
+        for number in 1..=1_000 {
+            if !check() {
+                return Err(FsError::new(FsErrorCode::Unavailable));
+            }
+            let candidate = if number == 1 {
+                name.clone()
+            } else {
+                let suffix = format!("-{number}");
+                let mut end = name
+                    .as_str()
+                    .len()
+                    .min(max_name_bytes.saturating_sub(suffix.len()));
+                while !name.as_str().is_char_boundary(end) {
+                    end -= 1;
+                }
+                EntryName::new(format!("{}{suffix}", &name.as_str()[..end]))?
+            };
+            candidate.ensure_creatable()?;
+            if candidate.as_str().len() > max_name_bytes {
+                return Err(FsError::new(FsErrorCode::Conflict));
+            }
+            match parent.symlink_metadata(candidate.as_str()) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(virtual_parent.join(candidate));
+                }
+                Err(error) => return Err(map_io(error)),
+            }
+        }
+        Err(FsError::new(FsErrorCode::Conflict))
+    }
+
     pub(crate) fn begin_tree(&self, path: &VirtualPath) -> FsResult<PendingTree> {
         self.require_write()?;
         let (parent, destination) = self.share.open_parent(path)?;
@@ -131,6 +183,79 @@ impl Drop for PendingTree {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn extraction_names_skip_all_existing_entry_kinds_and_preserve_utf8() {
+        let root = TempDir::new().unwrap();
+        let id = ShareId::new("archive").unwrap();
+        let fs = ShareFs::open(id.clone(), root.path()).unwrap();
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadWrite,
+        };
+        let share = fs.authorize(Some(&grant), GlobalPolicy::default()).unwrap();
+        share
+            .create_directory(&VirtualPath::parse("backup").unwrap())
+            .unwrap();
+        share
+            .create_file(&VirtualPath::parse("backup-2").unwrap(), b"keep")
+            .unwrap();
+        fs.root.symlink("missing", "backup-3").unwrap();
+        assert_eq!(
+            share
+                .unused_archive_destination(&VirtualPath::parse("backup").unwrap(), &|| true)
+                .unwrap()
+                .to_string(),
+            "backup-4"
+        );
+        assert_eq!(
+            share
+                .read_file(&VirtualPath::parse("backup-2").unwrap(), 100)
+                .unwrap(),
+            b"keep"
+        );
+        assert_eq!(
+            share
+                .unused_archive_destination(&VirtualPath::parse("backup").unwrap(), &|| false)
+                .unwrap_err()
+                .code(),
+            FsErrorCode::Unavailable
+        );
+        let base = "é".repeat(127);
+        share
+            .create_directory(&VirtualPath::parse(&base).unwrap())
+            .unwrap();
+        assert_eq!(
+            share
+                .unused_archive_destination(&VirtualPath::parse(&base).unwrap(), &|| true)
+                .unwrap()
+                .to_string(),
+            format!("{}-2", "é".repeat(126))
+        );
+    }
+
+    #[test]
+    fn extraction_name_search_is_bounded() {
+        let root = TempDir::new().unwrap();
+        let id = ShareId::new("archive").unwrap();
+        let fs = ShareFs::open(id.clone(), root.path()).unwrap();
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadWrite,
+        };
+        let share = fs.authorize(Some(&grant), GlobalPolicy::default()).unwrap();
+        fs.root.create_dir("backup").unwrap();
+        for number in 2..=1000 {
+            fs.root.create_dir(format!("backup-{number}")).unwrap();
+        }
+        assert_eq!(
+            share
+                .unused_archive_destination(&VirtualPath::parse("backup").unwrap(), &|| true)
+                .unwrap_err()
+                .code(),
+            FsErrorCode::Conflict
+        );
+    }
 
     #[test]
     fn interrupted_tree_recovery_is_bounded_and_never_follows_links() {

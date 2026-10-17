@@ -1542,9 +1542,7 @@ function ArchiveDialog({
   const base = sources.length > 1 ? "Archive" : (entry?.name ?? "Archive");
   const extractedName =
     base.replace(/\.(?:tar\.gz|tar\.zst|tgz|zip|tar|gz)$/i, "") || "Archive";
-  const [name, setName] = useState(
-    extracting ? `${extractedName}-extracted` : `${base}.zip`,
-  );
+  const [name, setName] = useState(extracting ? extractedName : `${base}.zip`);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController>();
@@ -1567,7 +1565,7 @@ function ArchiveDialog({
     setBusy(true);
     setError(undefined);
     try {
-      await api.localArchive(
+      const result = await api.localArchive(
         shareId,
         extracting ? "extract" : "compress",
         sources,
@@ -1576,7 +1574,7 @@ function ArchiveDialog({
         csrfToken,
         current.signal,
       );
-      if (!current.signal.aborted) onChanged(operation, destination);
+      if (!current.signal.aborted) onChanged(operation, result.path);
     } catch (cause) {
       if (current.signal.aborted || isAborted(cause)) return;
       if (isUnauthorized(cause)) onSessionExpired();
@@ -1606,9 +1604,21 @@ function ArchiveDialog({
       <form class="operation-form" onSubmit={submit}>
         <p class="muted">
           {extracting
-            ? "Extract into a new folder beside this archive. Existing items are never overwritten."
+            ? "Extract into a new folder beside this archive. If the name is taken, -2, -3, and so on are added. Existing items are never overwritten."
             : "Create an archive beside the selected items. The originals are kept."}
         </p>
+        <label for="archive-name">
+          {extracting ? "Folder name" : "Archive name"}
+        </label>
+        <input
+          ref={input}
+          id="archive-name"
+          value={name}
+          required
+          disabled={busy}
+          autocomplete="off"
+          onInput={(event) => setName(event.currentTarget.value)}
+        />
         {!extracting && (
           <>
             <label for="archive-format">Format</label>
@@ -1639,18 +1649,6 @@ function ArchiveDialog({
             </select>
           </>
         )}
-        <label for="archive-name">
-          {extracting ? "Folder name" : "Archive name"}
-        </label>
-        <input
-          ref={input}
-          id="archive-name"
-          value={name}
-          required
-          disabled={busy}
-          autocomplete="off"
-          onInput={(event) => setName(event.currentTarget.value)}
-        />
         {busy && (
           <p role="status">
             {extracting ? "Extracting…" : "Compressing…"} You can cancel this
