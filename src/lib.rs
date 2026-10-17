@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+mod archives;
 pub mod assets;
 mod audit;
 pub mod auth;

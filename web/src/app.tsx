@@ -1630,7 +1630,15 @@ function DirectoryBrowser({
     destinationPath?: string,
   ) => {
     setOperation(undefined);
-    if (completedOperation.kind === "move" && destinationPath !== undefined) {
+    if (
+      completedOperation.kind === "extract" &&
+      destinationPath !== undefined
+    ) {
+      showToast(`Extracted to ${destinationPath.split("/").at(-1)}.`);
+    } else if (
+      completedOperation.kind === "move" &&
+      destinationPath !== undefined
+    ) {
       const folder = parentPath(destinationPath);
       showToast(
         `Moved ${completedOperation.entry.name} to ${folder ? folder.split("/").at(-1) : share.name}.`,
@@ -2032,6 +2040,20 @@ function DirectoryBrowser({
                     writable={writable}
                     busy={archive.checking || bulkProgress !== undefined}
                     onToggleAll={toggleAllSelected}
+                    onCompress={() => {
+                      const first = selectedEntries[0];
+                      if (!first) return;
+                      setOperation({
+                        kind: "compress",
+                        entry: first,
+                        path: joinPath(route.path, first.name),
+                        sources: selectedEntries.map((entry) =>
+                          joinPath(route.path, entry.name),
+                        ),
+                        singleFile:
+                          selectedEntries.length === 1 && first.kind === "file",
+                      });
+                    }}
                     onDownload={() =>
                       void archive.download(
                         selectedEntries.map((entry) =>

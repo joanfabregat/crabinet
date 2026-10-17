@@ -169,3 +169,51 @@ pub fn thumbnail_decode(data: &[u8]) {
 pub fn media_codecs(data: &[u8]) {
     crate::preview::fuzz_media_codecs(data);
 }
+
+/// Local extraction with tiny payload, metadata, entry and disk budgets.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "fuzz-only writes synthetic archives inside its temporary share"
+)]
+pub fn local_archive(data: &[u8]) {
+    let Some((&selector, bytes)) = data.split_first() else {
+        return;
+    };
+    if bytes.len() > 65_536 {
+        return;
+    }
+    let root = FuzzRoot::new();
+    let id = ShareId::new("fuzz").expect("static ID");
+    let grant = ShareGrant {
+        share_id: id.clone(),
+        access: AccessLevel::ReadWrite,
+    };
+    let filesystem = ShareFs::open(id, &root.0).expect("synthetic share");
+    // nosemgrep: crabinet-ambient-filesystem-path
+    std::fs::write(root.0.join("input.gz"), bytes).expect("synthetic input");
+    let share = filesystem
+        .authorize(Some(&grant), GlobalPolicy::default())
+        .expect("grant");
+    use crate::archives::Format;
+    let formats = [
+        Format::Zip,
+        Format::Tar,
+        Format::TarGz,
+        Format::Gz,
+        Format::TarZst,
+    ];
+    let (work, _cancel) = crate::archives::Work::new();
+    let _ = crate::archives::extract(
+        &share,
+        &VirtualPath::parse("input.gz").expect("static path"),
+        &VirtualPath::parse("output").expect("static path"),
+        formats[usize::from(selector) % formats.len()],
+        crate::filesystem::ArchiveLimits {
+            max_entries: 32,
+            max_bytes: 65_536,
+            max_name_bytes: 4096,
+        },
+        131_072,
+        &work,
+    );
+}

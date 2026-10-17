@@ -21,6 +21,10 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 # Raw DEFLATE for archive entries, through the pure-Rust miniz_oxide backend
 # that png already builds (no C zlib).
 flate2 = "1.1.10"
+# Local archives: only ZIP's existing DEFLATE backend, no encryption or extra codecs.
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 getrandom = "0.4.3"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }

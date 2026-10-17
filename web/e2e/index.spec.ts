@@ -814,9 +814,9 @@ test("file rows keep room for their names on desktops, tablets, and phones", asy
   const longName = "test-pattern.mp4";
   const layouts = [
     // label, viewport, touch, preview open, inline actions, menu
-    ["desktop", 1440, 960, false, false, 5, false],
-    ["desktop with a preview", 1440, 960, false, true, 5, false],
-    ["iPad landscape", 1180, 820, true, false, 5, false],
+    ["desktop", 1440, 960, false, false, 6, false],
+    ["desktop with a preview", 1440, 960, false, true, 6, false],
+    ["iPad landscape", 1180, 820, true, false, 6, false],
     ["iPad landscape with a preview", 1180, 820, true, true, 2, true],
     ["iPad portrait", 820, 1180, true, false, 2, true],
     ["iPad portrait with a preview", 820, 1180, true, true, 0, true],

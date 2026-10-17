@@ -794,7 +794,12 @@ fn purge(trash: &Dir, id: &str, max_entries: usize) -> FsResult<usize> {
 /// following links. An entry below [`MAX_PATH_DEPTH`] stops the removal with
 /// [`FsErrorCode::TooDeep`] so recursion stays bounded; an operator must
 /// remove such a tree.
-fn remove_tree(dir: &Dir, count: &mut usize, max: usize, depth: usize) -> FsResult<bool> {
+pub(super) fn remove_tree(
+    dir: &Dir,
+    count: &mut usize,
+    max: usize,
+    depth: usize,
+) -> FsResult<bool> {
     for entry in dir.entries().map_err(map_io)? {
         if *count >= max {
             return Ok(false);

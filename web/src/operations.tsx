@@ -2,6 +2,8 @@ import { type JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
   Download,
+  Archive,
+  ArchiveRestore,
   Ellipsis,
   FilePlus2,
   FolderDown,
@@ -15,6 +17,7 @@ import {
 
 import {
   ApiError,
+  type ArchiveFormat,
   type ApiClient,
   type DirectoryEntry,
   type EntryMetadata,
@@ -28,10 +31,12 @@ export type EntryOperation =
   | { kind: "create-file" }
   | { kind: "create-folder" }
   | {
-      kind: "rename" | "delete" | "edit" | "move";
+      kind: "rename" | "delete" | "edit" | "move" | "compress" | "extract";
       entry: DirectoryEntry;
       path: string;
       destinationDirectory?: string;
+      sources?: string[];
+      singleFile?: boolean;
     };
 
 export interface UploadSelection {
@@ -172,6 +177,26 @@ export function EntryActionButtons({
             <button
               class="entry-action entry-action-secondary tooltip-action"
               type="button"
+              aria-label={`Compress ${entry.name}`}
+              data-tooltip="Compress…"
+              onClick={() => onOperation({ kind: "compress", entry, path })}
+            >
+              <Archive size={18} aria-hidden="true" />
+            </button>
+            {entry.kind === "file" && archiveFormat(entry.name) && (
+              <button
+                class="entry-action entry-action-secondary tooltip-action"
+                type="button"
+                aria-label={`Extract ${entry.name}`}
+                data-tooltip="Extract…"
+                onClick={() => onOperation({ kind: "extract", entry, path })}
+              >
+                <ArchiveRestore size={18} aria-hidden="true" />
+              </button>
+            )}
+            <button
+              class="entry-action entry-action-secondary tooltip-action"
+              type="button"
               aria-label={`Rename ${entry.name}`}
               data-tooltip="Rename"
               onClick={() => onOperation({ kind: "rename", entry, path })}
@@ -307,11 +332,20 @@ function EntryActionMenu({
           }
           const rect = event.currentTarget.getBoundingClientRect();
           const right = `${window.innerWidth - rect.right}px`;
-          setOpen(
-            rect.bottom + 240 > window.innerHeight
-              ? { bottom: `${window.innerHeight - rect.top + 4}px`, right }
-              : { top: `${rect.bottom + 4}px`, right },
-          );
+          const count =
+            2 +
+            (writable
+              ? 4 + (entry.kind === "file" && archiveFormat(entry.name) ? 1 : 0)
+              : 0);
+          const rem =
+            Number.parseFloat(
+              getComputedStyle(document.documentElement).fontSize,
+            ) || 16;
+          const height = count * 2.75 * rem + 12;
+          setOpen({
+            top: `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8))}px`,
+            right,
+          });
         }}
       >
         <Ellipsis size={18} aria-hidden="true" />
@@ -350,6 +384,24 @@ function EntryActionMenu({
           />
           {writable && (
             <>
+              <button
+                class="entry-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => choose({ kind: "compress", entry, path })}
+              >
+                <Archive size={17} aria-hidden="true" /> Compress…
+              </button>
+              {entry.kind === "file" && archiveFormat(entry.name) && (
+                <button
+                  class="entry-menu-item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => choose({ kind: "extract", entry, path })}
+                >
+                  <ArchiveRestore size={17} aria-hidden="true" /> Extract…
+                </button>
+              )}
               <button
                 class="entry-menu-item"
                 type="button"
@@ -401,6 +453,8 @@ interface OperationDialogProps {
 }
 
 export function OperationDialog(props: OperationDialogProps) {
+  if (props.operation.kind === "compress" || props.operation.kind === "extract")
+    return <ArchiveDialog {...props} />;
   if (props.operation.kind === "edit") return <EditorDialog {...props} />;
   if (props.operation.kind === "move") return <MoveDialog {...props} />;
   // Deletes move the item to Trash without a dialog.
@@ -1442,4 +1496,183 @@ function isUnauthorized(cause: unknown): boolean {
 
 function isAborted(cause: unknown): boolean {
   return cause instanceof ApiError && cause.kind === "aborted";
+}
+
+const archiveFormats: {
+  format: ArchiveFormat;
+  suffix: string;
+  label: string;
+}[] = [
+  { format: "zip", suffix: ".zip", label: "ZIP" },
+  { format: "tar-gz", suffix: ".tar.gz", label: "TAR.GZ" },
+  { format: "tar-zst", suffix: ".tar.zst", label: "TAR.ZST" },
+  { format: "tar", suffix: ".tar", label: "TAR (uncompressed)" },
+  { format: "gz", suffix: ".gz", label: "GZ (one file)" },
+];
+
+export function archiveFormat(name: string): ArchiveFormat | undefined {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".tgz")) return "tar-gz";
+  return archiveFormats.find(({ suffix }) => lower.endsWith(suffix))?.format;
+}
+
+function ArchiveDialog({
+  api,
+  csrfToken,
+  operation,
+  shareId,
+  onClose,
+  onChanged,
+  onSessionExpired,
+}: OperationDialogProps) {
+  const extracting = operation.kind === "extract";
+  const entry = "entry" in operation ? operation.entry : undefined;
+  const source = "path" in operation ? operation.path : "";
+  const sources =
+    "sources" in operation && operation.sources ? operation.sources : [source];
+  const singleFile =
+    "singleFile" in operation && operation.singleFile !== undefined
+      ? operation.singleFile
+      : sources.length === 1 && entry?.kind === "file";
+  const detected = archiveFormat(entry?.name ?? "");
+  const [format, setFormat] = useState<ArchiveFormat>(
+    extracting ? (detected ?? "zip") : "zip",
+  );
+  const suffix = archiveFormats.find((item) => item.format === format)!.suffix;
+  const base = sources.length > 1 ? "Archive" : (entry?.name ?? "Archive");
+  const extractedName =
+    base.replace(/\.(?:tar\.gz|tar\.zst|tgz|zip|tar|gz)$/i, "") || "Archive";
+  const [name, setName] = useState(extracting ? extractedName : `${base}.zip`);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const controller = useRef<AbortController>();
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    input.current?.focus();
+    return () => controller.current?.abort();
+  }, []);
+
+  const submit = async (event: JSX.TargetedSubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    if (!isValidPathComponent(name)) {
+      setError("Enter one valid name for the destination.");
+      return;
+    }
+    const destination = joinPath(parentPath(source), name);
+    const current = new AbortController();
+    controller.current = current;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const result = await api.localArchive(
+        shareId,
+        extracting ? "extract" : "compress",
+        sources,
+        destination,
+        format,
+        csrfToken,
+        current.signal,
+      );
+      if (!current.signal.aborted) onChanged(operation, result.path);
+    } catch (cause) {
+      if (current.signal.aborted || isAborted(cause)) return;
+      if (isUnauthorized(cause)) onSessionExpired();
+      else if (cause instanceof ApiError && cause.code === "invalid_request")
+        setError(
+          "The operation could not finish. The archive may be damaged, encrypted, unsupported, contain unsafe or duplicate entries, or exceed the processing time limit.",
+        );
+      else if (cause instanceof ApiError && cause.code === "too_large")
+        setError(
+          "The operation exceeds the archive size, entry, metadata, or available share quota limit.",
+        );
+      else setError(operationError(cause));
+    } finally {
+      if (!current.signal.aborted) setBusy(false);
+    }
+  };
+  const cancel = () => {
+    controller.current?.abort();
+    onClose();
+  };
+  return (
+    <Modal
+      title={extracting ? "Extract archive" : "Compress"}
+      onClose={cancel}
+      busy={false}
+    >
+      <form class="operation-form" onSubmit={submit}>
+        <p class="muted">
+          {extracting
+            ? "Extract into a new folder beside this archive. If the name is taken, -2, -3, and so on are added. Existing items are never overwritten."
+            : "Create an archive beside the selected items. The originals are kept."}
+        </p>
+        <label for="archive-name">
+          {extracting ? "Folder name" : "Archive name"}
+        </label>
+        <input
+          ref={input}
+          id="archive-name"
+          value={name}
+          required
+          disabled={busy}
+          autocomplete="off"
+          onInput={(event) => setName(event.currentTarget.value)}
+        />
+        {!extracting && (
+          <>
+            <label for="archive-format">Format</label>
+            <select
+              id="archive-format"
+              value={format}
+              disabled={busy}
+              onChange={(event) => {
+                const next = event.currentTarget.value as ArchiveFormat;
+                const nextSuffix = archiveFormats.find(
+                  (item) => item.format === next,
+                )!.suffix;
+                setName((value) =>
+                  value.endsWith(suffix)
+                    ? value.slice(0, -suffix.length) + nextSuffix
+                    : value + nextSuffix,
+                );
+                setFormat(next);
+              }}
+            >
+              {archiveFormats
+                .filter((item) => item.format !== "gz" || singleFile)
+                .map((item) => (
+                  <option key={item.format} value={item.format}>
+                    {item.label}
+                  </option>
+                ))}
+            </select>
+          </>
+        )}
+        {busy && (
+          <p role="status">
+            {extracting ? "Extracting…" : "Compressing…"} You can cancel this
+            operation.
+          </p>
+        )}
+        {error && (
+          <p class="field-error" role="alert">
+            {error}
+          </p>
+        )}
+        <div class="dialog-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            onClick={cancel}
+          >
+            Cancel
+          </button>
+          <button class="button button-primary" type="submit" disabled={busy}>
+            {extracting ? "Extract" : "Compress"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
