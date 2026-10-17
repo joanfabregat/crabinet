@@ -1637,15 +1637,13 @@ class FakeXhr extends EventTarget {
 
 describe("numbered extraction destinations", () => {
   it("accepts the numbered sibling returned by extraction", async () => {
-    const fetch = vi
-      .fn<typeof globalThis.fetch>()
-      .mockResolvedValue(
-        Response.json({
-          shareId: "work",
-          path: "docs/backup-3",
-          outcome: "success",
-        }),
-      );
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        shareId: "work",
+        path: "docs/backup-3",
+        outcome: "success",
+      }),
+    );
     await expect(
       createApiClient({ fetch }).localArchive(
         "work",
@@ -1662,15 +1660,13 @@ describe("numbered extraction destinations", () => {
   });
   it("accepts UTF-8-safe shortening of a maximum-length name", async () => {
     const base = "é".repeat(127);
-    const fetch = vi
-      .fn<typeof globalThis.fetch>()
-      .mockResolvedValue(
-        Response.json({
-          shareId: "work",
-          path: `${"é".repeat(126)}-2`,
-          outcome: "success",
-        }),
-      );
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        shareId: "work",
+        path: `${"é".repeat(126)}-2`,
+        outcome: "success",
+      }),
+    );
     await expect(
       createApiClient({ fetch }).localArchive(
         "work",
