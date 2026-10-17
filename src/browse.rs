@@ -644,6 +644,14 @@ impl BrowseState {
         self.limits.max_download_bytes
     }
 
+    pub(crate) fn archive_limits(&self) -> ArchiveLimits {
+        ArchiveLimits {
+            max_entries: self.limits.max_archive_entries.min(10_000),
+            max_bytes: self.limits.max_download_bytes,
+            max_name_bytes: MAX_ARCHIVE_NAME_BYTES,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn stream_chunk_bytes(&self) -> usize {
         self.limits.stream_chunk_bytes

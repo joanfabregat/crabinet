@@ -619,6 +619,26 @@ pub(crate) mod tests {
             )
             .body(Sample::Json(r#"{"path":"new.txt"}"#)),
             Route::new(
+                "POST",
+                "/api/v1/shares/{share_id}/compress",
+                Share,
+                Csrf,
+                Bound::Mutation(MutationGate::Archives),
+            )
+            .body(Sample::Json(
+                r#"{"sources":["a.txt"],"destination":"a.zip","format":"zip"}"#,
+            )),
+            Route::new(
+                "POST",
+                "/api/v1/shares/{share_id}/extract",
+                Share,
+                Csrf,
+                Bound::Mutation(MutationGate::Archives),
+            )
+            .body(Sample::Json(
+                r#"{"sources":["input.zip"],"destination":"extracted","format":"zip"}"#,
+            )),
+            Route::new(
                 "PUT",
                 "/api/v1/shares/{share_id}/text",
                 Share,
@@ -679,7 +699,7 @@ pub(crate) mod tests {
     };
 
     /// Every request gate. Each must guard at least one route.
-    const GATES: [Bound; 9] = [
+    const GATES: [Bound; 10] = [
         Bound::Browse(BrowseGate::Events),
         Bound::Browse(BrowseGate::Downloads),
         Bound::Browse(BrowseGate::Archives),
@@ -689,6 +709,7 @@ pub(crate) mod tests {
         Bound::Browse(BrowseGate::FolderSizes),
         Bound::Mutation(MutationGate::Uploads),
         Bound::Mutation(MutationGate::TextSaves),
+        Bound::Mutation(MutationGate::Archives),
     ];
 
     const MULTIPART_BOUNDARY: &str = "crabinet-route-boundary";
@@ -1040,7 +1061,14 @@ pub(crate) mod tests {
         /// own reads it, so held subject leases do not refuse the lookup.
         async fn prepare(&self) -> String {
             fs::write(self.root.path().join("a.txt"), b"abcdef").expect("text fixture");
-            for created in ["moved.txt", "upload.txt"] {
+            let mut empty_zip = vec![0; 22];
+            empty_zip[..4].copy_from_slice(b"PK\x05\x06");
+            fs::write(self.root.path().join("input.zip"), empty_zip).expect("archive fixture");
+            if self.root.path().join("extracted").is_dir() {
+                fs::remove_dir_all(self.root.path().join("extracted"))
+                    .expect("remove extracted fixture");
+            }
+            for created in ["moved.txt", "upload.txt", "a.zip"] {
                 let path = self.root.path().join(created);
                 if fs::symlink_metadata(&path).is_ok() {
                     fs::remove_file(path).expect("remove a created file");

@@ -2032,6 +2032,20 @@ function DirectoryBrowser({
                     writable={writable}
                     busy={archive.checking || bulkProgress !== undefined}
                     onToggleAll={toggleAllSelected}
+                    onCompress={() => {
+                      const first = selectedEntries[0];
+                      if (!first) return;
+                      setOperation({
+                        kind: "compress",
+                        entry: first,
+                        path: joinPath(route.path, first.name),
+                        sources: selectedEntries.map((entry) =>
+                          joinPath(route.path, entry.name),
+                        ),
+                        singleFile:
+                          selectedEntries.length === 1 && first.kind === "file",
+                      });
+                    }}
                     onDownload={() =>
                       void archive.download(
                         selectedEntries.map((entry) =>

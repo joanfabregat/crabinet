@@ -1,5 +1,9 @@
 # Architecture decisions
 
+## Local archive creation and extraction
+
+See the [local archives ADR](adr-local-archives.md) for supported formats, capability-scoped atomic publication, parser and expansion budgets, quota accounting, cancellation, and rejected alternatives.
+
 ## Rust, Axum, and Tokio
 
 Rust provides explicit error handling, predictable memory behavior, and capability-oriented filesystem libraries for the application’s main security boundary. Axum and Tokio supply maintained HTTP and asynchronous I/O primitives without a second runtime service.

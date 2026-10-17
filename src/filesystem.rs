@@ -27,7 +27,9 @@ use cap_std::{
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
+mod archive;
 mod private_dir;
+pub(crate) use archive::PendingTree;
 mod trash;
 pub use private_dir::{PrivateDir, PrivateDirError, PrivateEntry};
 pub use trash::{TrashEmptyBatch, TrashEntry, TrashGcBatch, TrashPage, TrashPosition, TrashSweep};
@@ -689,8 +691,9 @@ impl ShareFs {
         Ok((self.open_directory(parents)?, name))
     }
 
-    /// Removes reserved regular files left in the private staging directory by
-    /// a terminated process. User content is never traversed.
+    /// Removes reserved temporary files and unpublished archive trees left
+    /// by a terminated process, within one shared entry budget. Tree cleanup
+    /// never follows links and stays within the ordinary depth limit.
     pub fn recover_staging_files(&self, max_entries: usize) -> FsResult<usize> {
         self.staging.as_ref().map_or(Ok(0), |staging| {
             recover_staging_directory(staging, max_entries)
@@ -855,6 +858,7 @@ impl AuthorizedShare<'_> {
             .map(|time| time.into_std());
         let mut walk = ArchiveWalk {
             limits,
+            check: &|| true,
             items: Vec::new(),
             scanned: 0,
             bytes: 0,
@@ -886,6 +890,18 @@ impl AuthorizedShare<'_> {
         names: &[EntryName],
         limits: ArchiveLimits,
     ) -> FsResult<Vec<ArchiveItem>> {
+        self.archive_selection_checked(parent, names, limits, &|| true)
+    }
+
+    /// Local archive workers additionally check cancellation and a deadline
+    /// during the initial walk, including entries omitted by the policy.
+    pub(crate) fn archive_selection_checked(
+        &self,
+        parent: &VirtualPath,
+        names: &[EntryName],
+        limits: ArchiveLimits,
+        check: &dyn Fn() -> bool,
+    ) -> FsResult<Vec<ArchiveItem>> {
         let mut sorted: Vec<&EntryName> = names.iter().collect();
         sorted.sort();
         if sorted.is_empty() || sorted.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -894,12 +910,14 @@ impl AuthorizedShare<'_> {
         let directory = self.share.open_directory(&parent.0)?;
         let mut walk = ArchiveWalk {
             limits,
+            check,
             items: Vec::new(),
             scanned: 0,
             bytes: 0,
             name_bytes: 0,
         };
         for name in sorted {
+            walk.check_work()?;
             walk.scanned += 1;
             if walk.scanned > walk.limits.max_entries {
                 return Err(FsError::new(FsErrorCode::TooLarge));
@@ -1247,19 +1265,26 @@ pub struct ArchiveItem {
     pub modified: Option<SystemTime>,
 }
 
-struct ArchiveWalk {
+struct ArchiveWalk<'a> {
     limits: ArchiveLimits,
+    check: &'a dyn Fn() -> bool,
     items: Vec<ArchiveItem>,
     scanned: usize,
     bytes: u64,
     name_bytes: usize,
 }
 
-impl ArchiveWalk {
+impl ArchiveWalk<'_> {
+    fn check_work(&self) -> FsResult<()> {
+        (self.check)()
+            .then_some(())
+            .ok_or_else(|| FsError::new(FsErrorCode::Unavailable))
+    }
     /// `depth` is the virtual depth of `directory` itself.
     fn visit(&mut self, directory: &Dir, prefix: &str, depth: usize) -> FsResult<()> {
         let mut children = Vec::new();
         for entry in directory.entries().map_err(map_io)? {
+            self.check_work()?;
             self.scanned += 1;
             if self.scanned > self.limits.max_entries {
                 return Err(FsError::new(FsErrorCode::TooLarge));
@@ -1290,6 +1315,7 @@ impl ArchiveWalk {
         depth: usize,
         skip_vanished: bool,
     ) -> FsResult<()> {
+        self.check_work()?;
         let relative = if prefix.is_empty() {
             child.name.as_str().to_owned()
         } else {
@@ -1542,6 +1568,7 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
     let mut visited = 0_usize;
     let mut retained = 0_usize;
     let mut recoverable = Vec::with_capacity(max_entries.min(256));
+    let mut trees = Vec::new();
     for entry in staging.entries().map_err(map_io)? {
         visited = visited
             .checked_add(1)
@@ -1562,12 +1589,21 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
             continue;
         }
         let file_type = entry.file_type().map_err(map_io)?;
+        if archive::is_tree_name(&name) && file_type.is_dir() {
+            trees.push(name);
+            continue;
+        }
         if !is_internal_temp_name(&name) || !file_type.is_file() {
             // Never follow or remove malformed names, symlinks, directories,
             // or special entries, even inside the private staging directory.
             continue;
         }
         recoverable.push(name);
+    }
+    for name in &trees {
+        if !archive::clean_tree(staging, name, &mut visited, max_entries)? {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
     }
     for name in &recoverable {
         staging.remove_file(name).map_err(map_io)?;
@@ -1581,7 +1617,7 @@ fn recover_staging_directory(staging: &Dir, max_entries: usize) -> FsResult<usiz
             "private staging holds entries from interrupted or failed deletes or replacements; they are kept for operator review"
         );
     }
-    Ok(recoverable.len())
+    Ok(recoverable.len() + trees.len())
 }
 
 /// Adds the bytes beneath `directory` to `bytes` for quota accounting.

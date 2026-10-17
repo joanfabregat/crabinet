@@ -9,6 +9,7 @@ Crabinet's own source and original assets are licensed under [MIT](LICENSE). Thi
 | CDLA-Permissive-2.0 | CA root certificate data in `webpki-roots`, used for OIDC HTTPS connections |
 | BSD-3-Clause, BSD-2-Clause | Adobe CMap data, Foxit standard fonts, and the OpenJPEG and PDFium JBIG2 image decoders distributed with PDF.js, listed under [PDF.js data and decoders](#pdfjs-data-and-decoders) |
 | IJG | The forward DCT in `jpeg-encoder`, ported from mozjpeg, used for JPEG thumbnails |
+| BSD-3-Clause | `zstd`, `zstd-safe`, and `zstd-sys`, including upstream Zstandard, used for TAR.ZST archives; see [Zstandard](#zstandard) |
 
 Source code for the MPL-licensed WebAuthn crates is available from the [upstream repository](https://github.com/kanidm/webauthn-rs) and the exact crate versions listed in `Cargo.lock` are available from [crates.io](https://crates.io/crates/webauthn-rs). Crabinet does not relicense these components.
 
@@ -17,10 +18,13 @@ Source code for the MPL-licensed WebAuthn crates is available from the [upstream
 The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.1+3.6.3`, under Apache-2.0. The embedded web frontend includes PDF.js from `pdfjs-dist` 6.3.289 (Copyright Mozilla Foundation and contributors) under Apache-2.0: its library and worker scripts, and the Mozilla glue code of its JavaScript JBIG2 decoder. The locked Linux runtime graph also contains the following crates whose declared license expression includes Apache-2.0. Some offer an alternative license; the expression for each crate is reproduced as declared. Build-only and development dependencies are omitted from this list.
 
 <details>
-<summary>All 191 Apache-eligible Rust crates and versions</summary>
+<summary>All 194 Apache-eligible Rust crates and versions</summary>
 
 | Crate | Version | Declared license expression |
 | --- | --- | --- |
+| `filetime` | `0.2.29` | `MIT/Apache-2.0` |
+| `tar` | `0.4.46` | `MIT OR Apache-2.0` |
+| `typed-path` | `0.12.3` | `MIT OR Apache-2.0` |
 | `adler2` | `2.0.1` | `0BSD OR MIT OR Apache-2.0` |
 | `ambient-authority` | `0.0.2` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
 | `anstream` | `1.0.0` | `MIT OR Apache-2.0` |
@@ -160,7 +164,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `rusticata-macros` | `4.1.0` | `MIT/Apache-2.0` |
 | `rustix` | `1.1.5` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
 | `rustix-linux-procfs` | `0.1.1` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
-| `rustls` | `0.23.45` | `Apache-2.0 OR ISC OR MIT` |
+| `rustls` | `0.23.46` | `Apache-2.0 OR ISC OR MIT` |
 | `rustls-pki-types` | `1.15.1` | `MIT OR Apache-2.0` |
 | `rustversion` | `1.0.23` | `MIT OR Apache-2.0` |
 | `ryu` | `1.0.23` | `Apache-2.0 OR BSL-1.0` |
@@ -1075,3 +1079,75 @@ We specifically permit and encourage the use of this software as the basis of
 commercial products, provided that all warranty or liability claims are
 assumed by the product vendor.
 <!-- END IJG -->
+
+## Zstandard
+
+Local TAR.ZST archives include `zstd 0.14.3`, `zstd-safe 8.2.0`, and `zstd-sys 2.1.2+zstd.1.5.7`, under BSD-3-Clause. The Rust bindings and the bundled upstream Zstandard codec retain the following notices.
+
+### Rust bindings
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2026, Alexandre Bury
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### Zstandard codec and generated bindings
+
+```text
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

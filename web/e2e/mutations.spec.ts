@@ -771,3 +771,33 @@ function zipEntries(archive: Buffer): { name: string; method: number }[] {
   }
   return entries;
 }
+
+test("compresses a folder and extracts each supported folder archive on the server", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !ownsServerState(testInfo),
+    "mutation coverage runs once per engine",
+  );
+  await openSignedIn(page, "/writable", "writer");
+  for (const format of ["zip", "tar", "tar-gz", "tar-zst"]) {
+    await entryAction(page, "Projects", "Compress").click();
+    const dialog = page.getByRole("dialog", { name: "Compress", exact: true });
+    await dialog.getByLabel("Format").selectOption(format);
+    const name = `e2e-local-${format}.${format === "tar-gz" ? "tgz" : format === "tar-zst" ? "tar.zst" : format}`;
+    await dialog.getByLabel("Archive name").fill(name);
+    await dialog.getByRole("button", { name: "Compress", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await entryAction(page, name, "Extract").click();
+    const extracting = page.getByRole("dialog", { name: "Extract archive" });
+    const destination = `e2e-extracted-${format}`;
+    await extracting.getByLabel("Folder name").fill(destination);
+    await extracting
+      .getByRole("button", { name: "Extract", exact: true })
+      .click();
+    await expect(extracting).toHaveCount(0);
+    expect(
+      await readText(page, "writable", `${destination}/Projects/example.toml`),
+    ).toBe(await readText(page, "writable", "Projects/example.toml"));
+  }
+});

@@ -117,6 +117,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     folderSize: overrides.folderSize ?? vi.fn(),
     text: overrides.text ?? vi.fn(),
     createDirectory: overrides.createDirectory ?? vi.fn(),
+    localArchive: overrides.localArchive ?? vi.fn(),
     createFile: overrides.createFile ?? vi.fn(),
     saveText: overrides.saveText ?? vi.fn(),
     moveEntry: overrides.moveEntry ?? vi.fn(),

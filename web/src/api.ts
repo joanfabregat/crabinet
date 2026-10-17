@@ -356,7 +356,18 @@ export class ApiError extends Error {
   }
 }
 
+export type ArchiveFormat = "zip" | "tar" | "tar-gz" | "gz" | "tar-zst";
+
 export interface ApiClient {
+  localArchive(
+    shareId: string,
+    action: "compress" | "extract",
+    sources: string[],
+    destination: string,
+    format: ArchiveFormat,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
   search(request: SearchRequest, signal?: AbortSignal): Promise<SearchPage>;
   session(signal?: AbortSignal): Promise<Session>;
   authMethods(signal?: AbortSignal): Promise<AuthMethods>;
@@ -794,6 +805,25 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         ),
         shareId,
         path,
+      ),
+    localArchive: async (
+      shareId,
+      action,
+      sources,
+      destination,
+      format,
+      csrfToken,
+      signal,
+    ) =>
+      parseMutationResult(
+        await request<unknown>(shareApiUrl(shareId, action), {
+          method: "POST",
+          signal,
+          headers: mutationJsonHeaders(csrfToken),
+          body: JSON.stringify({ sources, destination, format }),
+        }),
+        shareId,
+        destination,
       ),
     createDirectory: async (shareId, path, csrfToken, signal) =>
       parseMutationResult(
