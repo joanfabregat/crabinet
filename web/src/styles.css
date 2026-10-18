@@ -2226,13 +2226,13 @@ html.preview-fullscreen-open body {
 
 .entry-actions-inline {
   display: flex;
-  gap: 0.2rem;
+  gap: 0;
   justify-content: flex-end;
 }
 
 /* Keeps Delete apart from the harmless actions. */
 .entry-actions-inline .entry-action-danger {
-  margin-left: 0.5rem;
+  margin-left: 0.25rem;
 }
 
 .entry-menu {
@@ -2290,7 +2290,7 @@ html.preview-fullscreen-open body {
   height: 2.25rem;
   justify-content: center;
   text-decoration: none;
-  width: 2.25rem;
+  width: 2rem;
 }
 
 .entry-action:hover {
@@ -2300,7 +2300,7 @@ html.preview-fullscreen-open body {
 /* A narrower list (a preview beside it, or a tablet) tightens its rows, so
    the name keeps more of the width: less padding and gap, no minimum width
    for the actions, and the action buttons closer together. Touch screens
-   keep their 2.75rem tap targets (see the pointer: coarse rules below). */
+   keep taller buttons (see the pointer: coarse rules below). */
 @container entry-list (max-width: 44rem) {
   .entry-row {
     gap: 0.6rem;
@@ -2846,6 +2846,10 @@ html.preview-fullscreen-open body {
   .tree-toggle {
     height: 2.75rem;
     width: 2.75rem;
+  }
+
+  .entry-action {
+    width: 2.25rem;
   }
 
   .preview-edit-button {

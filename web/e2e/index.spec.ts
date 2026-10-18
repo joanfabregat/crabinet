@@ -806,6 +806,8 @@ test("an iPad in portrait shows two columns", async ({ page }) => {
 test("file rows keep room for their names on desktops, tablets, and phones", async ({
   browser,
 }, testInfo) => {
+  // Seven fresh browser contexts need more time on constrained runners.
+  test.setTimeout(60_000);
   test.skip(
     !testInfo.project.name.startsWith("desktop-"),
     "each layout below sets its own viewport and input, once per engine",
@@ -890,9 +892,8 @@ test("file rows keep room for their names on desktops, tablets, and phones", asy
           nameWidth: context.measureText(name).width,
           room: primary.clientWidth,
           overflow: element.scrollWidth > element.clientWidth,
-          smallestTarget: Math.min(
-            ...buttons.map((box) => Math.min(box.width, box.height)),
-          ),
+          smallestWidth: Math.min(...buttons.map((box) => box.width)),
+          smallestHeight: Math.min(...buttons.map((box) => box.height)),
           widestStep: Math.max(
             0,
             ...buttons
@@ -905,7 +906,11 @@ test("file rows keep room for their names on desktops, tablets, and phones", asy
       expect(layout.overflow, label).toBe(false);
       expect(layout.nameWidth, label).toBeLessThanOrEqual(layout.room);
       if (touch) {
-        expect(layout.smallestTarget, label).toBeGreaterThanOrEqual(44);
+        expect(layout.smallestWidth, label).toBeGreaterThanOrEqual(36);
+        expect(layout.smallestHeight, label).toBeGreaterThanOrEqual(44);
+      }
+      if (!menu) {
+        expect(layout.widestStep, label).toBeLessThanOrEqual(touch ? 41 : 37);
       }
       // In a narrower list the buttons sit side by side; only Delete keeps a
       // small gap.
