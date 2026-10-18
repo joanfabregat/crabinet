@@ -2441,6 +2441,10 @@ html.preview-fullscreen-open body {
   width: 100%;
 }
 
+.operation-form .archive-description {
+  margin: 0;
+}
+
 .operation-form .confirmation-check {
   align-items: center;
   display: flex;

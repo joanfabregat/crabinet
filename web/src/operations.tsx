@@ -1593,7 +1593,7 @@ function ArchiveDialog({
       busy={false}
     >
       <form class="operation-form" onSubmit={submit}>
-        <p class="muted">
+        <p class="muted archive-description">
           {extracting
             ? "Extract into a new folder beside this archive. If the name is taken, -2, -3, and so on are added. Existing items are never overwritten."
             : "Create a ZIP archive beside the selected items. The originals are kept."}
