@@ -222,7 +222,6 @@ pub(crate) fn compress(
     share: &AuthorizedShare<'_>,
     sources: &[VirtualPath],
     destination: &VirtualPath,
-    format: Format,
     limits: ArchiveLimits,
     max_charge: u64,
     work: &Work,
@@ -243,9 +242,6 @@ pub(crate) fn compress(
     let items = share.archive_selection_checked(&parent, &names, limits, &|| work.check().is_ok());
     work.check()?;
     let items = items?;
-    if format == Format::Gz && (items.len() != 1 || items[0].kind != EntryKind::File) {
-        return Err(ArchiveError::Invalid);
-    }
     // The walk happens before the output exists. Publication is outside all
     // sources, so creating an archive never includes itself.
     if sources.iter().any(|source| destination.starts_with(source)) {
@@ -268,102 +264,31 @@ pub(crate) fn compress(
         }
         Ok(file.into_std())
     };
-    match format {
-        Format::Zip => {
-            let mut zip = zip::ZipWriter::new(&mut output);
-            for item in &items {
-                work.check()?;
-                let options = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated)
-                    .compression_level(Some(2))
-                    .large_file(item.size >= u32::MAX as u64)
-                    .unix_permissions(if item.kind == EntryKind::Directory {
-                        0o755
-                    } else {
-                        0o644
-                    });
-                if item.kind == EntryKind::Directory {
-                    zip.add_directory(format!("{}/", item.relative), options)
-                        .map_err(|_| ArchiveError::Invalid)?;
-                } else {
-                    zip.start_file(&item.relative, options)
-                        .map_err(|_| ArchiveError::Invalid)?;
-                    let mut file = open(&item.relative, item.size)?;
-                    if copy(&mut file, &mut zip, item.size, work)? != item.size {
-                        return Err(ArchiveError::Invalid);
-                    }
-                }
-            }
-            zip.finish().map_err(|_| ArchiveError::Invalid)?;
-        }
-        Format::Gz => {
-            let mut gzip = flate2::write::GzEncoder::new(&mut output, flate2::Compression::new(2));
-            let item = &items[0];
+    let mut zip = zip::ZipWriter::new(&mut output);
+    for item in &items {
+        work.check()?;
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(2))
+            .large_file(item.size >= u32::MAX as u64)
+            .unix_permissions(if item.kind == EntryKind::Directory {
+                0o755
+            } else {
+                0o644
+            });
+        if item.kind == EntryKind::Directory {
+            zip.add_directory(format!("{}/", item.relative), options)
+                .map_err(|_| ArchiveError::Invalid)?;
+        } else {
+            zip.start_file(&item.relative, options)
+                .map_err(|_| ArchiveError::Invalid)?;
             let mut file = open(&item.relative, item.size)?;
-            if copy(&mut file, &mut gzip, item.size, work)? != item.size {
+            if copy(&mut file, &mut zip, item.size, work)? != item.size {
                 return Err(ArchiveError::Invalid);
-            }
-            gzip.finish()?;
-        }
-        _ => {
-            let write_tar = |writer: &mut dyn Write| -> Result<()> {
-                let mut tar = tar::Builder::new(writer);
-                for item in &items {
-                    work.check()?;
-                    let mut header = tar::Header::new_gnu();
-                    header.set_mode(if item.kind == EntryKind::Directory {
-                        0o755
-                    } else {
-                        0o644
-                    });
-                    header.set_uid(0);
-                    header.set_gid(0);
-                    header.set_mtime(0);
-                    header.set_entry_type(if item.kind == EntryKind::Directory {
-                        tar::EntryType::Directory
-                    } else {
-                        tar::EntryType::Regular
-                    });
-                    header.set_size(if item.kind == EntryKind::File {
-                        item.size
-                    } else {
-                        0
-                    });
-                    header.set_cksum();
-                    if item.kind == EntryKind::Directory {
-                        tar.append_data(&mut header, &item.relative, io::empty())?;
-                    } else {
-                        // `take` prevents concurrent growth from being read
-                        // beyond the walked size; check for shrink and growth.
-                        let mut file =
-                            Bounded::new(open(&item.relative, item.size)?, item.size, work);
-                        tar.append_data(&mut header, &item.relative, (&mut file).take(item.size))?;
-                        if file.remaining != 0 || file.inner.read(&mut [0])? != 0 {
-                            return Err(ArchiveError::Invalid);
-                        }
-                    }
-                }
-                tar.finish()?;
-                Ok(())
-            };
-            match format {
-                Format::Tar => write_tar(&mut output)?,
-                Format::TarGz => {
-                    let mut gzip =
-                        flate2::write::GzEncoder::new(&mut output, flate2::Compression::new(2));
-                    write_tar(&mut gzip)?;
-                    gzip.finish()?;
-                }
-                Format::TarZst => {
-                    let mut zstd = zstd::stream::write::Encoder::new(&mut output, 1)?;
-                    zstd.window_log(23)?;
-                    write_tar(&mut zstd)?;
-                    zstd.finish()?;
-                }
-                _ => unreachable!(),
             }
         }
     }
+    zip.finish().map_err(|_| ArchiveError::Invalid)?;
     output.flush()?;
     work.check()?;
     Ok(Staged::File(pending))
@@ -825,6 +750,40 @@ fn preflight_zip(
     Ok((offset, count as usize))
 }
 
+/// Synthetic inputs keep decoder coverage independent of the production ZIP writer.
+#[cfg(test)]
+pub(crate) fn fixture_archive(format: Format, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let bytes = if format == Format::Gz {
+        entries[0].1.to_vec()
+    } else {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            header.set_entry_type(if name.ends_with('/') {
+                tar::EntryType::Directory
+            } else {
+                tar::EntryType::Regular
+            });
+            header.set_cksum();
+            builder.append_data(&mut header, name, *bytes).unwrap();
+        }
+        builder.into_inner().unwrap()
+    };
+    match format {
+        Format::Tar => bytes,
+        Format::TarGz | Format::Gz => {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&bytes).unwrap();
+            encoder.finish().unwrap()
+        }
+        Format::TarZst => zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+        Format::Zip => unreachable!("ZIP fixtures use the production writer"),
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::disallowed_methods,
@@ -918,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn all_formats_round_trip_files_folders_empty_dirs_and_unicode() {
+    fn zip_creation_and_all_formats_extract_files_folders_empty_dirs_and_unicode() {
         for format in [
             Format::Zip,
             Format::Tar,
@@ -934,23 +893,33 @@ mod tests {
                 .authorize(Some(&grant), GlobalPolicy::default())
                 .unwrap();
             let (work, _cancel) = Work::new();
-            let source = if format == Format::Gz {
-                "plain"
+            if format == Format::Zip {
+                compress(
+                    &share,
+                    &[path("folder")],
+                    &path("archive.gz"),
+                    limits(),
+                    u64::MAX,
+                    &work,
+                )
+                .unwrap()
+                .publish()
+                .unwrap();
             } else {
-                "folder"
-            };
-            compress(
-                &share,
-                &[path(source)],
-                &path("archive.gz"),
-                format,
-                limits(),
-                u64::MAX,
-                &work,
-            )
-            .unwrap()
-            .publish()
-            .unwrap();
+                let entries: &[(&str, &[u8])] = if format == Format::Gz {
+                    &[("plain", b"single contents")]
+                } else {
+                    &[
+                        ("folder/empty/", b""),
+                        ("folder/café.txt", b"archive contents"),
+                    ]
+                };
+                fs::write(
+                    root.path().join("archive.gz"),
+                    fixture_archive(format, entries),
+                )
+                .unwrap();
+            }
             extract(
                 &share,
                 &path("archive.gz"),
@@ -1221,17 +1190,10 @@ mod tests {
             .authorize(Some(&grant), GlobalPolicy::default())
             .unwrap();
         let (work, _cancel) = Work::new();
-        compress(
-            &share,
-            &[path(&name)],
-            &path("archive.tar"),
-            Format::Tar,
-            limits(),
-            u64::MAX,
-            &work,
+        fs::write(
+            root.path().join("archive.tar"),
+            fixture_archive(Format::Tar, &[(&name, b"long name")]),
         )
-        .unwrap()
-        .publish()
         .unwrap();
         extract(
             &share,

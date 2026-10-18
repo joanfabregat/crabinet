@@ -36,7 +36,6 @@ export type EntryOperation =
       path: string;
       destinationDirectory?: string;
       sources?: string[];
-      singleFile?: boolean;
     };
 
 export interface UploadSelection {
@@ -1501,13 +1500,12 @@ function isAborted(cause: unknown): boolean {
 const archiveFormats: {
   format: ArchiveFormat;
   suffix: string;
-  label: string;
 }[] = [
-  { format: "zip", suffix: ".zip", label: "ZIP" },
-  { format: "tar-gz", suffix: ".tar.gz", label: "TAR.GZ" },
-  { format: "tar-zst", suffix: ".tar.zst", label: "TAR.ZST" },
-  { format: "tar", suffix: ".tar", label: "TAR (uncompressed)" },
-  { format: "gz", suffix: ".gz", label: "GZ (one file)" },
+  { format: "zip", suffix: ".zip" },
+  { format: "tar-gz", suffix: ".tar.gz" },
+  { format: "tar-zst", suffix: ".tar.zst" },
+  { format: "tar", suffix: ".tar" },
+  { format: "gz", suffix: ".gz" },
 ];
 
 export function archiveFormat(name: string): ArchiveFormat | undefined {
@@ -1530,15 +1528,8 @@ function ArchiveDialog({
   const source = "path" in operation ? operation.path : "";
   const sources =
     "sources" in operation && operation.sources ? operation.sources : [source];
-  const singleFile =
-    "singleFile" in operation && operation.singleFile !== undefined
-      ? operation.singleFile
-      : sources.length === 1 && entry?.kind === "file";
   const detected = archiveFormat(entry?.name ?? "");
-  const [format, setFormat] = useState<ArchiveFormat>(
-    extracting ? (detected ?? "zip") : "zip",
-  );
-  const suffix = archiveFormats.find((item) => item.format === format)!.suffix;
+  const format = extracting ? (detected ?? "zip") : "zip";
   const base = sources.length > 1 ? "Archive" : (entry?.name ?? "Archive");
   const extractedName =
     base.replace(/\.(?:tar\.gz|tar\.zst|tgz|zip|tar|gz)$/i, "") || "Archive";
@@ -1605,7 +1596,7 @@ function ArchiveDialog({
         <p class="muted">
           {extracting
             ? "Extract into a new folder beside this archive. If the name is taken, -2, -3, and so on are added. Existing items are never overwritten."
-            : "Create an archive beside the selected items. The originals are kept."}
+            : "Create a ZIP archive beside the selected items. The originals are kept."}
         </p>
         <label for="archive-name">
           {extracting ? "Folder name" : "Archive name"}
@@ -1619,36 +1610,6 @@ function ArchiveDialog({
           autocomplete="off"
           onInput={(event) => setName(event.currentTarget.value)}
         />
-        {!extracting && (
-          <>
-            <label for="archive-format">Format</label>
-            <select
-              id="archive-format"
-              value={format}
-              disabled={busy}
-              onChange={(event) => {
-                const next = event.currentTarget.value as ArchiveFormat;
-                const nextSuffix = archiveFormats.find(
-                  (item) => item.format === next,
-                )!.suffix;
-                setName((value) =>
-                  value.endsWith(suffix)
-                    ? value.slice(0, -suffix.length) + nextSuffix
-                    : value + nextSuffix,
-                );
-                setFormat(next);
-              }}
-            >
-              {archiveFormats
-                .filter((item) => item.format !== "gz" || singleFile)
-                .map((item) => (
-                  <option key={item.format} value={item.format}>
-                    {item.label}
-                  </option>
-                ))}
-            </select>
-          </>
-        )}
         {busy && (
           <p role="status">
             {extracting ? "Extracting…" : "Compressing…"} You can cancel this

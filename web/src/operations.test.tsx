@@ -329,23 +329,12 @@ describe("local archive dialogs", () => {
     entry: { name: "Projects", kind: "directory" },
     path: "Projects",
   };
-  it("offers folder formats and submits the destination with CSRF", async () => {
+  it("creates ZIP without a format picker and submits the destination with CSRF", async () => {
     const localArchive = vi.fn().mockResolvedValue({});
     renderDialog(folder, { api: fakeApi({ localArchive }) });
     expect(screen.getByLabelText("Archive name")).toHaveFocus();
-    expect(
-      screen
-        .getByLabelText("Archive name")
-        .compareDocumentPosition(screen.getByLabelText("Format")) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(screen.queryByRole("option", { name: "GZ (one file)" })).toBeNull();
-    fireEvent.change(screen.getByLabelText("Format"), {
-      target: { value: "tar-zst" },
-    });
-    expect(screen.getByLabelText("Archive name")).toHaveValue(
-      "Projects.tar.zst",
-    );
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByLabelText("Archive name")).toHaveValue("Projects.zip");
     fireEvent.click(
       screen.getByRole("button", { name: "Compress", exact: true }),
     );
@@ -354,38 +343,48 @@ describe("local archive dialogs", () => {
         "work",
         "compress",
         ["Projects"],
-        "Projects.tar.zst",
-        "tar-zst",
+        "Projects.zip",
+        "zip",
         "csrf",
         expect.any(AbortSignal),
       ),
     );
   });
-  it("detects TGZ and creates a new extraction folder", async () => {
-    const localArchive = vi.fn().mockResolvedValue({});
-    renderDialog(
-      {
-        kind: "extract",
-        entry: { name: "backup.tgz", kind: "file" },
-        path: "projects/backup.tgz",
-      },
-      { api: fakeApi({ localArchive }) },
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Extract", exact: true }),
-    );
-    await waitFor(() =>
-      expect(localArchive).toHaveBeenCalledWith(
-        "work",
-        "extract",
-        ["projects/backup.tgz"],
-        "projects/backup",
-        "tar-gz",
-        "csrf",
-        expect.any(AbortSignal),
-      ),
-    );
-  });
+  it.each([
+    ["zip", "zip"],
+    ["tar", "tar"],
+    ["tar.gz", "tar-gz"],
+    ["tgz", "tar-gz"],
+    ["gz", "gz"],
+    ["tar.zst", "tar-zst"],
+  ])(
+    "detects %s and creates a new extraction folder",
+    async (extension, format) => {
+      const localArchive = vi.fn().mockResolvedValue({});
+      renderDialog(
+        {
+          kind: "extract",
+          entry: { name: `backup.${extension}`, kind: "file" },
+          path: `projects/backup.${extension}`,
+        },
+        { api: fakeApi({ localArchive }) },
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Extract", exact: true }),
+      );
+      await waitFor(() =>
+        expect(localArchive).toHaveBeenCalledWith(
+          "work",
+          "extract",
+          [`projects/backup.${extension}`],
+          "projects/backup",
+          format,
+          "csrf",
+          expect.any(AbortSignal),
+        ),
+      );
+    },
+  );
   it("reports the numbered destination chosen by extraction", async () => {
     const changed = vi.fn();
     const operation: EntryOperation = {

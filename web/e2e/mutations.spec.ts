@@ -772,7 +772,7 @@ function zipEntries(archive: Buffer): { name: string; method: number }[] {
   return entries;
 }
 
-test("compresses a folder and extracts each supported folder archive on the server", async ({
+test("compresses a folder to ZIP and extracts it on the server", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -780,49 +780,41 @@ test("compresses a folder and extracts each supported folder archive on the serv
     "mutation coverage runs once per engine",
   );
   await openSignedIn(page, "/writable", "writer");
-  for (const format of ["zip", "tar", "tar-gz", "tar-zst"]) {
-    await entryAction(page, "Projects", "Compress").click();
-    const dialog = page.getByRole("dialog", { name: "Compress", exact: true });
-    await dialog.getByLabel("Format").selectOption(format);
-    const name = `e2e-local-${format}.${format === "tar-gz" ? "tgz" : format === "tar-zst" ? "tar.zst" : format}`;
-    await dialog.getByLabel("Archive name").fill(name);
-    await dialog.getByRole("button", { name: "Compress", exact: true }).click();
-    await expect(dialog).toHaveCount(0);
-    await entryAction(page, name, "Extract").click();
-    const extracting = page.getByRole("dialog", { name: "Extract archive" });
-    await expect(extracting.getByLabel("Folder name")).toHaveValue(
-      `e2e-local-${format}`,
-    );
-    const destination = `e2e-extracted-${format}`;
-    await extracting.getByLabel("Folder name").fill(destination);
-    await extracting
-      .getByRole("button", { name: "Extract", exact: true })
-      .click();
-    await expect(extracting).toHaveCount(0);
-    expect(
-      await readText(page, "writable", `${destination}/Projects/example.toml`),
-    ).toBe(await readText(page, "writable", "Projects/example.toml"));
-    if (format === "zip") {
-      await entryAction(page, name, "Extract").click();
-      await page
-        .getByRole("dialog", { name: "Extract archive" })
-        .getByLabel("Folder name")
-        .fill(destination);
-      await page
-        .getByRole("dialog", { name: "Extract archive" })
-        .getByRole("button", { name: "Extract", exact: true })
-        .click();
-      await expect(page.getByRole("dialog")).toHaveCount(0);
-      await expect(
-        page.getByText(`Extracted to ${destination}-2.`, { exact: true }),
-      ).toBeVisible();
-      expect(
-        await readText(
-          page,
-          "writable",
-          `${destination}-2/Projects/example.toml`,
-        ),
-      ).toBe(await readText(page, "writable", "Projects/example.toml"));
-    }
-  }
+  await entryAction(page, "Projects", "Compress").click();
+  const dialog = page.getByRole("dialog", { name: "Compress", exact: true });
+  await expect(dialog.getByRole("combobox")).toHaveCount(0);
+  const name = "e2e-local-zip.zip";
+  await dialog.getByLabel("Archive name").fill(name);
+  await dialog.getByRole("button", { name: "Compress", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await entryAction(page, name, "Extract").click();
+  const extracting = page.getByRole("dialog", { name: "Extract archive" });
+  await expect(extracting.getByLabel("Folder name")).toHaveValue(
+    "e2e-local-zip",
+  );
+  const destination = "e2e-extracted-zip";
+  await extracting.getByLabel("Folder name").fill(destination);
+  await extracting
+    .getByRole("button", { name: "Extract", exact: true })
+    .click();
+  await expect(extracting).toHaveCount(0);
+  expect(
+    await readText(page, "writable", `${destination}/Projects/example.toml`),
+  ).toBe(await readText(page, "writable", "Projects/example.toml"));
+  await entryAction(page, name, "Extract").click();
+  await page
+    .getByRole("dialog", { name: "Extract archive" })
+    .getByLabel("Folder name")
+    .fill(destination);
+  await page
+    .getByRole("dialog", { name: "Extract archive" })
+    .getByRole("button", { name: "Extract", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(
+    page.getByText(`Extracted to ${destination}-2.`, { exact: true }),
+  ).toBeVisible();
+  expect(
+    await readText(page, "writable", `${destination}-2/Projects/example.toml`),
+  ).toBe(await readText(page, "writable", "Projects/example.toml"));
 });

@@ -1768,10 +1768,34 @@ mod tests {
         ] {
             let archive = format!("local.{extension}");
             let output = format!("output-{format}");
+            if format != "zip" {
+                let rejected = send(
+                    &fixture.app, Some(&fixture.identity), true,
+                    json_request("POST", "/api/v1/shares/documents/compress",
+                        json!({"sources": ["existing.txt"], "destination": archive, "format": format})),
+                ).await;
+                assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+                assert!(!fixture.root.path().join(&archive).exists());
+                let codec = match format {
+                    "tar" => crate::archives::Format::Tar,
+                    "tar-gz" => crate::archives::Format::TarGz,
+                    "tar-zst" => crate::archives::Format::TarZst,
+                    "gz" => crate::archives::Format::Gz,
+                    _ => unreachable!(),
+                };
+                fs::write(
+                    fixture.root.path().join(&archive),
+                    crate::archives::fixture_archive(codec, &[("existing.txt", b"original")]),
+                )
+                .unwrap();
+            }
             for (action, sources, destination) in [
                 ("compress", vec!["existing.txt"], archive.as_str()),
                 ("extract", vec![archive.as_str()], output.as_str()),
             ] {
+                if action == "compress" && format != "zip" {
+                    continue;
+                }
                 let body =
                     json!({"sources": sources, "destination": destination, "format": format});
                 let uri = format!("/api/v1/shares/documents/{action}");
@@ -3733,6 +3757,7 @@ async fn local_archive(
     reject_oversized_metadata(&body.destination)?;
     if body.sources.is_empty()
         || body.sources.len() > 1_000
+        || (!extracting && body.format != crate::archives::Format::Zip)
         || (extracting && body.sources.len() != 1)
         || body.sources.iter().map(String::len).sum::<usize>() > MAX_METADATA_BODY_BYTES
     {
@@ -3789,15 +3814,7 @@ async fn local_archive(
                 &work,
             )
         } else {
-            crate::archives::compress(
-                &share,
-                &sources,
-                &target,
-                body.format,
-                limits,
-                max_charge,
-                &work,
-            )
+            crate::archives::compress(&share, &sources, &target, limits, max_charge, &work)
         }
         .map_err(archive_rejection)?;
         work.check().map_err(archive_rejection)?;

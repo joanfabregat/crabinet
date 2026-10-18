@@ -2050,8 +2050,6 @@ function DirectoryBrowser({
                         sources: selectedEntries.map((entry) =>
                           joinPath(route.path, entry.name),
                         ),
-                        singleFile:
-                          selectedEntries.length === 1 && first.kind === "file",
                       });
                     }}
                     onDownload={() =>
