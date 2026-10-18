@@ -82,7 +82,9 @@ async function signOut(page: Page) {
 
 /** A refused callback shows the API's error and creates no session. */
 async function expectRefusedCallback(page: Page) {
-  expect(new URL(page.url()).pathname).toBe("/api/v1/auth/oidc/callback");
+  await expect(page).toHaveURL(
+    (url) => url.pathname === "/api/v1/auth/oidc/callback",
+  );
   await expect(page.locator("body")).toContainText("authentication_failed");
   const session = await page.request.get("/api/v1/session");
   expect(session.status()).toBe(401);
