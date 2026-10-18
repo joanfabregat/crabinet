@@ -152,6 +152,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         mimeType: "text/plain",
         etag: '"content"',
       })),
+    localArchive: overrides.localArchive ?? vi.fn(),
     createDirectory:
       overrides.createDirectory ??
       vi.fn(async (shareId, path) => ({

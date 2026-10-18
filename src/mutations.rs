@@ -149,6 +149,7 @@ pub struct MutationState {
     upload_deadline: Duration,
     text_save_gate: SubjectGate,
     text_body_timeout: Duration,
+    archive_gate: SubjectGate,
     quota_scan_entries: usize,
     trash_empty_batch_entries: usize,
     trash_empty_budget: Duration,
@@ -167,6 +168,7 @@ struct Quota {
 pub(crate) enum MutationGate {
     Uploads,
     TextSaves,
+    Archives,
 }
 
 impl MutationState {
@@ -196,6 +198,7 @@ impl MutationState {
                 MAX_CONCURRENT_TEXT_SAVES_PER_SUBJECT,
             ),
             text_body_timeout: TEXT_BODY_TIMEOUT,
+            archive_gate: SubjectGate::new(2, 1),
             quota_scan_entries: QUOTA_SCAN_ENTRY_LIMIT,
             trash_empty_batch_entries: TRASH_GC_BATCH_ENTRIES,
             trash_empty_budget: TRASH_EMPTY_REQUEST_BUDGET,
@@ -274,6 +277,7 @@ impl MutationState {
         match gate {
             MutationGate::Uploads => &self.upload_gate,
             MutationGate::TextSaves => &self.text_save_gate,
+            MutationGate::Archives => &self.archive_gate,
         }
     }
 
@@ -320,6 +324,14 @@ pub fn router(http_body_limit: usize) -> Router<AppState> {
         .route("/shares/{share_id}/files", post(create_file))
         .route("/shares/{share_id}/text", put(save_text))
         .route("/shares/{share_id}/move", post(move_entry))
+        .route(
+            "/shares/{share_id}/compress",
+            post(local_compress).layer(DefaultBodyLimit::max(MAX_METADATA_BODY_BYTES)),
+        )
+        .route(
+            "/shares/{share_id}/extract",
+            post(local_extract).layer(DefaultBodyLimit::max(MAX_METADATA_BODY_BYTES)),
+        )
         .route("/shares/{share_id}/entry", delete(delete_entry))
         .route(
             "/shares/{share_id}/trash/{item_id}/restore",
@@ -1743,6 +1755,129 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn local_archives_round_trip_and_enforce_permissions_quota_and_conflicts() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        for (format, extension) in [
+            ("zip", "zip"),
+            ("tar", "tar"),
+            ("tar-gz", "tgz"),
+            ("tar-zst", "tar.zst"),
+            ("gz", "gz"),
+        ] {
+            let archive = format!("local.{extension}");
+            let output = format!("output-{format}");
+            if format != "zip" {
+                let rejected = send(
+                    &fixture.app, Some(&fixture.identity), true,
+                    json_request("POST", "/api/v1/shares/documents/compress",
+                        json!({"sources": ["existing.txt"], "destination": archive, "format": format})),
+                ).await;
+                assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+                assert!(!fixture.root.path().join(&archive).exists());
+                let codec = match format {
+                    "tar" => crate::archives::Format::Tar,
+                    "tar-gz" => crate::archives::Format::TarGz,
+                    "tar-zst" => crate::archives::Format::TarZst,
+                    "gz" => crate::archives::Format::Gz,
+                    _ => unreachable!(),
+                };
+                fs::write(
+                    fixture.root.path().join(&archive),
+                    crate::archives::fixture_archive(codec, &[("existing.txt", b"original")]),
+                )
+                .unwrap();
+            }
+            for (action, sources, destination) in [
+                ("compress", vec!["existing.txt"], archive.as_str()),
+                ("extract", vec![archive.as_str()], output.as_str()),
+            ] {
+                if action == "compress" && format != "zip" {
+                    continue;
+                }
+                let body =
+                    json!({"sources": sources, "destination": destination, "format": format});
+                let uri = format!("/api/v1/shares/documents/{action}");
+                let response = send(
+                    &fixture.app,
+                    Some(&fixture.identity),
+                    false,
+                    json_request("POST", &uri, body.clone()),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                let response = send(
+                    &fixture.app,
+                    Some(&fixture.identity),
+                    true,
+                    json_request("POST", &uri, body.clone()),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::CREATED, "{format} {action}");
+                let response = send(
+                    &fixture.app,
+                    Some(&fixture.identity),
+                    true,
+                    json_request("POST", &uri, body),
+                )
+                .await;
+                if action == "extract" {
+                    assert_eq!(response.status(), StatusCode::CREATED);
+                    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(result["path"], format!("{destination}-2"));
+                } else {
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                }
+            }
+            let child = if format == "gz" {
+                "local"
+            } else {
+                "existing.txt"
+            };
+            assert_eq!(
+                fs::read(fixture.root.path().join(&output).join(child)).unwrap(),
+                b"original"
+            );
+        }
+        let body = json!({"sources": ["existing.txt"], "destination": "no.zip", "format": "zip"});
+        let readonly = self::fixture(AccessLevel::ReadOnly, false, MutationLimits::default());
+        assert_eq!(
+            send(
+                &readonly.app,
+                Some(&readonly.identity),
+                true,
+                json_request("POST", "/api/v1/shares/documents/compress", body.clone())
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let limits = MutationLimits {
+            max_share_bytes: Some(1),
+            ..MutationLimits::default()
+        };
+        let quota = self::fixture(AccessLevel::ReadWrite, false, limits);
+        assert_eq!(
+            send(
+                &quota.app,
+                Some(&quota.identity),
+                true,
+                json_request("POST", "/api/v1/shares/documents/compress", body)
+            )
+            .await
+            .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(!quota.root.path().join("no.zip").exists());
+        assert_eq!(
+            fs::read_dir(quota.root.path().join(".crabinet/staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
     use crate::{
         app,
         browse::{BrowseLimits, BrowseState, ConfiguredShare},
@@ -3564,4 +3699,138 @@ mod tests {
         assert_eq!(without_csrf.status(), StatusCode::FORBIDDEN);
         assert_eq!(trash_directory_entries(&writer), 6);
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalArchiveBody {
+    sources: Vec<String>,
+    destination: String,
+    format: crate::archives::Format,
+}
+
+async fn local_compress(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    _csrf: CsrfVerified,
+    ApiPath(share): ApiPath<String>,
+    body: Result<ApiJson<LocalArchiveBody>, AppError>,
+) -> Result<Response, AppError> {
+    let result = local_archive(&state, &identity, &share, body, false).await;
+    audited(&state, &identity, &share, "compress", result)
+}
+
+async fn local_extract(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    _csrf: CsrfVerified,
+    ApiPath(share): ApiPath<String>,
+    body: Result<ApiJson<LocalArchiveBody>, AppError>,
+) -> Result<Response, AppError> {
+    let result = local_archive(&state, &identity, &share, body, true).await;
+    audited(&state, &identity, &share, "extract", result)
+}
+
+fn archive_rejection(error: crate::archives::ArchiveError) -> Rejection {
+    use crate::archives::ArchiveError;
+    match error {
+        ArchiveError::Fs(error) => error.into(),
+        ArchiveError::Depth => Rejection::new(AppError::PathTooDeep, "archive_depth"),
+        ArchiveError::Limit => Rejection::new(AppError::TooLarge, "archive_limit"),
+        ArchiveError::Cancelled => {
+            Rejection::new(AppError::InvalidRequest, "archive_cancelled_or_timed_out")
+        }
+        ArchiveError::Invalid | ArchiveError::Io(_) => {
+            Rejection::new(AppError::InvalidRequest, "archive_invalid_or_unsupported")
+        }
+    }
+}
+
+async fn local_archive(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    raw_share: &str,
+    body: Result<ApiJson<LocalArchiveBody>, AppError>,
+    extracting: bool,
+) -> MutationResult<Response> {
+    let ApiJson(body) = body?;
+    reject_oversized_metadata(&body.destination)?;
+    if body.sources.is_empty()
+        || body.sources.len() > 1_000
+        || (!extracting && body.format != crate::archives::Format::Zip)
+        || (extracting && body.sources.len() != 1)
+        || body.sources.iter().map(String::len).sum::<usize>() > MAX_METADATA_BODY_BYTES
+    {
+        return Err(AppError::InvalidRequest.into());
+    }
+    let (share_id, destination, authorized) =
+        authorize_write(state, identity, raw_share, &body.destination)?;
+    ensure_creatable(&destination)?;
+    let sources = body
+        .sources
+        .iter()
+        .map(|path| VirtualPath::parse(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let lease = state
+        .mutations()
+        .archive_gate
+        .try_acquire(identity.subject())
+        .ok_or(AppError::Busy)?;
+    let (work, cancellation) = crate::archives::Work::new();
+    // Admission precedes waiting for the commit lock, bounding queued work.
+    let commit = timeout(
+        Duration::from_secs(5),
+        state.mutations().commit_lock(&share_id),
+    )
+    .await
+    .map_err(|_| AppError::Busy)?;
+    let quota = state.mutations().quota();
+    let limits = state.browse().archive_limits();
+    let target = destination.clone();
+    let result = run_blocking(move || -> MutationResult<VirtualPath> {
+        let (_lease, _commit) = (lease, commit);
+        let share = authorized.view();
+        let target = if extracting {
+            let next = share.unused_archive_destination(&target, &|| work.check().is_ok());
+            work.check().map_err(archive_rejection)?;
+            next?
+        } else {
+            target
+        };
+        // Check quota before staging; the available space also bounds private
+        // output and extraction snapshots, so failures cannot bypass quota.
+        let max_charge = match quota.max_share_bytes {
+            Some(limit) => limit.saturating_sub(measure_usage(&share, quota, limit, 0)?),
+            None => u64::MAX,
+        };
+        let staged = if extracting {
+            crate::archives::extract(
+                &share,
+                &sources[0],
+                &target,
+                body.format,
+                limits,
+                max_charge,
+                &work,
+            )
+        } else {
+            crate::archives::compress(&share, &sources, &target, limits, max_charge, &work)
+        }
+        .map_err(archive_rejection)?;
+        work.check().map_err(archive_rejection)?;
+        staged.publish().map_err(archive_rejection)?;
+        Ok(target)
+    })
+    .await?;
+    // Keep the cancellation guard alive through the worker and publication.
+    drop(cancellation);
+    let destination = result?;
+    finish_mutation(
+        identity,
+        &share_id,
+        &destination,
+        if extracting { "extract" } else { "compress" },
+        Ok(()),
+        StatusCode::CREATED,
+    )
 }

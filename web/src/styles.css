@@ -2240,6 +2240,8 @@ html.preview-fullscreen-open body {
 }
 
 .entry-menu-list {
+  max-height: calc(100dvh - 1rem);
+  overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 0.65rem;
@@ -2437,6 +2439,10 @@ html.preview-fullscreen-open body {
 
 .operation-form input {
   width: 100%;
+}
+
+.operation-form .archive-description {
+  margin: 0;
 }
 
 .operation-form .confirmation-check {

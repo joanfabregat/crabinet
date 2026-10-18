@@ -204,16 +204,17 @@ describe("row action menu", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     const menu = screen.getByRole("menu", { name: "Actions for notes.txt" });
     const items = within(menu).getAllByRole("menuitem");
-    expect(items.map((item) => item.textContent)).toEqual([
+    expect(items.map((item) => item.textContent?.trim())).toEqual([
       "Download",
       "Copy full path",
+      "Compress…",
       "Rename",
       "Move to…",
       "Move to Trash",
     ]);
     await waitFor(() => expect(items[0]).toHaveFocus());
     fireEvent.keyDown(menu, { key: "ArrowUp" });
-    expect(items[4]).toHaveFocus();
+    expect(items.at(-1)).toHaveFocus();
 
     fireEvent.keyDown(menu, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
@@ -319,5 +320,139 @@ describe("row downloads", () => {
     fireEvent.click(item);
     expect(onArchive).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+describe("local archive dialogs", () => {
+  const folder: EntryOperation = {
+    kind: "compress",
+    entry: { name: "Projects", kind: "directory" },
+    path: "Projects",
+  };
+  it("creates ZIP without a format picker and submits the destination with CSRF", async () => {
+    const localArchive = vi.fn().mockResolvedValue({});
+    renderDialog(folder, { api: fakeApi({ localArchive }) });
+    expect(screen.getByLabelText("Archive name")).toHaveFocus();
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByLabelText("Archive name")).toHaveValue("Projects.zip");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Compress", exact: true }),
+    );
+    await waitFor(() =>
+      expect(localArchive).toHaveBeenCalledWith(
+        "work",
+        "compress",
+        ["Projects"],
+        "Projects.zip",
+        "zip",
+        "csrf",
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+  it.each([
+    ["zip", "zip"],
+    ["tar", "tar"],
+    ["tar.gz", "tar-gz"],
+    ["tgz", "tar-gz"],
+    ["gz", "gz"],
+    ["tar.zst", "tar-zst"],
+  ])(
+    "detects %s and creates a new extraction folder",
+    async (extension, format) => {
+      const localArchive = vi.fn().mockResolvedValue({});
+      renderDialog(
+        {
+          kind: "extract",
+          entry: { name: `backup.${extension}`, kind: "file" },
+          path: `projects/backup.${extension}`,
+        },
+        { api: fakeApi({ localArchive }) },
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Extract", exact: true }),
+      );
+      await waitFor(() =>
+        expect(localArchive).toHaveBeenCalledWith(
+          "work",
+          "extract",
+          [`projects/backup.${extension}`],
+          "projects/backup",
+          format,
+          "csrf",
+          expect.any(AbortSignal),
+        ),
+      );
+    },
+  );
+  it("reports the numbered destination chosen by extraction", async () => {
+    const changed = vi.fn();
+    const operation: EntryOperation = {
+      kind: "extract",
+      entry: { name: "backup.zip", kind: "file" },
+      path: "projects/backup.zip",
+    };
+    render(
+      <OperationDialog
+        api={fakeApi({
+          localArchive: vi
+            .fn()
+            .mockResolvedValue({ path: "projects/backup-3" }),
+        })}
+        csrfToken="csrf"
+        operation={operation}
+        directory="projects"
+        shareId="work"
+        userId="test"
+        onChanged={changed}
+        onClose={vi.fn()}
+        onSessionExpired={vi.fn()}
+        onSessionRefreshed={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Folder name")).toHaveValue("backup");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Extract", exact: true }),
+    );
+    await waitFor(() =>
+      expect(changed).toHaveBeenCalledWith(operation, "projects/backup-3"),
+    );
+  });
+  it("cancels the active request and ignores a late completion", async () => {
+    let resolve: (() => void) | undefined;
+    const localArchive = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    ) as unknown as ApiClient["localArchive"];
+    const changed = vi.fn();
+    const close = vi.fn();
+    render(
+      <OperationDialog
+        api={fakeApi({ localArchive })}
+        csrfToken="csrf"
+        operation={folder}
+        directory=""
+        shareId="work"
+        userId="test"
+        onChanged={changed}
+        onClose={close}
+        onSessionExpired={vi.fn()}
+        onSessionRefreshed={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Compress", exact: true }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Compressing");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Cancel", exact: true }),
+    );
+    expect(vi.mocked(localArchive).mock.calls[0]![6]!.aborted).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    resolve?.();
+    await Promise.resolve();
+    expect(changed).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { FolderDown, Trash2, X } from "lucide-preact";
+import { Archive, FolderDown, Trash2, X } from "lucide-preact";
 
 import {
   ApiError,
@@ -264,6 +264,7 @@ export function SelectionBar({
   busy,
   onToggleAll,
   onDownload,
+  onCompress,
   onDelete,
   onClear,
 }: {
@@ -273,6 +274,7 @@ export function SelectionBar({
   busy: boolean;
   onToggleAll: () => void;
   onDownload: () => void;
+  onCompress?: () => void;
   onDelete: () => void;
   onClear: () => void;
 }) {
@@ -300,6 +302,18 @@ export function SelectionBar({
         <FolderDown size={18} aria-hidden="true" />
         <span class="toolbar-label">Download as ZIP</span>
       </button>
+      {writable && (
+        <button
+          class="button button-secondary toolbar-button"
+          type="button"
+          disabled={busy || count === 0}
+          onClick={onCompress}
+          aria-label="Compress selected items"
+        >
+          <Archive size={18} aria-hidden="true" />
+          <span class="toolbar-label">Compress…</span>
+        </button>
+      )}
       {writable && (
         <button
           class="button button-secondary toolbar-button selection-delete"

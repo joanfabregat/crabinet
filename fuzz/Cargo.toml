@@ -80,3 +80,10 @@ path = "fuzz_targets/media_codecs.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "local_archive"
+path = "fuzz_targets/local_archive.rs"
+test = false
+doc = false
+bench = false

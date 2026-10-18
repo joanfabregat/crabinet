@@ -1634,3 +1634,72 @@ class FakeXhr extends EventTarget {
     this.dispatchEvent(new Event("load"));
   }
 }
+
+describe("numbered extraction destinations", () => {
+  it("accepts the numbered sibling returned by extraction", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        shareId: "work",
+        path: "docs/backup-3",
+        outcome: "success",
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).localArchive(
+        "work",
+        "extract",
+        ["docs/backup.zip"],
+        "docs/backup",
+        "zip",
+        "csrf",
+      ),
+    ).resolves.toMatchObject({ path: "docs/backup-3" });
+    expect(
+      new Headers(fetch.mock.calls[0]?.[1]?.headers).get("X-CSRF-Token"),
+    ).toBe("csrf");
+  });
+  it("accepts UTF-8-safe shortening of a maximum-length name", async () => {
+    const base = "é".repeat(127);
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        shareId: "work",
+        path: `${"é".repeat(126)}-2`,
+        outcome: "success",
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).localArchive(
+        "work",
+        "extract",
+        ["archive.zip"],
+        base,
+        "zip",
+        "csrf",
+      ),
+    ).resolves.toMatchObject({ outcome: "success" });
+  });
+  it.each([
+    "elsewhere/backup-2",
+    "docs/other-2",
+    "docs/backup-1",
+    "docs/backup-1001",
+    "docs/backup-02",
+    "docs/backup/child",
+  ])("rejects an unrelated extraction response: %s", async (path) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        Response.json({ shareId: "work", path, outcome: "success" }),
+      );
+    await expect(
+      createApiClient({ fetch }).localArchive(
+        "work",
+        "extract",
+        ["docs/backup.zip"],
+        "docs/backup",
+        "zip",
+        "csrf",
+      ),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+});
