@@ -1,6 +1,6 @@
 {
   "name": "@joanfabregat/crabinet-web",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -21,7 +21,7 @@
     "@shikijs/themes": "4.4.3",
     "@simplewebauthn/browser": "14.0.0",
     "lucide-preact": "1.47.0",
-    "markdown-it": "15.0.2",
+    "markdown-it": "15.0.3",
     "markdown-it-footnote": "4.0.0",
     "pdfjs-dist": "6.3.289",
     "preact": "10.29.8",
@@ -42,8 +42,8 @@
     "jsdom": "30.1.0",
     "prettier": "3.9.7",
     "typescript": "5.9.3",
-    "vite": "7.3.6",
-    "vitest": "4.1.11"
+    "vite": "7.3.7",
+    "vitest": "4.1.12"
   },
   "allowScripts": {
     "esbuild@0.28.2": true
