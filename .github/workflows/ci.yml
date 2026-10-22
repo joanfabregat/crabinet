@@ -207,6 +207,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: npm run audit:deps -- --audit-level=high
+      # The Azure mirror can throttle large font and codec downloads enough
+      # to stall browser setup. Keep Ubuntu's signed packages and use its
+      # official archive for these ephemeral runners.
+      - name: Use the Ubuntu archive for browser dependencies
+        run: |
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+          fi
       - name: Install the browser engine
         working-directory: web
         run: npx playwright install --with-deps "${ENGINE}"
