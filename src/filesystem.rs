@@ -451,7 +451,9 @@ impl PendingWrite {
         Ok(())
     }
 
-    pub fn publish_replacement(mut self, expected: EntryMetadata) -> FsResult<()> {
+    /// Returns the published file's metadata, checked against the destination
+    /// after the exchange, so its validator is the one a follow-up write needs.
+    pub fn publish_replacement(mut self, expected: EntryMetadata) -> FsResult<EntryMetadata> {
         validate_regular_handle(&self.file)?;
         let replacement = raw_file_metadata(&self.file)?;
         self.file.sync_all().map_err(map_io)?;
@@ -503,7 +505,7 @@ impl PendingWrite {
         self.published = true;
         sync_after_commit(&self.staging);
         sync_after_commit(&self.destination_parent);
-        Ok(())
+        Ok(replacement)
     }
 
     /// The retained staging name may now hold the user's previous file

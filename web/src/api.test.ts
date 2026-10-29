@@ -1217,13 +1217,16 @@ describe("API client", () => {
         path,
         outcome: "success",
         trashId: "trash-1",
+        etag: 'W/"saved"',
       });
     });
     const api = createApiClient({ fetch });
 
     await api.createDirectory("work", "docs", "csrf");
     await api.createFile("work", "docs/a.txt", "csrf");
-    await api.saveText("work", "docs/a.txt", "hello", 'W/"v1"', "csrf");
+    await expect(
+      api.saveText("work", "docs/a.txt", "hello", 'W/"v1"', "csrf"),
+    ).resolves.toMatchObject({ etag: 'W/"saved"' });
     await api.moveEntry("work", "docs/a.txt", "docs/b.txt", 'W/"v2"', "csrf");
     await api.deleteEntry("work", "docs/b.txt", 'W/"v3"', "csrf");
 
@@ -1241,6 +1244,26 @@ describe("API client", () => {
     expect(new Headers(fetch.mock.calls[4]?.[1]?.headers).get("If-Match")).toBe(
       'W/"v3"',
     );
+  });
+
+  it("rejects a text save response without the new validator", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({
+        shareId: "work",
+        path: "docs/a.txt",
+        outcome: "success",
+      }),
+    );
+
+    await expect(
+      createApiClient({ fetch }).saveText(
+        "work",
+        "docs/a.txt",
+        "hello",
+        'W/"v1"',
+        "csrf",
+      ),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
   });
 
   it("lists Trash and sends CSRF for restore and permanent deletion", async () => {

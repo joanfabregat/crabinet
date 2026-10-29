@@ -173,6 +173,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         shareId,
         path,
         outcome: "success" as const,
+        etag: 'W/"saved"',
       })),
     moveEntry:
       overrides.moveEntry ??
@@ -2234,6 +2235,7 @@ describe("writable file operations", () => {
         shareId,
         path,
         outcome: "success",
+        etag: 'W/"saved"',
       }));
     const loadText = vi.fn<ApiClient["text"]>(async (shareId, path) => ({
       shareId,

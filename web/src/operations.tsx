@@ -22,6 +22,7 @@ import {
   type DirectoryEntry,
   type EntryMetadata,
   type Session,
+  type TextSaveResult,
 } from "./api";
 import { CopyPathButton } from "./copy-path-button";
 import { isValidPathComponent } from "./virtual-path";
@@ -941,8 +942,9 @@ function EditorDialog({
           token,
           nextController.signal,
         );
+      let saved: TextSaveResult;
       try {
-        await write(csrfToken);
+        saved = await write(csrfToken);
       } catch (cause) {
         if (!(cause instanceof ApiError && cause.kind === "forbidden"))
           throw cause;
@@ -964,8 +966,9 @@ function EditorDialog({
           return;
         }
         onSessionRefreshed(refreshed);
-        await write(refreshed.csrfToken);
+        saved = await write(refreshed.csrfToken);
       }
+      setMetadata({ ...metadata, etag: saved.etag });
       setInitialText(text);
       onChanged(operation);
     } catch (cause) {
