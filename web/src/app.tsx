@@ -153,6 +153,7 @@ function pickPreferences(
   }
   if (update.theme !== undefined) picked.theme = preferences.theme;
   if (update.autosave !== undefined) picked.autosave = preferences.autosave;
+  if (update.wrapLines !== undefined) picked.wrapLines = preferences.wrapLines;
   return picked;
 }
 
@@ -554,6 +555,7 @@ function AuthenticatedShell({
     showHiddenFiles,
     theme: themePreference,
     autosave,
+    wrapLines,
   } = session.preferences;
   const legacyCheckedUser = useRef<string>();
   const carryingTheme = useRef<ThemePreference>();
@@ -609,9 +611,13 @@ function AuthenticatedShell({
               ? update.autosave
                 ? "The editor now opens with autosave on."
                 : "The editor now opens with autosave off."
-              : update.showHiddenFiles
-                ? "Hidden files are now shown."
-                : "Hidden files are now hidden.",
+              : update.wrapLines !== undefined
+                ? update.wrapLines
+                  ? "The editor now opens with long lines wrapped."
+                  : "The editor now opens with long lines unwrapped."
+                : update.showHiddenFiles
+                  ? "Hidden files are now shown."
+                  : "Hidden files are now hidden.",
         );
       }
       return true;
@@ -633,7 +639,9 @@ function AuthenticatedShell({
             ? "Could not save your appearance choice. Try again."
             : update.autosave !== undefined
               ? "Could not save your autosave choice. Try again."
-              : "Could not save your hidden files choice. Try again.",
+              : update.wrapLines !== undefined
+                ? "Could not save your line wrapping choice. Try again."
+                : "Could not save your hidden files choice. Try again.",
         );
       }
       return false;
@@ -695,6 +703,10 @@ function AuthenticatedShell({
 
   const updateShowHiddenFiles = (value: boolean) => {
     void savePreferences({ showHiddenFiles: value });
+  };
+
+  const updateWrapLines = (value: boolean) => {
+    void savePreferences({ wrapLines: value });
   };
 
   const updateAutosave = (value: boolean) => {
@@ -890,10 +902,21 @@ function AuthenticatedShell({
                       />
                       Autosave in the text editor
                     </label>
+                    <label class="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={wrapLines}
+                        onChange={(event) =>
+                          updateWrapLines(event.currentTarget.checked)
+                        }
+                      />
+                      Wrap long lines in the text editor
+                    </label>
                   </div>
                   <p class="muted">
                     These settings follow your account across devices. You can
-                    still turn autosave off in the editor for one file.
+                    change autosave and line wrapping in the editor for one
+                    file.
                   </p>
                 </div>
                 <div class="settings-content" hidden={section !== "appearance"}>
@@ -959,6 +982,7 @@ function AuthenticatedShell({
             userId={session.user.id}
             showHiddenFiles={showHiddenFiles}
             autosave={autosave}
+            wrapLines={wrapLines}
             folderSizes={session.folderSizes === true}
             onSessionExpired={onSessionExpired}
             onSessionRefreshed={onSessionRefreshed}
@@ -1003,6 +1027,8 @@ interface DirectoryBrowserProps {
   showHiddenFiles: boolean;
   /** The account's autosave choice, which the editor starts from. */
   autosave: boolean;
+  /** The account's line wrapping choice, which the editor starts from. */
+  wrapLines: boolean;
   /** Whether the server computes folder sizes for the Size column. */
   folderSizes: boolean;
   onSessionExpired: () => void;
@@ -1020,6 +1046,7 @@ function DirectoryBrowser({
   userId,
   showHiddenFiles,
   autosave,
+  wrapLines,
   folderSizes: folderSizesEnabled,
   onSessionExpired,
   onSessionRefreshed,
@@ -2181,6 +2208,7 @@ function DirectoryBrowser({
           shareId={share.id}
           shareName={share.name}
           autosave={autosave}
+          wrapLines={wrapLines}
           onClose={() => setOperation(undefined)}
           onChanged={changed}
           onSessionExpired={onSessionExpired}

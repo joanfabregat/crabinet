@@ -1,5 +1,11 @@
 import { type JSX } from "preact";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "preact/hooks";
 import {
   Download,
   Archive,
@@ -448,6 +454,8 @@ interface OperationDialogProps {
   userId: string;
   /** The account's autosave choice, which the editor starts from. */
   autosave?: boolean;
+  /** The account's line wrapping choice, which the editor starts from. */
+  wrapLines?: boolean;
   onClose: () => void;
   onChanged: (operation: EntryOperation, destinationPath?: string) => void;
   onSessionExpired: () => void;
@@ -456,6 +464,12 @@ interface OperationDialogProps {
 
 /** How long the editor waits after the last edit before autosaving. */
 export const autosaveDelayMs = 2_000;
+
+/** Failed autosaves retried before autosave pauses and asks for a retry. */
+export const autosaveRetries = 4;
+
+/** The longest wait between two autosave retries. */
+export const autosaveRetryMaxMs = 30_000;
 
 export function OperationDialog(props: OperationDialogProps) {
   if (props.operation.kind === "compress" || props.operation.kind === "extract")
@@ -870,6 +884,119 @@ function countLines(text: string): number {
   return lines;
 }
 
+/** The zero-based line that holds `offset`. */
+function lineAt(text: string, offset: number): number {
+  let line = 0;
+  for (
+    let index = text.indexOf("\n");
+    index !== -1 && index < offset;
+    index = text.indexOf("\n", index + 1)
+  )
+    line += 1;
+  return line;
+}
+
+/**
+ * The indentation the file already uses: a tab when most indented lines
+ * start with one, otherwise its narrowest run of spaces, two by default.
+ */
+export function detectIndent(text: string): string {
+  let tabs = 0;
+  let spaced = 0;
+  let narrowest = Infinity;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("\t")) tabs += 1;
+    else {
+      const spaces = /^ +(?=\S)/.exec(line)?.[0].length;
+      if (spaces === undefined) continue;
+      spaced += 1;
+      narrowest = Math.min(narrowest, spaces);
+    }
+  }
+  if (tabs > spaced) return "\t";
+  return " ".repeat(narrowest >= 2 && narrowest <= 8 ? narrowest : 2);
+}
+
+export interface IndentEdit {
+  start: number;
+  end: number;
+  replacement: string;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
+/**
+ * What Tab or Shift+Tab does to `text` with the given selection. Tab inside
+ * one line inserts `unit`; Tab across lines and Shift+Tab work on whole lines.
+ */
+export function indentEdit(
+  text: string,
+  start: number,
+  end: number,
+  unit: string,
+  outdent: boolean,
+): IndentEdit {
+  const selected = text.slice(start, end);
+  if (!outdent && !selected.includes("\n")) {
+    const caret = start + unit.length;
+    return {
+      start,
+      end,
+      replacement: unit,
+      selectionStart: caret,
+      selectionEnd: caret,
+    };
+  }
+  const first = text.lastIndexOf("\n", start - 1) + 1;
+  // A selection that ends at the start of a line leaves that line alone.
+  const lastEnd = end > start && text[end - 1] === "\n" ? end - 1 : end;
+  const lineEnd = text.indexOf("\n", lastEnd);
+  const last = lineEnd === -1 ? text.length : lineEnd;
+  const lines = text.slice(first, last).split("\n");
+  const changes = lines.map((line) => {
+    if (!outdent) return line === "" ? 0 : unit.length;
+    if (line.startsWith(unit)) return -unit.length;
+    if (line.startsWith("\t")) return -1;
+    return -Math.min(/^ */.exec(line)![0].length, unit.length);
+  });
+  const replacement = lines
+    .map((line, index) =>
+      changes[index]! > 0 ? unit + line : line.slice(-changes[index]!),
+    )
+    .join("\n");
+  const total = changes.reduce((sum, change) => sum + change, 0);
+  return {
+    start: first,
+    end: last,
+    replacement,
+    selectionStart: Math.max(first, start + changes[0]!),
+    selectionEnd: Math.max(first, end + total),
+  };
+}
+
+/**
+ * Replaces part of a textarea's value through the browser's editing
+ * commands, so undo still works, falling back to a plain replacement.
+ */
+function replaceText(textarea: HTMLTextAreaElement, edit: IndentEdit): void {
+  textarea.setSelectionRange(edit.start, edit.end);
+  const inserted =
+    typeof document.execCommand === "function" &&
+    document.execCommand("insertText", false, edit.replacement);
+  if (!inserted) {
+    textarea.setRangeText(edit.replacement, edit.start, edit.end);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  textarea.setSelectionRange(edit.selectionStart, edit.selectionEnd);
+}
+
+/** Whether a failed save may succeed if tried again unchanged. */
+function isTransient(cause: unknown): boolean {
+  return (
+    cause instanceof ApiError && (cause.kind === "network" || cause.retryable)
+  );
+}
+
 function EditorDialog({
   api,
   csrfToken,
@@ -877,6 +1004,7 @@ function EditorDialog({
   shareId,
   userId,
   autosave: autosaveDefault = false,
+  wrapLines: wrapDefault = false,
   onClose,
   onChanged,
   onSessionExpired,
@@ -895,9 +1023,20 @@ function EditorDialog({
   // Starts from the account setting; turning it off here lasts only until
   // the editor closes.
   const [autosave, setAutosave] = useState(autosaveDefault);
+  // Like autosave, the account setting is only where the editor starts.
+  const [wrap, setWrap] = useState(wrapDefault);
+  // Autosaves that failed in a row on errors worth retrying.
+  const [failedAutosaves, setFailedAutosaves] = useState(0);
+  const [caretLine, setCaretLine] = useState(0);
+  // Each line's rendered height while wrapping; one row each otherwise.
+  const [lineHeights, setLineHeights] = useState<number[]>();
   const controller = useRef<AbortController>();
   const editor = useRef<HTMLTextAreaElement>(null);
   const gutter = useRef<HTMLPreElement>(null);
+  const measure = useRef<HTMLDivElement>(null);
+  const currentLine = useRef<HTMLDivElement>(null);
+  const firstToggle = useRef<HTMLInputElement>(null);
+  const indentUnit = useRef("  ");
   const savingNow = useRef(false);
   const savedOnce = useRef(false);
   const dirty = text !== initialText;
@@ -909,6 +1048,79 @@ function EditorDialog({
     () => Array.from({ length: lineCount }, (_, line) => line + 1).join("\n"),
     [lineCount],
   );
+
+  const followCaret = () => {
+    const textarea = editor.current;
+    if (textarea) setCaretLine(lineAt(textarea.value, textarea.selectionStart));
+  };
+
+  /** Moves the current-line band to the caret's line at the scroll offset. */
+  const placeCurrentLine = () => {
+    const textarea = editor.current;
+    const band = currentLine.current;
+    if (!textarea || !band) return;
+    const style = getComputedStyle(textarea);
+    const row = parseFloat(style.lineHeight) || 21;
+    const top =
+      parseFloat(style.paddingTop) +
+      (lineHeights
+        ? lineHeights
+            .slice(0, caretLine)
+            .reduce((sum, height) => sum + height, 0)
+        : caretLine * row) -
+      textarea.scrollTop;
+    band.style.top = `${top}px`;
+    band.style.height = `${lineHeights?.[caretLine] ?? row}px`;
+  };
+
+  useEffect(() => {
+    // Arrow keys and clicks move the caret without an input event.
+    const changed = () => {
+      if (document.activeElement === editor.current) followCaret();
+    };
+    document.addEventListener("selectionchange", changed);
+    return () => document.removeEventListener("selectionchange", changed);
+  }, []);
+
+  // A wrapped line is as tall as the rows it takes, so the gutter copies
+  // each height from a hidden copy of the text laid out at the same width.
+  useLayoutEffect(() => {
+    const textarea = editor.current;
+    const copy = measure.current;
+    if (!wrap || !textarea || !copy) {
+      setLineHeights(undefined);
+      return;
+    }
+    const layout = () => {
+      const style = getComputedStyle(textarea);
+      copy.style.width = `${
+        textarea.clientWidth -
+        parseFloat(style.paddingLeft) -
+        parseFloat(style.paddingRight)
+      }px`;
+      copy.replaceChildren(
+        ...textarea.value.split("\n").map((line) => {
+          const row = document.createElement("div");
+          // An empty line still takes one row.
+          row.textContent = line || " ";
+          return row;
+        }),
+      );
+      const heights = Array.from(
+        copy.children,
+        (row) => (row as HTMLElement).offsetHeight,
+      );
+      copy.replaceChildren();
+      setLineHeights(heights);
+    };
+    layout();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(layout);
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [wrap, text, loading]);
+
+  useLayoutEffect(placeCurrentLine);
 
   const load = () => {
     controller.current?.abort();
@@ -934,6 +1146,7 @@ function EditorDialog({
         setMetadata(nextMetadata);
         setText(document.text);
         setInitialText(document.text);
+        indentUnit.current = detectIndent(document.text);
         requestAnimationFrame(() => editor.current?.focus());
       } catch (cause) {
         if (isUnauthorized(cause)) onSessionExpired();
@@ -1011,6 +1224,7 @@ function EditorDialog({
       // Edits typed during an autosave stay unsaved and start the next one.
       setInitialText(snapshot);
       savedOnce.current = true;
+      setFailedAutosaves(0);
       return true;
     } catch (cause) {
       if (isUnauthorized(cause))
@@ -1023,7 +1237,17 @@ function EditorDialog({
         setError(
           "Save was denied with the current access. Your edits are still here. Retry save or contact an administrator.",
         );
-      else if (!isAborted(cause)) setError(operationError(cause));
+      else if (
+        mode === "auto" &&
+        isTransient(cause) &&
+        failedAutosaves < autosaveRetries
+      )
+        // Autosave tries again on its own, waiting longer each time.
+        setFailedAutosaves(failedAutosaves + 1);
+      else if (!isAborted(cause)) {
+        setFailedAutosaves(0);
+        setError(operationError(cause));
+      }
       return false;
     } finally {
       savingNow.current = false;
@@ -1035,10 +1259,51 @@ function EditorDialog({
     if (!autosave || !dirty || saving || autosavePaused || !metadata) return;
     const timer = window.setTimeout(
       () => void persist(text, "auto"),
-      autosaveDelayMs,
+      Math.min(autosaveDelayMs * 2 ** failedAutosaves, autosaveRetryMaxMs),
     );
     return () => window.clearTimeout(timer);
-  }, [autosave, text, initialText, saving, autosavePaused, metadata]);
+  }, [
+    autosave,
+    text,
+    initialText,
+    saving,
+    autosavePaused,
+    metadata,
+    failedAutosaves,
+  ]);
+
+  const indent = (event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Escape") {
+      // Tab indents here, so Escape is the keyboard's way out of the text;
+      // a second Escape closes the editor.
+      event.preventDefault();
+      event.stopPropagation();
+      firstToggle.current?.focus();
+      return;
+    }
+    if (
+      event.key !== "Tab" ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.isComposing
+    )
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    const textarea = event.currentTarget;
+    replaceText(
+      textarea,
+      indentEdit(
+        textarea.value,
+        textarea.selectionStart,
+        textarea.selectionEnd,
+        indentUnit.current,
+        event.shiftKey,
+      ),
+    );
+    followCaret();
+  };
 
   /** Saves and closes; the listing refreshes to show the new version. */
   const save = async () => {
@@ -1105,43 +1370,91 @@ function EditorDialog({
             </div>
           )}
           <label for="text-editor">UTF-8 text content</label>
-          <div class="editor-surface">
+          <div
+            class={wrap ? "editor-surface editor-wrapping" : "editor-surface"}
+          >
+            <div
+              ref={currentLine}
+              class="editor-current-line"
+              aria-hidden="true"
+            />
             <pre ref={gutter} class="editor-gutter" aria-hidden="true">
-              {lineNumbers}
+              {lineHeights
+                ? lineHeights.map((height, line) => (
+                    <div key={line} style={{ height: `${height}px` }}>
+                      {line + 1}
+                    </div>
+                  ))
+                : lineNumbers}
             </pre>
-            {/* Lines never wrap, so each one stays level with its number. */}
             <textarea
               ref={editor}
               id="text-editor"
               value={text}
               disabled={saving === "closing"}
               spellcheck={false}
-              wrap="off"
-              onInput={(event) => setText(event.currentTarget.value)}
+              wrap={wrap ? "soft" : "off"}
+              aria-describedby="text-editor-keys"
+              onInput={(event) => {
+                setText(event.currentTarget.value);
+                followCaret();
+              }}
+              onKeyDown={indent}
+              onFocus={followCaret}
               onScroll={(event) => {
                 if (gutter.current)
                   gutter.current.scrollTop = event.currentTarget.scrollTop;
+                placeCurrentLine();
               }}
             />
+            <div ref={measure} class="editor-measure" aria-hidden="true" />
           </div>
+          <p id="text-editor-keys" class="sr-only">
+            Tab indents and Shift+Tab outdents. Press Escape to leave the text.
+          </p>
           <div class="editor-footer">
             <p class="editor-status" aria-live="polite">
               {saving
                 ? "Saving…"
                 : !dirty
                   ? "All changes saved"
-                  : autosave && autosavePaused
-                    ? "Unsaved changes. Autosave is paused."
-                    : "Unsaved changes"}
+                  : autosave && failedAutosaves > 0
+                    ? "Could not save. Retrying…"
+                    : autosave && autosavePaused
+                      ? "Unsaved changes. Autosave is paused."
+                      : "Unsaved changes"}
+              {autosave && error !== undefined && dirty && !saving && (
+                <>
+                  {" "}
+                  <button
+                    class="text-button"
+                    type="button"
+                    onClick={() => void persist(text, "auto")}
+                  >
+                    Retry now
+                  </button>
+                </>
+              )}
             </p>
-            <label class="settings-toggle">
-              <input
-                type="checkbox"
-                checked={autosave}
-                onChange={(event) => setAutosave(event.currentTarget.checked)}
-              />
-              Autosave
-            </label>
+            <div class="editor-toggles">
+              <label class="settings-toggle">
+                <input
+                  ref={firstToggle}
+                  type="checkbox"
+                  checked={wrap}
+                  onChange={(event) => setWrap(event.currentTarget.checked)}
+                />
+                Wrap lines
+              </label>
+              <label class="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={autosave}
+                  onChange={(event) => setAutosave(event.currentTarget.checked)}
+                />
+                Autosave
+              </label>
+            </div>
           </div>
           <div class="dialog-actions">
             <button

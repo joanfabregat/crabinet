@@ -82,7 +82,12 @@ describe("API client", () => {
   });
 
   it("saves display settings as a partial CSRF-protected update", async () => {
-    const saved = { showHiddenFiles: false, theme: "dark", autosave: true };
+    const saved = {
+      showHiddenFiles: false,
+      theme: "dark",
+      autosave: true,
+      wrapLines: false,
+    };
     const fetch = vi
       .fn<typeof globalThis.fetch>()
       .mockResolvedValue(Response.json(saved));
@@ -114,6 +119,15 @@ describe("API client", () => {
     [{ showHiddenFiles: true }],
     [{ showHiddenFiles: true, theme: "system" }],
     [{ showHiddenFiles: true, theme: "system", autosave: "true" }],
+    [{ showHiddenFiles: true, theme: "system", autosave: true }],
+    [
+      {
+        showHiddenFiles: true,
+        theme: "system",
+        autosave: true,
+        wrapLines: "false",
+      },
+    ],
   ])("rejects display settings %j that break the contract", async (value) => {
     const session = {
       user: { id: "u", username: "u", displayName: "U" },
@@ -409,6 +423,7 @@ describe("API client", () => {
             showHiddenFiles: true,
             theme: "system",
             autosave: true,
+            wrapLines: false,
           },
           csrfToken: "csrf",
         }),
@@ -518,6 +533,7 @@ describe("API client", () => {
         showHiddenFiles: true,
         theme: "system" as const,
         autosave: true,
+        wrapLines: false,
       },
       csrfToken: "fresh",
     };
@@ -1546,7 +1562,12 @@ describe("API client", () => {
     const base = {
       user: { id: "u", username: "u", displayName: "u" },
       shares: [],
-      preferences: { showHiddenFiles: false, theme: "system", autosave: true },
+      preferences: {
+        showHiddenFiles: false,
+        theme: "system",
+        autosave: true,
+        wrapLines: false,
+      },
       csrfToken: "csrf",
     };
     const fetch = vi

@@ -17,7 +17,7 @@ import {
 } from "./api";
 import { App } from "./app";
 import type { BrowserNavigation, BrowserRoute } from "./navigation";
-import { autosaveDelayMs } from "./operations";
+import { autosaveDelayMs, autosaveRetryMaxMs } from "./operations";
 
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
@@ -25,7 +25,12 @@ const session: Session = {
     { id: "read-only", name: "Reference", access: "read" },
     { id: "work", name: "Working files", access: "read-write" },
   ],
-  preferences: { showHiddenFiles: true, theme: "system", autosave: true },
+  preferences: {
+    showHiddenFiles: true,
+    theme: "system",
+    autosave: true,
+    wrapLines: false,
+  },
   csrfToken: "csrf-in-memory",
 };
 
@@ -689,6 +694,7 @@ describe("directory browser", () => {
         showHiddenFiles: false,
         theme: "system",
         autosave: true,
+        wrapLines: false,
       }),
     );
     expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
@@ -2280,6 +2286,78 @@ describe("writable file operations", () => {
       }
     });
 
+    it("retries a failed autosave with growing waits, then pauses with a retry", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const unreachable = new ApiError("network", "unreachable");
+        const saveText = vi
+          .fn<ApiClient["saveText"]>()
+          .mockRejectedValueOnce(unreachable)
+          .mockRejectedValueOnce(unreachable)
+          .mockRejectedValueOnce(unreachable)
+          .mockRejectedValueOnce(unreachable)
+          .mockRejectedValueOnce(unreachable)
+          .mockImplementation(async (shareId, path) => ({
+            shareId,
+            path,
+            outcome: "success",
+            etag: 'W/"saved"',
+          }));
+        render(
+          <App
+            api={fakeApi({
+              directory: vi.fn(async () => writablePage),
+              saveText,
+            })}
+            navigation={writableNavigation()}
+          />,
+        );
+
+        const editor = await openEditor();
+        fireEvent.input(editor, { target: { value: "draft" } });
+        await pause();
+        await waitFor(() => expect(saveText).toHaveBeenCalledTimes(1));
+        expect(
+          await screen.findByText("Could not save. Retrying…"),
+        ).toBeVisible();
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+        // Each retry waits twice as long as the one before, up to a cap.
+        for (const [wait, calls] of [
+          [4_000, 2],
+          [8_000, 3],
+          [16_000, 4],
+          [autosaveRetryMaxMs, 5],
+        ] as const) {
+          vi.advanceTimersByTime(wait - 1);
+          await Promise.resolve();
+          expect(saveText).toHaveBeenCalledTimes(calls - 1);
+          vi.advanceTimersByTime(1);
+          await waitFor(() => expect(saveText).toHaveBeenCalledTimes(calls));
+        }
+
+        expect(await screen.findByRole("alert")).toBeVisible();
+        expect(
+          screen.getByText("Unsaved changes. Autosave is paused.", {
+            exact: false,
+          }),
+        ).toBeVisible();
+        vi.advanceTimersByTime(autosaveRetryMaxMs * 2);
+        await Promise.resolve();
+        expect(saveText).toHaveBeenCalledTimes(5);
+
+        fireEvent.click(screen.getByRole("button", { name: "Retry now" }));
+        await waitFor(() => expect(saveText).toHaveBeenCalledTimes(6));
+        expect(await screen.findByText("All changes saved")).toBeVisible();
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("dialog", { name: "Edit notes.txt" }),
+        ).toBeVisible();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("pauses after a conflict instead of retrying", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
@@ -2348,6 +2426,34 @@ describe("writable file operations", () => {
     ).toBeVisible();
   });
 
+  it("saves the line wrapping choice to the account from Settings", async () => {
+    const account = accountPreferences();
+    render(
+      <App
+        api={fakeApi({ ...account.api })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    await openSettings("Files");
+    const toggle = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("checkbox", { name: "Wrap long lines in the text editor" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(account.api.updatePreferences).toHaveBeenCalledWith(
+        { wrapLines: true },
+        "csrf-in-memory",
+      ),
+    );
+    await waitFor(() => expect(account.saved.wrapLines).toBe(true));
+    expect(
+      await screen.findByText("The editor now opens with long lines wrapped."),
+    ).toBeVisible();
+  });
+
   it("numbers editor lines without wrapping them", async () => {
     render(
       <App
@@ -2384,6 +2490,91 @@ describe("writable file operations", () => {
     editor.scrollTop = 40;
     fireEvent.scroll(editor);
     expect(gutter.scrollTop).toBe(40);
+  });
+
+  it("wraps lines from the account setting and the editor's own toggle", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          session: vi.fn(async () => ({
+            ...session,
+            preferences: { ...session.preferences, wrapLines: true },
+          })),
+          text: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            text: "one\ntwo\nthree",
+            size: 13,
+            mimeType: "text/plain",
+            etag: '"content"',
+          })),
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
+    const editor = await screen.findByLabelText("UTF-8 text content");
+    const gutter = editor.parentElement!.querySelector(".editor-gutter")!;
+    const toggle = screen.getByRole("checkbox", { name: "Wrap lines" });
+    expect(toggle).toBeChecked();
+    expect(editor).toHaveAttribute("wrap", "soft");
+    // Each number gets its own row, as tall as its line once wrapped.
+    expect(gutter.children).toHaveLength(3);
+
+    fireEvent.click(toggle);
+    expect(editor).toHaveAttribute("wrap", "off");
+    expect(gutter.children).toHaveLength(0);
+    expect(gutter.textContent).toBe("1\n2\n3");
+  });
+
+  it("indents with Tab and leaves the text with Escape", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          text: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            text: "fn main() {\n    body\n}",
+            size: 22,
+            mimeType: "text/plain",
+            etag: '"content"',
+          })),
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
+    const editor = (await screen.findByLabelText(
+      "UTF-8 text content",
+    )) as HTMLTextAreaElement;
+    expect(editor).toHaveAccessibleDescription(
+      "Tab indents and Shift+Tab outdents. Press Escape to leave the text.",
+    );
+
+    // The file indents by four spaces, so Tab does too.
+    editor.focus();
+    editor.setSelectionRange(0, editor.value.length);
+    fireEvent.keyDown(editor, { key: "Tab" });
+    expect(editor).toHaveValue("    fn main() {\n        body\n    }");
+    expect(editor).toHaveFocus();
+    fireEvent.keyDown(editor, { key: "Tab", shiftKey: true });
+    expect(editor).toHaveValue("fn main() {\n    body\n}");
+
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(screen.getByRole("checkbox", { name: "Wrap lines" })).toHaveFocus();
+    expect(
+      screen.getByRole("dialog", { name: "Edit notes.txt" }),
+    ).toBeVisible();
   });
 
   it("keeps edits explicit and refuses to hide a concurrent-write conflict", async () => {
