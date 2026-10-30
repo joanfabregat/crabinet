@@ -205,6 +205,11 @@ export interface TrashResult extends MutationResult {
   trashId: string;
 }
 
+export interface TextSaveResult extends MutationResult {
+  /** The saved file's validator, for the next save without a metadata read. */
+  etag: string;
+}
+
 export type UploadOutcomeKind =
   | "created"
   | "replaced"
@@ -461,7 +466,7 @@ export interface ApiClient {
     etag: string,
     csrfToken: string,
     signal?: AbortSignal,
-  ): Promise<MutationResult>;
+  ): Promise<TextSaveResult>;
   moveEntry(
     shareId: string,
     source: string,
@@ -850,7 +855,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         path,
       ),
     saveText: async (shareId, path, text, etag, csrfToken, signal) =>
-      parseMutationResult(
+      parseTextSaveResult(
         await request<unknown>(fileApiUrl(shareId, path, "text"), {
           method: "PUT",
           signal,
@@ -1841,6 +1846,17 @@ function parseTrashResult(
   if (!isRecord(value) || typeof value.trashId !== "string" || !value.trashId)
     throw invalidResponse();
   return value as unknown as TrashResult;
+}
+
+function parseTextSaveResult(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): TextSaveResult {
+  parseMutationResult(value, expectedShareId, expectedPath);
+  if (!isRecord(value) || typeof value.etag !== "string" || !value.etag)
+    throw invalidResponse();
+  return value as unknown as TextSaveResult;
 }
 
 function parseEmptyTrashResult(

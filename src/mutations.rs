@@ -391,6 +391,15 @@ struct MutationResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TextSavedResponse {
+    share_id: String,
+    path: String,
+    outcome: &'static str,
+    etag: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TrashedResponse {
     share_id: String,
     path: String,
@@ -667,14 +676,27 @@ async fn save_text_inner(
             .map_err(Rejection::from)
     })
     .await?;
-    finish_mutation(
-        identity,
-        &share_id,
-        &path,
-        "save_text",
-        result,
+    let replacement = result?;
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation = "save_text",
+        path = %path,
+        outcome = "success"
+    );
+    // The new validator lets the editor save again without re-reading
+    // metadata, which could pick up a concurrent writer's version.
+    let etag = state.browse().version_tag(&share_id, &path, replacement);
+    Ok(inert_json(
         StatusCode::OK,
-    )
+        TextSavedResponse {
+            share_id: share_id.to_string(),
+            path: path.to_string(),
+            outcome: "success",
+            etag,
+        },
+    ))
 }
 
 async fn move_entry(
@@ -1456,7 +1478,7 @@ fn publish_staged(
             };
             let result = checked.and_then(|()| {
                 match upload.expected {
-                    Some(expected) => upload.pending.publish_replacement(expected),
+                    Some(expected) => upload.pending.publish_replacement(expected).map(drop),
                     None => upload.pending.publish_new(),
                 }
                 .map_err(Rejection::from)
@@ -2186,10 +2208,32 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        let saved = json_body(response).await;
+        let saved_etag = saved["etag"].as_str().expect("saved etag").to_owned();
+        assert_eq!(saved_etag, metadata_etag(&fixture, "existing.txt").await);
         assert_eq!(
             fs::read(fixture.root.path().join("existing.txt")).unwrap(),
             b"updated"
         );
+
+        // The returned validator is enough for a second save in a row.
+        let again = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            request(&saved_etag, b"again"),
+        )
+        .await;
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_eq!(
+            fs::read(fixture.root.path().join("existing.txt")).unwrap(),
+            b"again"
+        );
+        let saved_etag = json_body(again).await["etag"]
+            .as_str()
+            .expect("saved etag")
+            .to_owned();
+        assert_eq!(saved_etag, metadata_etag(&fixture, "existing.txt").await);
 
         let stale = send(
             &fixture.app,
@@ -2217,7 +2261,7 @@ mod tests {
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(
             fs::read(fixture.root.path().join("existing.txt")).unwrap(),
-            b"updated"
+            b"again"
         );
     }
 
