@@ -1950,6 +1950,12 @@ html.preview-fullscreen-open body {
   font-weight: 650;
 }
 
+.settings-toggles {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+
 .settings-toggle input {
   accent-color: var(--accent);
   height: 1rem;

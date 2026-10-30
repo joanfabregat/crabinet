@@ -869,26 +869,28 @@ function AuthenticatedShell({
                 </div>
                 <div class="settings-content" hidden={section !== "files"}>
                   <h3>Files</h3>
-                  <label class="settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={showHiddenFiles}
-                      onChange={(event) =>
-                        updateShowHiddenFiles(event.currentTarget.checked)
-                      }
-                    />
-                    Show hidden files
-                  </label>
-                  <label class="settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={autosave}
-                      onChange={(event) =>
-                        updateAutosave(event.currentTarget.checked)
-                      }
-                    />
-                    Autosave in the text editor
-                  </label>
+                  <div class="settings-toggles">
+                    <label class="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={showHiddenFiles}
+                        onChange={(event) =>
+                          updateShowHiddenFiles(event.currentTarget.checked)
+                        }
+                      />
+                      Show hidden files
+                    </label>
+                    <label class="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={autosave}
+                        onChange={(event) =>
+                          updateAutosave(event.currentTarget.checked)
+                        }
+                      />
+                      Autosave in the text editor
+                    </label>
+                  </div>
                   <p class="muted">
                     These settings follow your account across devices. You can
                     still turn autosave off in the editor for one file.
