@@ -1956,9 +1956,13 @@ html.preview-fullscreen-open body {
   justify-items: start;
 }
 
+/* A checkbox drops the text field's minimum height and padding. */
 .settings-toggle input {
   accent-color: var(--accent);
   height: 1rem;
+  margin: 0;
+  min-height: 0;
+  padding: 0;
   width: 1rem;
 }
 
@@ -2540,6 +2544,8 @@ html.preview-fullscreen-open body {
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
   justify-content: space-between;
+  /* Sits closer to the text than the form's other rows. */
+  margin-top: -0.45rem;
 }
 
 .editor-status,
