@@ -1941,7 +1941,7 @@ html.preview-fullscreen-open body {
   min-width: 0;
 }
 
-.hidden-files-toggle {
+.settings-toggle {
   align-items: center;
   cursor: pointer;
   display: inline-flex;
@@ -1950,7 +1950,7 @@ html.preview-fullscreen-open body {
   font-weight: 650;
 }
 
-.hidden-files-toggle input {
+.settings-toggle input {
   accent-color: var(--accent);
   height: 1rem;
   width: 1rem;
@@ -2526,6 +2526,14 @@ html.preview-fullscreen-open body {
 
 #text-editor:focus-visible {
   outline: none;
+}
+
+.editor-footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: space-between;
 }
 
 .editor-status,

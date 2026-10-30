@@ -28,7 +28,7 @@ vi.mock("./pdf-preview", () => ({
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
   shares: [{ id: "docs", name: "Documents", access: "read" }],
-  preferences: { showHiddenFiles: true, theme: "system" },
+  preferences: { showHiddenFiles: true, theme: "system", autosave: true },
   csrfToken: "memory-only-csrf",
 };
 

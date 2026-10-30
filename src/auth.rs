@@ -50,7 +50,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SESSION_COOKIE: &str = "__Host-crabinet_session";
 const TOKEN_BYTES: usize = 32;
-const SESSION_SCHEMA_VERSION: i64 = 5;
+const SESSION_SCHEMA_VERSION: i64 = 6;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 const MAX_RATE_LIMIT_KEYS: usize = 4_096;
 const MAX_USERNAME_BYTES: usize = 64;
@@ -374,6 +374,9 @@ impl ThemePreference {
 struct DisplayPreferences {
     show_hidden_files: bool,
     theme: ThemePreference,
+    /// Whether the text editor opens with autosave on; the editor can still
+    /// turn it off for one session.
+    autosave: bool,
 }
 
 impl Default for DisplayPreferences {
@@ -381,6 +384,7 @@ impl Default for DisplayPreferences {
         Self {
             show_hidden_files: false,
             theme: ThemePreference::System,
+            autosave: true,
         }
     }
 }
@@ -393,6 +397,8 @@ struct DisplayPreferencesUpdate {
     show_hidden_files: Option<bool>,
     #[serde(default, deserialize_with = "present_value")]
     theme: Option<ThemePreference>,
+    #[serde(default, deserialize_with = "present_value")]
+    autosave: Option<bool>,
 }
 
 fn present_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -1029,13 +1035,15 @@ fn read_display_preferences(
 ) -> Result<DisplayPreferences, rusqlite::Error> {
     let saved = connection
         .query_row(
-            "SELECT show_hidden_files, theme FROM user_preferences WHERE username = ?1",
+            "SELECT show_hidden_files, theme, autosave FROM user_preferences
+             WHERE username = ?1",
             params![username],
             |row| {
                 let theme: String = row.get(1)?;
                 Ok(DisplayPreferences {
                     show_hidden_files: row.get(0)?,
                     theme: ThemePreference::from_column(&theme).unwrap_or_default(),
+                    autosave: row.get(2)?,
                 })
             },
         )
@@ -1051,7 +1059,7 @@ fn delete_default_preferences(
     connection.execute(
         "DELETE FROM user_preferences
          WHERE username = ?1 AND default_share_id = '' AND show_hidden_files = 0
-           AND theme = 'system'",
+           AND theme = 'system' AND autosave = 1",
         params![username],
     )?;
     Ok(())
@@ -1172,6 +1180,15 @@ impl SessionStore {
                  COMMIT;",
             )?;
         }
+        if version < 6 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE user_preferences
+                   ADD COLUMN autosave INTEGER NOT NULL DEFAULT 1;
+                 PRAGMA user_version = 6;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -1279,16 +1296,22 @@ impl SessionStore {
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
             transaction.execute(
+                // A new row takes the defaults for every field the update
+                // leaves out.
                 "INSERT INTO user_preferences
-                   (username, default_share_id, default_path, show_hidden_files, theme)
-                 VALUES (?1, '', '', COALESCE(?2, 1), COALESCE(?3, 'system'))
+                   (username, default_share_id, default_path, show_hidden_files, theme,
+                    autosave)
+                 VALUES (?1, '', '', COALESCE(?2, 0), COALESCE(?3, 'system'),
+                         COALESCE(?4, 1))
                  ON CONFLICT(username) DO UPDATE SET
                    show_hidden_files = COALESCE(?2, show_hidden_files),
-                   theme = COALESCE(?3, theme)",
+                   theme = COALESCE(?3, theme),
+                   autosave = COALESCE(?4, autosave)",
                 params![
                     username,
                     update.show_hidden_files,
-                    update.theme.map(ThemePreference::as_str)
+                    update.theme.map(ThemePreference::as_str),
+                    update.autosave
                 ],
             )?;
             let saved = read_display_preferences(&transaction, &username)?;
@@ -2505,7 +2528,7 @@ mod tests {
 
         assert_eq!(
             session_body(alice_cookie.clone()).await["preferences"],
-            serde_json::json!({"showHiddenFiles": false, "theme": "system"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "system", "autosave": true})
         );
 
         let forbidden = app
@@ -2521,6 +2544,8 @@ mod tests {
             r#"{"theme":null}"#,
             r#"{"showHiddenFiles":"false"}"#,
             r#"{"showHiddenFiles":null}"#,
+            r#"{"autosave":null}"#,
+            r#"{"autosave":"false"}"#,
             r#"{"theme":"dark","defaultFolder":null}"#,
             r#"{"fontSize":12}"#,
             "not json",
@@ -2537,7 +2562,7 @@ mod tests {
         }
         assert_eq!(
             session_body(alice_cookie.clone()).await["preferences"],
-            serde_json::json!({"showHiddenFiles": false, "theme": "system"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "system", "autosave": true})
         );
 
         let folder = app
@@ -2562,7 +2587,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             body,
-            serde_json::json!({"showHiddenFiles": false, "theme": "dark"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "dark", "autosave": true})
         );
 
         let saved = app
@@ -2574,20 +2599,20 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             body,
-            serde_json::json!({"showHiddenFiles": true, "theme": "dark"})
+            serde_json::json!({"showHiddenFiles": true, "theme": "dark", "autosave": true})
         );
 
         let session = session_body(alice_cookie.clone()).await;
         assert_eq!(
             session["preferences"],
-            serde_json::json!({"showHiddenFiles": true, "theme": "dark"})
+            serde_json::json!({"showHiddenFiles": true, "theme": "dark", "autosave": true})
         );
         assert_eq!(session["defaultFolder"]["shareId"], "documents");
 
         let (bob_cookie, _) = login_as(&app, "Bob", "bob password").await;
         assert_eq!(
             session_body(bob_cookie).await["preferences"],
-            serde_json::json!({"showHiddenFiles": false, "theme": "system"})
+            serde_json::json!({"showHiddenFiles": false, "theme": "system", "autosave": true})
         );
     }
 
@@ -2631,6 +2656,7 @@ mod tests {
             DisplayPreferences {
                 show_hidden_files: false,
                 theme: ThemePreference::Light,
+                autosave: true,
             }
         );
         assert_eq!(store.default_folder("Alice").await.unwrap(), Some(folder));
@@ -2659,6 +2685,7 @@ mod tests {
             DisplayPreferences {
                 show_hidden_files: true,
                 theme: ThemePreference::Light,
+                autosave: true,
             }
         );
 
@@ -2669,6 +2696,7 @@ mod tests {
             DisplayPreferences {
                 show_hidden_files: true,
                 theme: ThemePreference::Light,
+                autosave: true,
             }
         );
         assert_eq!(row_count(), 1);
@@ -2679,6 +2707,7 @@ mod tests {
                 DisplayPreferencesUpdate {
                     show_hidden_files: Some(false),
                     theme: Some(ThemePreference::System),
+                    autosave: Some(true),
                 },
             )
             .await
@@ -2688,6 +2717,145 @@ mod tests {
         assert_eq!(
             store.display_preferences("Bob").await.unwrap(),
             DisplayPreferences::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn first_display_change_keeps_every_other_default() {
+        let auth = test_auth(1, 5);
+        let store = &auth.service.inner.store;
+
+        // Bob has no saved row yet, so this update creates one.
+        let saved = store
+            .update_display_preferences(
+                "Bob",
+                DisplayPreferencesUpdate {
+                    theme: Some(ThemePreference::Dark),
+                    ..DisplayPreferencesUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            DisplayPreferences {
+                theme: ThemePreference::Dark,
+                ..DisplayPreferences::default()
+            }
+        );
+
+        let saved = store
+            .update_display_preferences(
+                "Bob",
+                DisplayPreferencesUpdate {
+                    autosave: Some(false),
+                    ..DisplayPreferencesUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            DisplayPreferences {
+                theme: ThemePreference::Dark,
+                autosave: false,
+                ..DisplayPreferences::default()
+            }
+        );
+        assert_eq!(store.display_preferences("Bob").await.unwrap(), saved);
+
+        let reset = store
+            .update_display_preferences(
+                "Bob",
+                DisplayPreferencesUpdate {
+                    theme: Some(ThemePreference::System),
+                    autosave: Some(true),
+                    ..DisplayPreferencesUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset, DisplayPreferences::default());
+        let rows: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM user_preferences WHERE username = 'Bob'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn version_five_database_gains_autosave_and_keeps_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                   session_key BLOB PRIMARY KEY NOT NULL CHECK(length(session_key) = 32),
+                   username TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_seen_at INTEGER NOT NULL,
+                   expires_at INTEGER NOT NULL,
+                   picture_url TEXT
+                 ) WITHOUT ROWID;
+                 CREATE INDEX sessions_expiration ON sessions(expires_at);
+                 CREATE TABLE user_preferences (
+                   username TEXT PRIMARY KEY NOT NULL,
+                   default_share_id TEXT NOT NULL,
+                   default_path TEXT NOT NULL,
+                   show_hidden_files INTEGER NOT NULL DEFAULT 0,
+                   theme TEXT NOT NULL DEFAULT 'system'
+                     CHECK (theme IN ('system', 'light', 'dark'))
+                 ) WITHOUT ROWID;
+                 CREATE TABLE passkey_users (
+                   username TEXT PRIMARY KEY NOT NULL,
+                   user_handle BLOB NOT NULL UNIQUE CHECK(length(user_handle) = 16)
+                 ) WITHOUT ROWID;
+                 CREATE TABLE passkeys (
+                   id TEXT PRIMARY KEY NOT NULL,
+                   username TEXT NOT NULL,
+                   credential_id BLOB NOT NULL UNIQUE,
+                   name TEXT NOT NULL,
+                   credential_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   last_used_at INTEGER
+                 ) WITHOUT ROWID;
+                 CREATE INDEX passkeys_user ON passkeys(username);
+                 INSERT INTO user_preferences VALUES
+                   ('Alice', 'documents', 'nested', 1, 'dark');
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SessionStore::open(&path).unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            let version: i64 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, SESSION_SCHEMA_VERSION);
+        }
+        assert_eq!(
+            store.display_preferences("Alice").await.unwrap(),
+            DisplayPreferences {
+                show_hidden_files: true,
+                theme: ThemePreference::Dark,
+                autosave: true,
+            }
+        );
+        assert_eq!(
+            store.default_folder("Alice").await.unwrap(),
+            Some(DefaultFolder {
+                share_id: "documents".to_owned(),
+                path: "nested".to_owned(),
+            })
         );
     }
 
@@ -2739,7 +2907,7 @@ mod tests {
             let version: i64 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            assert_eq!(version, SESSION_SCHEMA_VERSION);
             let rejected = connection.execute(
                 "UPDATE user_preferences SET theme = 'sepia' WHERE username = 'Alice'",
                 [],

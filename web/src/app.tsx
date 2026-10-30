@@ -152,6 +152,7 @@ function pickPreferences(
     picked.showHiddenFiles = preferences.showHiddenFiles;
   }
   if (update.theme !== undefined) picked.theme = preferences.theme;
+  if (update.autosave !== undefined) picked.autosave = preferences.autosave;
   return picked;
 }
 
@@ -549,7 +550,11 @@ function AuthenticatedShell({
   const [passkeysVisible, setPasskeysVisible] = useState(false);
   const showToast = useToast();
   const [preferencesError, setPreferencesError] = useState<string>();
-  const { showHiddenFiles, theme: themePreference } = session.preferences;
+  const {
+    showHiddenFiles,
+    theme: themePreference,
+    autosave,
+  } = session.preferences;
   const legacyCheckedUser = useRef<string>();
   const carryingTheme = useRef<ThemePreference>();
   // Trash opened from a link has no share; the folder tree then starts from
@@ -600,9 +605,13 @@ function AuthenticatedShell({
         showToast(
           update.theme !== undefined
             ? "Appearance saved."
-            : update.showHiddenFiles
-              ? "Hidden files are now shown."
-              : "Hidden files are now hidden.",
+            : update.autosave !== undefined
+              ? update.autosave
+                ? "The editor now opens with autosave on."
+                : "The editor now opens with autosave off."
+              : update.showHiddenFiles
+                ? "Hidden files are now shown."
+                : "Hidden files are now hidden.",
         );
       }
       return true;
@@ -622,7 +631,9 @@ function AuthenticatedShell({
         setPreferencesError(
           update.theme !== undefined
             ? "Could not save your appearance choice. Try again."
-            : "Could not save your hidden files choice. Try again.",
+            : update.autosave !== undefined
+              ? "Could not save your autosave choice. Try again."
+              : "Could not save your hidden files choice. Try again.",
         );
       }
       return false;
@@ -684,6 +695,10 @@ function AuthenticatedShell({
 
   const updateShowHiddenFiles = (value: boolean) => {
     void savePreferences({ showHiddenFiles: value });
+  };
+
+  const updateAutosave = (value: boolean) => {
+    void savePreferences({ autosave: value });
   };
 
   const saveDefaultFolder = async (folder: DefaultFolder | null) => {
@@ -854,7 +869,7 @@ function AuthenticatedShell({
                 </div>
                 <div class="settings-content" hidden={section !== "files"}>
                   <h3>Files</h3>
-                  <label class="hidden-files-toggle">
+                  <label class="settings-toggle">
                     <input
                       type="checkbox"
                       checked={showHiddenFiles}
@@ -864,8 +879,19 @@ function AuthenticatedShell({
                     />
                     Show hidden files
                   </label>
+                  <label class="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={autosave}
+                      onChange={(event) =>
+                        updateAutosave(event.currentTarget.checked)
+                      }
+                    />
+                    Autosave in the text editor
+                  </label>
                   <p class="muted">
-                    This setting follows your account across devices.
+                    These settings follow your account across devices. You can
+                    still turn autosave off in the editor for one file.
                   </p>
                 </div>
                 <div class="settings-content" hidden={section !== "appearance"}>
@@ -930,6 +956,7 @@ function AuthenticatedShell({
             shares={session.shares}
             userId={session.user.id}
             showHiddenFiles={showHiddenFiles}
+            autosave={autosave}
             folderSizes={session.folderSizes === true}
             onSessionExpired={onSessionExpired}
             onSessionRefreshed={onSessionRefreshed}
@@ -972,6 +999,8 @@ interface DirectoryBrowserProps {
   shares: Share[];
   userId: string;
   showHiddenFiles: boolean;
+  /** The account's autosave choice, which the editor starts from. */
+  autosave: boolean;
   /** Whether the server computes folder sizes for the Size column. */
   folderSizes: boolean;
   onSessionExpired: () => void;
@@ -988,6 +1017,7 @@ function DirectoryBrowser({
   shares,
   userId,
   showHiddenFiles,
+  autosave,
   folderSizes: folderSizesEnabled,
   onSessionExpired,
   onSessionRefreshed,
@@ -2148,6 +2178,7 @@ function DirectoryBrowser({
           directory={route.path}
           shareId={share.id}
           shareName={share.name}
+          autosave={autosave}
           onClose={() => setOperation(undefined)}
           onChanged={changed}
           onSessionExpired={onSessionExpired}

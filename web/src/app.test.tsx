@@ -17,6 +17,7 @@ import {
 } from "./api";
 import { App } from "./app";
 import type { BrowserNavigation, BrowserRoute } from "./navigation";
+import { autosaveDelayMs } from "./operations";
 
 const session: Session = {
   user: { id: "u-1", username: "joan", displayName: "Joan" },
@@ -24,7 +25,7 @@ const session: Session = {
     { id: "read-only", name: "Reference", access: "read" },
     { id: "work", name: "Working files", access: "read-write" },
   ],
-  preferences: { showHiddenFiles: true, theme: "system" },
+  preferences: { showHiddenFiles: true, theme: "system", autosave: true },
   csrfToken: "csrf-in-memory",
 };
 
@@ -653,7 +654,10 @@ describe("directory browser", () => {
       within(dialog).getAllByText(
         "This setting follows your account across devices.",
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      within(dialog).getByText(/These settings follow your account/),
+    ).toBeInTheDocument();
     expect(
       await screen.findByRole("link", { name: ".secret.txt" }),
     ).toBeVisible();
@@ -684,6 +688,7 @@ describe("directory browser", () => {
       expect(account.saved).toEqual({
         showHiddenFiles: false,
         theme: "system",
+        autosave: true,
       }),
     );
     expect(window.localStorage.getItem("crabinet.showHiddenFiles.u-1")).toBe(
@@ -2082,6 +2087,265 @@ describe("writable file operations", () => {
       expect(screen.getByRole("heading", { name: "other.txt" })).toBeVisible(),
     );
     expect(navigation.visits).toEqual([]);
+  });
+
+  describe("editor autosave", () => {
+    const openEditor = async () => {
+      fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Edit notes.txt" }),
+      );
+      return screen.findByLabelText("UTF-8 text content");
+    };
+    const withPreferences = (preferences: Partial<UserPreferences>) =>
+      vi.fn(async () => ({
+        ...session,
+        preferences: { ...session.preferences, ...preferences },
+      }));
+    const pause = async () => {
+      vi.advanceTimersByTime(autosaveDelayMs);
+      await Promise.resolve();
+    };
+
+    it("saves after a pause, keeps typing open, and saves again with the new validator", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const saveText = vi.fn<ApiClient["saveText"]>(
+          async (shareId, path, _text, etag) => ({
+            shareId,
+            path,
+            outcome: "success",
+            etag: etag === 'W/"test"' ? 'W/"first"' : 'W/"second"',
+          }),
+        );
+        const confirm = vi.spyOn(window, "confirm");
+        render(
+          <App
+            api={fakeApi({
+              directory: vi.fn(async () => writablePage),
+              saveText,
+            })}
+            navigation={writableNavigation()}
+          />,
+        );
+
+        const editor = await openEditor();
+        expect(
+          screen.getByRole("checkbox", { name: "Autosave" }),
+        ).toBeChecked();
+        fireEvent.input(editor, { target: { value: "first draft" } });
+        expect(saveText).not.toHaveBeenCalled();
+        await pause();
+        await waitFor(() => expect(saveText).toHaveBeenCalledTimes(1));
+        expect(saveText).toHaveBeenLastCalledWith(
+          "work",
+          "projects/notes.txt",
+          "first draft",
+          'W/"test"',
+          "csrf-in-memory",
+          expect.any(AbortSignal),
+        );
+        expect(await screen.findByText("All changes saved")).toBeVisible();
+        expect(editor).toBeEnabled();
+
+        fireEvent.input(editor, { target: { value: "second draft" } });
+        await pause();
+        await waitFor(() => expect(saveText).toHaveBeenCalledTimes(2));
+        expect(saveText).toHaveBeenLastCalledWith(
+          "work",
+          "projects/notes.txt",
+          "second draft",
+          'W/"first"',
+          "csrf-in-memory",
+          expect.any(AbortSignal),
+        );
+        await screen.findByText("All changes saved");
+
+        // Everything is saved, so closing asks nothing.
+        fireEvent.click(screen.getByRole("button", { name: "Close" }));
+        await waitFor(() =>
+          expect(
+            screen.queryByRole("dialog", { name: "Edit notes.txt" }),
+          ).not.toBeInTheDocument(),
+        );
+        expect(confirm).not.toHaveBeenCalled();
+        confirm.mockRestore();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("saves pending edits when closing instead of discarding them", async () => {
+      const saveText = vi.fn<ApiClient["saveText"]>(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+        etag: 'W/"saved"',
+      }));
+      const confirm = vi.spyOn(window, "confirm");
+      render(
+        <App
+          api={fakeApi({
+            directory: vi.fn(async () => writablePage),
+            saveText,
+          })}
+          navigation={writableNavigation()}
+        />,
+      );
+
+      const editor = await openEditor();
+      fireEvent.input(editor, { target: { value: "closing draft" } });
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Edit notes.txt" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(saveText).toHaveBeenCalledTimes(1);
+      expect(saveText.mock.calls[0]?.[2]).toBe("closing draft");
+      expect(confirm).not.toHaveBeenCalled();
+      confirm.mockRestore();
+    });
+
+    it("turns off for one editor session without changing the account", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const saveText = vi.fn<ApiClient["saveText"]>();
+        const updatePreferences = vi.fn<ApiClient["updatePreferences"]>();
+        const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+        render(
+          <App
+            api={fakeApi({
+              directory: vi.fn(async () => writablePage),
+              saveText,
+              updatePreferences,
+            })}
+            navigation={writableNavigation()}
+          />,
+        );
+
+        const editor = await openEditor();
+        fireEvent.click(screen.getByRole("checkbox", { name: "Autosave" }));
+        fireEvent.input(editor, { target: { value: "manual only" } });
+        await pause();
+        await pause();
+        expect(saveText).not.toHaveBeenCalled();
+        expect(updatePreferences).not.toHaveBeenCalled();
+        expect(screen.getByText("Unsaved changes")).toBeVisible();
+
+        // Without autosave, closing asks before discarding.
+        fireEvent.click(screen.getByRole("button", { name: "Close" }));
+        expect(confirm).toHaveBeenCalledWith("Discard your unsaved changes?");
+        await waitFor(() =>
+          expect(
+            screen.queryByRole("dialog", { name: "Edit notes.txt" }),
+          ).not.toBeInTheDocument(),
+        );
+        confirm.mockRestore();
+
+        await openEditor();
+        expect(
+          screen.getByRole("checkbox", { name: "Autosave" }),
+        ).toBeChecked();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("starts off when the account turned it off", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const saveText = vi.fn<ApiClient["saveText"]>();
+        render(
+          <App
+            api={fakeApi({
+              session: withPreferences({ autosave: false }),
+              directory: vi.fn(async () => writablePage),
+              saveText,
+            })}
+            navigation={writableNavigation()}
+          />,
+        );
+
+        const editor = await openEditor();
+        expect(
+          screen.getByRole("checkbox", { name: "Autosave" }),
+        ).not.toBeChecked();
+        fireEvent.input(editor, { target: { value: "not yet" } });
+        await pause();
+        expect(saveText).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("pauses after a conflict instead of retrying", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const saveText = vi
+          .fn<ApiClient["saveText"]>()
+          .mockRejectedValue(
+            new ApiError("conflict", "stale", { status: 409 }),
+          );
+        render(
+          <App
+            api={fakeApi({
+              directory: vi.fn(async () => writablePage),
+              saveText,
+            })}
+            navigation={writableNavigation()}
+          />,
+        );
+
+        const editor = await openEditor();
+        fireEvent.input(editor, { target: { value: "draft" } });
+        await pause();
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+          "changed after you opened it",
+        );
+        expect(saveText).toHaveBeenCalledTimes(1);
+
+        fireEvent.input(editor, { target: { value: "draft, longer" } });
+        await pause();
+        await pause();
+        expect(saveText).toHaveBeenCalledTimes(1);
+        expect(
+          screen.getByText("Unsaved changes. Autosave is paused."),
+        ).toBeVisible();
+        expect(editor).toHaveValue("draft, longer");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("saves the autosave choice to the account from Settings", async () => {
+    const account = accountPreferences();
+    render(
+      <App
+        api={fakeApi({ ...account.api })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+
+    await openSettings("Files");
+    const toggle = within(
+      screen.getByRole("dialog", { name: "Settings" }),
+    ).getByRole("checkbox", { name: "Autosave in the text editor" });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(account.api.updatePreferences).toHaveBeenCalledWith(
+        { autosave: false },
+        "csrf-in-memory",
+      ),
+    );
+    await waitFor(() => expect(account.saved.autosave).toBe(false));
+    expect(
+      await screen.findByText("The editor now opens with autosave off."),
+    ).toBeVisible();
   });
 
   it("numbers editor lines without wrapping them", async () => {

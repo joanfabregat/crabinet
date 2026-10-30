@@ -77,11 +77,14 @@ export interface DefaultFolder {
 export interface UserPreferences {
   showHiddenFiles: boolean;
   theme: ThemePreference;
+  /** Whether the text editor opens with autosave on. */
+  autosave: boolean;
 }
 
 export const defaultUserPreferences: UserPreferences = {
   showHiddenFiles: false,
   theme: "system",
+  autosave: true,
 };
 
 export interface LoginCredentials {
@@ -727,7 +730,11 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
         body: JSON.stringify(update),
       });
       if (!isUserPreferences(result)) throw invalidResponse();
-      return { showHiddenFiles: result.showHiddenFiles, theme: result.theme };
+      return {
+        showHiddenFiles: result.showHiddenFiles,
+        theme: result.theme,
+        autosave: result.autosave,
+      };
     },
     directory: async (shareId, path, cursor, signal, showHidden = true) => {
       if (!isValidVirtualPath(path)) {
@@ -1502,6 +1509,7 @@ function parseSession(value: unknown): Session {
   session.preferences = {
     showHiddenFiles: value.preferences.showHiddenFiles,
     theme: value.preferences.theme,
+    autosave: value.preferences.autosave,
   };
   // Only avatar hosts allowed by the page CSP are rendered; anything else
   // falls back to no picture rather than attempting a blocked request.
@@ -1675,6 +1683,7 @@ function isUserPreferences(value: unknown): value is UserPreferences {
   return (
     isRecord(value) &&
     typeof value.showHiddenFiles === "boolean" &&
+    typeof value.autosave === "boolean" &&
     (value.theme === "system" ||
       value.theme === "light" ||
       value.theme === "dark")

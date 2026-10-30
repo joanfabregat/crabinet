@@ -446,11 +446,16 @@ interface OperationDialogProps {
   /** Labels the move picker's root; falls back to a generic label. */
   shareName?: string;
   userId: string;
+  /** The account's autosave choice, which the editor starts from. */
+  autosave?: boolean;
   onClose: () => void;
   onChanged: (operation: EntryOperation, destinationPath?: string) => void;
   onSessionExpired: () => void;
   onSessionRefreshed: (session: Session) => void;
 }
+
+/** How long the editor waits after the last edit before autosaving. */
+export const autosaveDelayMs = 2_000;
 
 export function OperationDialog(props: OperationDialogProps) {
   if (props.operation.kind === "compress" || props.operation.kind === "extract")
@@ -871,6 +876,7 @@ function EditorDialog({
   operation,
   shareId,
   userId,
+  autosave: autosaveDefault = false,
   onClose,
   onChanged,
   onSessionExpired,
@@ -881,13 +887,22 @@ function EditorDialog({
   const [initialText, setInitialText] = useState("");
   const [metadata, setMetadata] = useState<EntryMetadata>();
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  // An autosave leaves the text editable; a save that closes the editor
+  // locks it, so nothing typed meanwhile is lost.
+  const [saving, setSaving] = useState<"auto" | "closing">();
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string>();
+  // Starts from the account setting; turning it off here lasts only until
+  // the editor closes.
+  const [autosave, setAutosave] = useState(autosaveDefault);
   const controller = useRef<AbortController>();
   const editor = useRef<HTMLTextAreaElement>(null);
   const gutter = useRef<HTMLPreElement>(null);
+  const savingNow = useRef(false);
+  const savedOnce = useRef(false);
   const dirty = text !== initialText;
+  // A failed save keeps failing until the user acts, so autosave waits.
+  const autosavePaused = error !== undefined || conflict;
   const lineCount = countLines(text);
   // Rebuilt only when the count changes, not on every keystroke.
   const lineNumbers = useMemo(
@@ -944,11 +959,16 @@ function EditorDialog({
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
 
-  const save = async () => {
-    if (!metadata || saving || !dirty) return;
+  /** Saves `snapshot` and reports whether it was saved. */
+  const persist = async (
+    snapshot: string,
+    mode: "auto" | "closing",
+  ): Promise<boolean> => {
+    if (!metadata || savingNow.current) return false;
+    savingNow.current = true;
     const nextController = new AbortController();
     controller.current = nextController;
-    setSaving(true);
+    setSaving(mode);
     setError(undefined);
     setConflict(false);
     try {
@@ -956,7 +976,7 @@ function EditorDialog({
         api.saveText(
           shareId,
           operation.path,
-          text,
+          snapshot,
           metadata.etag,
           token,
           nextController.signal,
@@ -972,7 +992,7 @@ function EditorDialog({
           setError(
             "A different account is signed in. Return to your original account, then retry save. Your edits are still here.",
           );
-          return;
+          return false;
         }
         if (
           !refreshed.shares.some(
@@ -982,14 +1002,16 @@ function EditorDialog({
           setError(
             "Write access is unavailable for this folder. Your edits are still here to copy or retry after access is restored.",
           );
-          return;
+          return false;
         }
         onSessionRefreshed(refreshed);
         saved = await write(refreshed.csrfToken);
       }
       setMetadata({ ...metadata, etag: saved.etag });
-      setInitialText(text);
-      onChanged(operation);
+      // Edits typed during an autosave stay unsaved and start the next one.
+      setInitialText(snapshot);
+      savedOnce.current = true;
+      return true;
     } catch (cause) {
       if (isUnauthorized(cause))
         setError(
@@ -1002,14 +1024,38 @@ function EditorDialog({
           "Save was denied with the current access. Your edits are still here. Retry save or contact an administrator.",
         );
       else if (!isAborted(cause)) setError(operationError(cause));
+      return false;
     } finally {
-      setSaving(false);
+      savingNow.current = false;
+      setSaving(undefined);
     }
   };
 
-  const close = () => {
+  useEffect(() => {
+    if (!autosave || !dirty || saving || autosavePaused || !metadata) return;
+    const timer = window.setTimeout(
+      () => void persist(text, "auto"),
+      autosaveDelayMs,
+    );
+    return () => window.clearTimeout(timer);
+  }, [autosave, text, initialText, saving, autosavePaused, metadata]);
+
+  /** Saves and closes; the listing refreshes to show the new version. */
+  const save = async () => {
+    if (!dirty || saving) return;
+    if (await persist(text, "closing")) onChanged(operation);
+  };
+
+  const close = async () => {
     if (saving) return;
-    if (!dirty || window.confirm("Discard your unsaved changes?")) onClose();
+    if (dirty && autosave && !autosavePaused) {
+      // Closing is the end of the edit, so autosave saves what is pending.
+      if (await persist(text, "closing")) onChanged(operation);
+      return;
+    }
+    if (dirty && !window.confirm("Discard your unsaved changes?")) return;
+    if (savedOnce.current) onChanged(operation);
+    else onClose();
   };
 
   const reloadLatest = () => {
@@ -1023,8 +1069,8 @@ function EditorDialog({
   return (
     <Modal
       title={`Edit ${operation.entry.name}`}
-      onClose={close}
-      busy={saving}
+      onClose={() => void close()}
+      busy={saving === "closing"}
       wide
     >
       {loading ? (
@@ -1068,7 +1114,7 @@ function EditorDialog({
               ref={editor}
               id="text-editor"
               value={text}
-              disabled={saving}
+              disabled={saving === "closing"}
               spellcheck={false}
               wrap="off"
               onInput={(event) => setText(event.currentTarget.value)}
@@ -1078,27 +1124,39 @@ function EditorDialog({
               }}
             />
           </div>
-          <p class="editor-status" aria-live="polite">
-            {saving
-              ? "Saving…"
-              : dirty
-                ? "Unsaved changes"
-                : "All changes saved"}
-          </p>
+          <div class="editor-footer">
+            <p class="editor-status" aria-live="polite">
+              {saving
+                ? "Saving…"
+                : !dirty
+                  ? "All changes saved"
+                  : autosave && autosavePaused
+                    ? "Unsaved changes. Autosave is paused."
+                    : "Unsaved changes"}
+            </p>
+            <label class="settings-toggle">
+              <input
+                type="checkbox"
+                checked={autosave}
+                onChange={(event) => setAutosave(event.currentTarget.checked)}
+              />
+              Autosave
+            </label>
+          </div>
           <div class="dialog-actions">
             <button
               class="button button-secondary"
               type="button"
-              disabled={saving}
-              onClick={close}
+              disabled={saving === "closing"}
+              onClick={() => void close()}
             >
               Close
             </button>
             <button
               class="button button-primary"
               type="button"
-              disabled={!dirty || saving || conflict}
-              onClick={save}
+              disabled={!dirty || saving !== undefined || conflict}
+              onClick={() => void save()}
             >
               {error ? "Retry save" : "Save"}
             </button>

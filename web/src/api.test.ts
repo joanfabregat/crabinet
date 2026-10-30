@@ -82,7 +82,7 @@ describe("API client", () => {
   });
 
   it("saves display settings as a partial CSRF-protected update", async () => {
-    const saved = { showHiddenFiles: false, theme: "dark" };
+    const saved = { showHiddenFiles: false, theme: "dark", autosave: true };
     const fetch = vi
       .fn<typeof globalThis.fetch>()
       .mockResolvedValue(Response.json(saved));
@@ -112,6 +112,8 @@ describe("API client", () => {
     [{ showHiddenFiles: "true", theme: "system" }],
     [{ showHiddenFiles: true, theme: "sepia" }],
     [{ showHiddenFiles: true }],
+    [{ showHiddenFiles: true, theme: "system" }],
+    [{ showHiddenFiles: true, theme: "system", autosave: "true" }],
   ])("rejects display settings %j that break the contract", async (value) => {
     const session = {
       user: { id: "u", username: "u", displayName: "U" },
@@ -403,7 +405,11 @@ describe("API client", () => {
         Response.json({
           user: { id: "u", username: "u", displayName: "U", pictureUrl: url },
           shares: [],
-          preferences: { showHiddenFiles: true, theme: "system" },
+          preferences: {
+            showHiddenFiles: true,
+            theme: "system",
+            autosave: true,
+          },
           csrfToken: "csrf",
         }),
       );
@@ -508,7 +514,11 @@ describe("API client", () => {
     const refreshed = {
       user: { id: "u", username: "u", displayName: "U" },
       shares: [],
-      preferences: { showHiddenFiles: true, theme: "system" as const },
+      preferences: {
+        showHiddenFiles: true,
+        theme: "system" as const,
+        autosave: true,
+      },
       csrfToken: "fresh",
     };
     const api = { session: vi.fn(async () => refreshed) };
@@ -1536,7 +1546,7 @@ describe("API client", () => {
     const base = {
       user: { id: "u", username: "u", displayName: "u" },
       shares: [],
-      preferences: { showHiddenFiles: false, theme: "system" },
+      preferences: { showHiddenFiles: false, theme: "system", autosave: true },
       csrfToken: "csrf",
     };
     const fetch = vi
