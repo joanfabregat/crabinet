@@ -2084,6 +2084,44 @@ describe("writable file operations", () => {
     expect(navigation.visits).toEqual([]);
   });
 
+  it("numbers editor lines without wrapping them", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          text: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            text: "one\ntwo\nthree",
+            size: 13,
+            mimeType: "text/plain",
+            etag: '"content"',
+          })),
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("link", { name: "notes.txt" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Edit notes.txt" }),
+    );
+    const editor = await screen.findByLabelText("UTF-8 text content");
+    const gutter = editor.parentElement!.querySelector(".editor-gutter")!;
+    expect(gutter).toHaveAttribute("aria-hidden", "true");
+    expect(gutter.textContent).toBe("1\n2\n3");
+    expect(editor).toHaveAttribute("wrap", "off");
+
+    fireEvent.input(editor, { target: { value: "one\ntwo\nthree\n" } });
+    expect(gutter.textContent).toBe("1\n2\n3\n4");
+    fireEvent.input(editor, { target: { value: "single" } });
+    expect(gutter.textContent).toBe("1");
+
+    editor.scrollTop = 40;
+    fireEvent.scroll(editor);
+    expect(gutter.scrollTop).toBe(40);
+  });
+
   it("keeps edits explicit and refuses to hide a concurrent-write conflict", async () => {
     const saveText = vi
       .fn<ApiClient["saveText"]>()
