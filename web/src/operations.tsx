@@ -1,5 +1,5 @@
 import { type JSX } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   Download,
   Archive,
@@ -853,6 +853,18 @@ function MoveDialog({
   );
 }
 
+/** Lines as the textarea shows them; a trailing newline starts an empty one. */
+function countLines(text: string): number {
+  let lines = 1;
+  for (
+    let index = text.indexOf("\n");
+    index !== -1;
+    index = text.indexOf("\n", index + 1)
+  )
+    lines += 1;
+  return lines;
+}
+
 function EditorDialog({
   api,
   csrfToken,
@@ -874,7 +886,14 @@ function EditorDialog({
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController>();
   const editor = useRef<HTMLTextAreaElement>(null);
+  const gutter = useRef<HTMLPreElement>(null);
   const dirty = text !== initialText;
+  const lineCount = countLines(text);
+  // Rebuilt only when the count changes, not on every keystroke.
+  const lineNumbers = useMemo(
+    () => Array.from({ length: lineCount }, (_, line) => line + 1).join("\n"),
+    [lineCount],
+  );
 
   const load = () => {
     controller.current?.abort();
@@ -1040,14 +1059,25 @@ function EditorDialog({
             </div>
           )}
           <label for="text-editor">UTF-8 text content</label>
-          <textarea
-            ref={editor}
-            id="text-editor"
-            value={text}
-            disabled={saving}
-            spellcheck={false}
-            onInput={(event) => setText(event.currentTarget.value)}
-          />
+          <div class="editor-surface">
+            <pre ref={gutter} class="editor-gutter" aria-hidden="true">
+              {lineNumbers}
+            </pre>
+            {/* Lines never wrap, so each one stays level with its number. */}
+            <textarea
+              ref={editor}
+              id="text-editor"
+              value={text}
+              disabled={saving}
+              spellcheck={false}
+              wrap="off"
+              onInput={(event) => setText(event.currentTarget.value)}
+              onScroll={(event) => {
+                if (gutter.current)
+                  gutter.current.scrollTop = event.currentTarget.scrollTop;
+              }}
+            />
+          </div>
           <p class="editor-status" aria-live="polite">
             {saving
               ? "Saving…"
