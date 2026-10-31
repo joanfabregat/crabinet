@@ -2596,6 +2596,18 @@ html.preview-fullscreen-open body {
   margin-top: -0.3rem;
 }
 
+.editor-close-prompt {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: flex-end;
+}
+
+.editor-close-prompt p {
+  margin: 0.5rem 0 0;
+}
+
 .editor-status,
 .upload-message {
   color: var(--muted);

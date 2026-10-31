@@ -2242,7 +2242,14 @@ describe("writable file operations", () => {
 
         // Without autosave, closing asks before discarding.
         fireEvent.click(screen.getByRole("button", { name: "Close" }));
-        expect(confirm).toHaveBeenCalledWith("Discard your unsaved changes?");
+        expect(
+          screen.getByRole("group", {
+            name: "Save your changes before closing?",
+          }),
+        ).toBeVisible();
+        fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+        expect(confirm).not.toHaveBeenCalled();
+        expect(saveText).not.toHaveBeenCalled();
         await waitFor(() =>
           expect(
             screen.queryByRole("dialog", { name: "Edit notes.txt" }),
@@ -2284,6 +2291,56 @@ describe("writable file operations", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("asks to save, discard or keep editing when closing unsaved edits", async () => {
+      const saveText = vi.fn<ApiClient["saveText"]>(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success",
+        etag: 'W/"saved"',
+      }));
+      render(
+        <App
+          api={fakeApi({
+            session: withPreferences({ autosave: false }),
+            directory: vi.fn(async () => writablePage),
+            saveText,
+          })}
+          navigation={writableNavigation()}
+        />,
+      );
+
+      const editor = await openEditor();
+      fireEvent.input(editor, { target: { value: "keep me" } });
+      const prompt = { name: "Save your changes before closing?" };
+
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Save and close" }),
+        ).toHaveFocus(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("group", prompt)).not.toBeInTheDocument();
+      expect(editor).toHaveFocus();
+
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.queryByRole("group", prompt)).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("dialog", { name: "Edit notes.txt" }),
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      fireEvent.click(screen.getByRole("button", { name: "Save and close" }));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Edit notes.txt" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(saveText).toHaveBeenCalledTimes(1);
+      expect(saveText.mock.calls[0]?.[2]).toBe("keep me");
     });
 
     it("retries a failed autosave with growing waits, then pauses with a retry", async () => {

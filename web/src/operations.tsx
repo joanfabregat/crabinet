@@ -1032,12 +1032,15 @@ function EditorDialog({
   const [caretLine, setCaretLine] = useState(0);
   // Each line's rendered height while wrapping; one row each otherwise.
   const [lineHeights, setLineHeights] = useState<number[]>();
+  // Closing with edits autosave will not save asks what to do with them.
+  const [closePrompt, setClosePrompt] = useState(false);
   const controller = useRef<AbortController>();
   const editor = useRef<HTMLTextAreaElement>(null);
   const gutter = useRef<HTMLPreElement>(null);
   const measure = useRef<HTMLDivElement>(null);
   const currentLine = useRef<HTMLDivElement>(null);
   const firstToggle = useRef<HTMLInputElement>(null);
+  const saveAndCloseButton = useRef<HTMLButtonElement>(null);
   const indentUnit = useRef("  ");
   const savingNow = useRef(false);
   const savedOnce = useRef(false);
@@ -1318,15 +1321,36 @@ function EditorDialog({
 
   const close = async () => {
     if (saving) return;
+    // Escape or the close button while asking means "not yet".
+    if (closePrompt) return keepEditing();
     if (dirty && autosave && !autosavePaused) {
       // Closing is the end of the edit, so autosave saves what is pending.
       if (await persist(text, "closing")) onChanged(operation);
       return;
     }
-    if (dirty && !window.confirm("Discard your unsaved changes?")) return;
+    if (dirty) setClosePrompt(true);
+    else discard();
+  };
+
+  const keepEditing = () => {
+    setClosePrompt(false);
+    editor.current?.focus();
+  };
+
+  const discard = () => {
     if (savedOnce.current) onChanged(operation);
     else onClose();
   };
+
+  const saveAndClose = async () => {
+    // A failed save shows its error with the usual buttons.
+    setClosePrompt(false);
+    if (await persist(text, "closing")) onChanged(operation);
+  };
+
+  useEffect(() => {
+    if (closePrompt) saveAndCloseButton.current?.focus();
+  }, [closePrompt]);
 
   const reloadLatest = () => {
     if (
@@ -1461,24 +1485,61 @@ function EditorDialog({
               </label>
             </div>
           </div>
-          <div class="dialog-actions">
-            <button
-              class="button button-secondary"
-              type="button"
-              disabled={saving === "closing"}
-              onClick={() => void close()}
+          {closePrompt ? (
+            <div
+              class="editor-close-prompt"
+              role="group"
+              aria-labelledby="editor-close-question"
             >
-              Close
-            </button>
-            <button
-              class="button button-primary"
-              type="button"
-              disabled={!dirty || saving !== undefined || conflict}
-              onClick={() => void save()}
-            >
-              {error ? "Retry save" : "Save"}
-            </button>
-          </div>
+              <p id="editor-close-question">
+                Save your changes before closing?
+              </p>
+              <div class="dialog-actions">
+                <button
+                  class="button button-secondary"
+                  type="button"
+                  onClick={keepEditing}
+                >
+                  Cancel
+                </button>
+                <button
+                  class="button button-secondary"
+                  type="button"
+                  onClick={discard}
+                >
+                  Discard
+                </button>
+                <button
+                  ref={saveAndCloseButton}
+                  class="button button-primary"
+                  type="button"
+                  disabled={conflict}
+                  onClick={() => void saveAndClose()}
+                >
+                  Save and close
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div class="dialog-actions">
+              <button
+                class="button button-secondary"
+                type="button"
+                disabled={saving === "closing"}
+                onClick={() => void close()}
+              >
+                Close
+              </button>
+              <button
+                class="button button-primary"
+                type="button"
+                disabled={!dirty || saving !== undefined || conflict}
+                onClick={() => void save()}
+              >
+                {error ? "Retry save" : "Save"}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </Modal>
