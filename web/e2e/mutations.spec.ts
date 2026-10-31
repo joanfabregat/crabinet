@@ -49,6 +49,9 @@ test.describe("writable share operations", () => {
     await editor.fill("Production-backed browser edit\n");
     await expect(page.getByText("Unsaved changes")).toBeVisible();
     await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Saved e2e-note.txt.")).toBeVisible();
+    await expect(editor).toBeFocused();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     const saved = await readText(page, "writable", "e2e-note.txt");
@@ -252,6 +255,8 @@ test.describe("writable share operations", () => {
     const winningText = "Saved by the first browser\n";
     await page.getByLabel("UTF-8 text content").fill(winningText);
     await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Saved README.md.")).toBeVisible();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     const losingEditor = competingPage.getByLabel("UTF-8 text content");

@@ -1941,7 +1941,7 @@ html.preview-fullscreen-open body {
   min-width: 0;
 }
 
-.hidden-files-toggle {
+.settings-toggle {
   align-items: center;
   cursor: pointer;
   display: inline-flex;
@@ -1950,9 +1950,19 @@ html.preview-fullscreen-open body {
   font-weight: 650;
 }
 
-.hidden-files-toggle input {
+.settings-toggles {
+  display: grid;
+  gap: 1rem;
+  justify-items: start;
+}
+
+/* A checkbox drops the text field's minimum height and padding. */
+.settings-toggle input {
   accent-color: var(--accent);
   height: 1rem;
+  margin: 0;
+  min-height: 0;
+  padding: 0;
   width: 1rem;
 }
 
@@ -2481,12 +2491,14 @@ html.preview-fullscreen-open body {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   overflow: hidden;
+  position: relative;
 }
 
 /* The ring goes around the gutter and the text together. */
 .editor-surface:has(#text-editor:focus-visible) {
   outline: 3px solid var(--focus);
-  outline-offset: 3px;
+  /* Drawn over the border, so focus never shifts the space around it. */
+  outline-offset: -1px;
 }
 
 /* Both columns share one font size and line height, so numbers stay level
@@ -2520,12 +2532,68 @@ html.preview-fullscreen-open body {
   min-height: min(55vh, 34rem);
   overflow-wrap: normal;
   resize: vertical;
+  tab-size: 4;
   white-space: pre;
   width: 100%;
 }
 
 #text-editor:focus-visible {
   outline: none;
+}
+
+.editor-wrapping #text-editor {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* A tint over the caret's line, across the numbers and the text. */
+.editor-current-line {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+}
+
+/* Lays out a copy of the text at the textarea's width to measure how many
+   rows each wrapped line takes. It matches the textarea's text styles. */
+.editor-measure {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.875rem;
+  left: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  position: absolute;
+  tab-size: 4;
+  top: 0;
+  visibility: hidden;
+  white-space: pre-wrap;
+}
+
+.editor-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.text-button {
+  background: none;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.editor-footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: space-between;
+  /* Sits closer to the text than the form's other rows. */
+  margin-top: -0.3rem;
 }
 
 .editor-status,

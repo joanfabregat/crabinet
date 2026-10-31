@@ -9,7 +9,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { type ApiClient, type DirectoryPage } from "./api";
 import {
+  detectIndent,
   EntryActionButtons,
+  indentEdit,
   OperationDialog,
   type EntryOperation,
 } from "./operations";
@@ -454,5 +456,61 @@ describe("local archive dialogs", () => {
     resolve?.();
     await Promise.resolve();
     expect(changed).not.toHaveBeenCalled();
+  });
+});
+
+describe("editor indentation", () => {
+  it.each([
+    ["no indentation", "a\nb", "  "],
+    ["four spaces", "fn main() {\n    body\n        deeper\n}", "    "],
+    ["tabs", "a\n\tb\n\tc\n  d", "\t"],
+    ["one-space continuations", "/**\n * doc\n */", "  "],
+  ])("detects %s", (_name, text, unit) => {
+    expect(detectIndent(text)).toBe(unit);
+  });
+
+  it("inserts the unit at the caret or over a selection inside one line", () => {
+    expect(indentEdit("ab", 1, 1, "  ", false)).toEqual({
+      start: 1,
+      end: 1,
+      replacement: "  ",
+      selectionStart: 3,
+      selectionEnd: 3,
+    });
+    expect(indentEdit("abc", 1, 2, "\t", false)).toMatchObject({
+      start: 1,
+      end: 2,
+      replacement: "\t",
+    });
+  });
+
+  it("indents every selected line except empty ones", () => {
+    const text = "one\n\ntwo\nthree";
+    // From inside "one" to the start of "three", which stays as it is.
+    expect(indentEdit(text, 1, 9, "  ", false)).toEqual({
+      start: 0,
+      end: 8,
+      replacement: "  one\n\n  two",
+      selectionStart: 3,
+      selectionEnd: 13,
+    });
+  });
+
+  it("outdents by the unit, a tab, or the spaces there are", () => {
+    expect(indentEdit("    a\n\tb\n c", 0, 11, "  ", true)).toEqual({
+      start: 0,
+      end: 11,
+      replacement: "  a\nb\nc",
+      selectionStart: 0,
+      selectionEnd: 7,
+    });
+    // The caret stays on its line when its indentation goes away.
+    expect(indentEdit("x\n  y", 4, 4, "  ", true)).toEqual({
+      start: 2,
+      end: 5,
+      replacement: "y",
+      selectionStart: 2,
+      selectionEnd: 2,
+    });
   });
 });
