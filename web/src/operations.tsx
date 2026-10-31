@@ -33,6 +33,7 @@ import {
 import { CopyPathButton } from "./copy-path-button";
 import { isValidPathComponent } from "./virtual-path";
 import { FolderPicker } from "./tree";
+import { useToast } from "./toast";
 
 export type EntryOperation =
   | { kind: "create-file" }
@@ -1015,9 +1016,10 @@ function EditorDialog({
   const [initialText, setInitialText] = useState("");
   const [metadata, setMetadata] = useState<EntryMetadata>();
   const [loading, setLoading] = useState(true);
-  // An autosave leaves the text editable; a save that closes the editor
-  // locks it, so nothing typed meanwhile is lost.
-  const [saving, setSaving] = useState<"auto" | "closing">();
+  // Autosave and Save leave the text editable; a save that closes the
+  // editor locks it, so nothing typed meanwhile is lost.
+  const [saving, setSaving] = useState<"auto" | "manual" | "closing">();
+  const showToast = useToast();
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string>();
   // Starts from the account setting; turning it off here lasts only until
@@ -1175,7 +1177,7 @@ function EditorDialog({
   /** Saves `snapshot` and reports whether it was saved. */
   const persist = async (
     snapshot: string,
-    mode: "auto" | "closing",
+    mode: "auto" | "manual" | "closing",
   ): Promise<boolean> => {
     if (!metadata || savingNow.current) return false;
     savingNow.current = true;
@@ -1305,10 +1307,13 @@ function EditorDialog({
     followCaret();
   };
 
-  /** Saves and closes; the listing refreshes to show the new version. */
+  /** Saves and keeps editing; the listing refreshes when the editor closes. */
   const save = async () => {
     if (!dirty || saving) return;
-    if (await persist(text, "closing")) onChanged(operation);
+    if (!(await persist(text, "manual"))) return;
+    showToast(`Saved ${operation.entry.name}.`);
+    // The Save button is disabled until the next edit, so typing resumes.
+    editor.current?.focus();
   };
 
   const close = async () => {

@@ -1952,7 +1952,7 @@ html.preview-fullscreen-open body {
 
 .settings-toggles {
   display: grid;
-  gap: 0.75rem;
+  gap: 1rem;
   justify-items: start;
 }
 

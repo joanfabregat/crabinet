@@ -2785,9 +2785,12 @@ describe("writable file operations", () => {
       "refreshed-csrf",
       expect.any(AbortSignal),
     );
+    expect(await screen.findByText("Saved notes.txt.")).toBeVisible();
     expect(
-      screen.queryByRole("dialog", { name: "Edit notes.txt" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("dialog", { name: "Edit notes.txt" }),
+    ).toBeInTheDocument();
+    expect(editor).toHaveFocus();
+    expect(screen.getByText("All changes saved")).toBeVisible();
   });
 
   it("keeps the draft visible when sign-in expires during a save", async () => {
