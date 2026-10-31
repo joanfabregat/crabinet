@@ -173,7 +173,7 @@ Restore while Crabinet is stopped. Restore configuration, secret, SQLite state, 
 
 For rollback, stop the new process before starting the old one. Restore the pre-upgrade SQLite/config snapshot if release notes describe a state or schema change. Never run old and new versions concurrently against a writable share or the same SQLite database.
 
-The start-folder, passkey, and display-preference features migrate the SQLite schema through versions 2, 4, and 5. This revision uses schema version 5, even when passkeys are disabled. An older binary cannot open a newer schema; restore its matching pre-upgrade SQLite snapshot before rolling back.
+The start-folder, passkey, display-preference, and editor preference features migrate the SQLite schema through versions 2, 4, 5, and 6. This revision uses schema version 6, even when passkeys are disabled. An older binary cannot open a newer schema; restore its matching pre-upgrade SQLite snapshot before rolling back.
 
 ## Troubleshooting and logs
 
