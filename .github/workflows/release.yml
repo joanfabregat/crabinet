@@ -19,6 +19,8 @@ permissions:
   contents: read
 
 env:
+  # Trivy's version check calls check.trivy.dev, which no longer resolves.
+  TRIVY_SKIP_VERSION_CHECK: "true"
   CARGO_TERM_COLOR: always
   RUST_VERSION: 1.90.0
   NODE_VERSION: 24
