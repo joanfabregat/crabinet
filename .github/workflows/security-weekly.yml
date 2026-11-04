@@ -116,12 +116,19 @@ jobs:
         with:
           sarif_file: semgrep-weekly.sarif
           category: semgrep-weekly
+      # Not through setup-trivy: get.trivy.dev stopped resolving on 2026-11-03
+      # (aquasecurity/setup-trivy#42). This fetches the GitHub release instead.
+      - name: Install Trivy
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: trivy@0.74.0
+
       - name: Scan repository with fresh Trivy databases
         id: trivy
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.74.0
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: .
           scanners: vuln,secret,misconfig,license
@@ -198,13 +205,21 @@ jobs:
             echo "available=false" >> "${GITHUB_OUTPUT}"
             echo "No released image exists yet; source scans still ran."
           fi
+      # Not through setup-trivy: get.trivy.dev stopped resolving on 2026-11-03
+      # (aquasecurity/setup-trivy#42). This fetches the GitHub release instead.
+      - name: Install Trivy
+        if: steps.image.outputs.available == 'true'
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: trivy@0.74.0
+
       - name: Scan latest released image
         if: steps.image.outputs.available == 'true'
         id: trivy
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.74.0
+          skip-setup-trivy: true
           image-ref: ghcr.io/${{ github.repository }}:latest
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
