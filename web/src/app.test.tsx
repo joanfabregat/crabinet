@@ -196,6 +196,14 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         outcome: "success" as const,
         trashId: "trash-1",
       })),
+    deleteEntryPermanently:
+      overrides.deleteEntryPermanently ??
+      vi.fn(async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+        complete: true,
+      })),
     trash:
       overrides.trash ?? vi.fn(async (shareId) => ({ shareId, items: [] })),
     restoreTrash: overrides.restoreTrash ?? vi.fn(async () => undefined),
@@ -1831,7 +1839,7 @@ describe("writable file operations", () => {
       within(actions).getByRole("button", { name: "Delete empty" }),
     );
     const confirm = await screen.findByRole("dialog", {
-      name: "Move empty to Trash?",
+      name: "Delete empty?",
     });
     expect(confirm).toHaveTextContent(
       "empty and everything in it will move to Trash.",
@@ -1840,6 +1848,139 @@ describe("writable file operations", () => {
     await confirmMoveToTrash();
     await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("changed");
+  });
+
+  it("defaults to Trash and deletes permanently only from its own button", async () => {
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>();
+    const deleteEntryPermanently = vi.fn<ApiClient["deleteEntryPermanently"]>(
+      async (shareId, path) => ({
+        shareId,
+        path,
+        outcome: "success" as const,
+        complete: true,
+      }),
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "empty",
+            kind: "directory" as const,
+            etag: 'W/"directory"',
+          })),
+          deleteEntry,
+          deleteEntryPermanently,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    const actions = await screen.findByLabelText("Actions for empty");
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "Delete empty" }),
+    );
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete empty?",
+    });
+    const trash = within(confirm).getByRole("button", {
+      name: "Move to Trash",
+    });
+    await waitFor(() => expect(trash).toHaveFocus());
+    const permanent = within(confirm).getByRole("button", {
+      name: "Delete permanently",
+    });
+    const order = within(confirm)
+      .getAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((label) => label !== "");
+    expect(order.slice(-3)).toEqual([
+      "Cancel",
+      "Delete permanently",
+      "Move to Trash",
+    ]);
+
+    fireEvent.click(permanent);
+    await waitFor(() =>
+      expect(deleteEntryPermanently).toHaveBeenCalledWith(
+        "work",
+        "projects/empty",
+        'W/"directory"',
+        "csrf-in-memory",
+      ),
+    );
+    expect(deleteEntry).not.toHaveBeenCalled();
+    expect(await screen.findByText("Permanently deleted empty.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("says when a permanent delete finishes in the background", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "empty",
+            kind: "directory" as const,
+            etag: 'W/"directory"',
+          })),
+          deleteEntryPermanently: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            outcome: "success" as const,
+            complete: false,
+          })),
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    const actions = await screen.findByLabelText("Actions for empty");
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "Delete empty" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete permanently" }),
+    );
+    expect(
+      await screen.findByText(
+        "Deleted empty. Removal continues in the background.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("reports a permanent delete refused because the item changed", async () => {
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          metadata: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            name: "empty",
+            kind: "directory" as const,
+            etag: 'W/"directory"',
+          })),
+          deleteEntryPermanently: vi
+            .fn<ApiClient["deleteEntryPermanently"]>()
+            .mockRejectedValue(
+              new ApiError("conflict", "changed", { status: 409 }),
+            ),
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    const actions = await screen.findByLabelText("Actions for empty");
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "Delete empty" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete permanently" }),
+    );
     expect(await screen.findByRole("alert")).toHaveTextContent("changed");
   });
 
@@ -3118,7 +3259,7 @@ describe("security review regressions", () => {
     );
     // The confirmation reflects the resolved kind.
     expect(
-      await screen.findByRole("dialog", { name: "Move archive to Trash?" }),
+      await screen.findByRole("dialog", { name: "Delete archive?" }),
     ).toHaveTextContent("archive and everything in it will move to Trash.");
     await confirmMoveToTrash();
     await waitFor(() =>
@@ -3759,7 +3900,7 @@ describe("selecting entries", () => {
       ).getByRole("button", { name: "Delete" }),
     );
     const dialog = await screen.findByRole("dialog", {
-      name: "Move 3 items to Trash?",
+      name: "Delete 3 items?",
     });
     expect(deleteEntry).not.toHaveBeenCalled();
     fireEvent.click(
@@ -3793,6 +3934,63 @@ describe("selecting entries", () => {
       "trash-projects/c.txt",
     ]);
     expect(await screen.findByText("Restored 2 items.")).toBeVisible();
+  });
+
+  it("deletes a selection permanently, offers no Undo, and keeps failures selected", async () => {
+    let entries = listing.entries;
+    const directory = vi.fn(async (shareId: string, path: string) => ({
+      shareId,
+      path,
+      entries,
+    }));
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>();
+    const deleteEntryPermanently = vi.fn<ApiClient["deleteEntryPermanently"]>(
+      async (shareId, path) => {
+        if (path === "projects/b.txt")
+          throw new ApiError("conflict", "changed", { status: 409 });
+        entries = entries.filter((entry) => `projects/${entry.name}` !== path);
+        return {
+          shareId,
+          path,
+          outcome: "success" as const,
+          complete: true,
+        };
+      },
+    );
+    renderSelection({ directory, deleteEntry, deleteEntryPermanently });
+    await screen.findByRole("link", { name: "a.txt" });
+    fireEvent.click(checkbox("a.txt"));
+    fireEvent.click(checkbox("c.txt"), { shiftKey: true });
+    fireEvent.click(
+      within(
+        screen.getByRole("toolbar", { name: "Selection actions" }),
+      ).getByRole("button", { name: "Delete" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Delete 3 items?",
+    });
+    await waitFor(() =>
+      expect(
+        within(dialog).getByRole("button", { name: "Move to Trash" }),
+      ).toHaveFocus(),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    await waitFor(() =>
+      expect(deleteEntryPermanently).toHaveBeenCalledTimes(3),
+    );
+    expect(deleteEntry).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        "Permanently deleted 2 of 3 items. 1 could not be deleted.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "a.txt" })).toBeNull(),
+    );
+    expect(checkbox("b.txt")).toBeChecked();
   });
 });
 

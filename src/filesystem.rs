@@ -46,7 +46,7 @@ pub const MAX_PATH_DEPTH: usize = 64;
 pub const DIRECTORY_QUOTA_BYTES: u64 = 4096;
 /// Entries a move or restore inspects while checking that a directory's
 /// subtree stays within [`MAX_PATH_DEPTH`].
-const MAX_SUBTREE_CHECK_ENTRIES: usize = 1_000_000;
+pub(crate) const MAX_SUBTREE_CHECK_ENTRIES: usize = 1_000_000;
 const MAX_SHARE_ID_BYTES: usize = 64;
 const INTERNAL_DIRECTORY: &str = ".crabinet";
 const INTERNAL_STAGING_DIRECTORY: &str = "staging";

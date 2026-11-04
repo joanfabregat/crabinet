@@ -86,6 +86,8 @@ The concrete path grammar, capability lifecycle, alias policy, platform assumpti
 
 ## Deferred risks and non-goals
 
+Permanent delete removes an entry from Crabinet and skips Trash; it is not secure erasure. The bytes may survive in free blocks, snapshots, backups, and stale thumbnail cache entries, as described in [Permanent delete](mutations.md#permanent-delete). Crabinet cannot detect the storage properties that would make an overwrite effective, so it does not attempt one.
+
 - Executing uploaded JavaScript requires a separate origin without application cookies and is not supported in v1.
 - Public links, anonymous shares, object stores, collaborative editing, and browser ACL administration are not supported in v1.
 - Malware scanning is not included initially. Operators must not treat file availability as a malware-safety assertion.

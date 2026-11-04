@@ -1272,6 +1272,41 @@ describe("API client", () => {
     );
   });
 
+  it("asks for a permanent delete and refuses an answer without its result", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "work",
+          path: "docs/b.txt",
+          outcome: "success",
+          complete: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          shareId: "work",
+          path: "docs/b.txt",
+          outcome: "success",
+          trashId: "moved-to-trash-by-an-older-server",
+        }),
+      );
+    const api = createApiClient({ fetch });
+    await expect(
+      api.deleteEntryPermanently("work", "docs/b.txt", 'W/"v3"', "csrf"),
+    ).resolves.toMatchObject({ complete: false });
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/v1/shares/work/entry?path=docs%2Fb.txt&permanent=true",
+    );
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe("DELETE");
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("If-Match")).toBe(
+      'W/"v3"',
+    );
+    await expect(
+      api.deleteEntryPermanently("work", "docs/b.txt", 'W/"v3"', "csrf"),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
   it("rejects a text save response without the new validator", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       Response.json({

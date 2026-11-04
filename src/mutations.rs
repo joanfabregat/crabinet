@@ -42,8 +42,8 @@ use crate::{
     extract::{ApiJson, ApiPath, ApiQuery},
     filesystem::{
         AccessLevel, AuthorizedShare, DIRECTORY_QUOTA_BYTES, EntryKind, EntryMetadata, EntryName,
-        FsError, FsErrorCode, MAX_PATH_DEPTH, OwnedAuthorizedShare, PendingWrite, ShareId,
-        TrashEntry, TrashPosition, TrashSweep, UsageError, VirtualPath,
+        FsError, FsErrorCode, MAX_PATH_DEPTH, MAX_SUBTREE_CHECK_ENTRIES, OwnedAuthorizedShare,
+        PendingWrite, ShareId, TrashEntry, TrashPosition, TrashSweep, UsageError, VirtualPath,
     },
 };
 
@@ -369,6 +369,13 @@ struct PathQuery {
 }
 
 #[derive(Deserialize)]
+struct DeleteQuery {
+    path: Option<String>,
+    #[serde(default)]
+    permanent: bool,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestoreTrashBody {
     destination: Option<String>,
@@ -405,6 +412,16 @@ struct TrashedResponse {
     path: String,
     outcome: &'static str,
     trash_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermanentlyDeletedResponse {
+    share_id: String,
+    path: String,
+    outcome: &'static str,
+    /// False when removal continues in the background.
+    complete: bool,
 }
 
 #[derive(Deserialize)]
@@ -761,28 +778,37 @@ async fn delete_entry(
     identity: AuthenticatedIdentity,
     _csrf: CsrfVerified,
     ApiPath(raw_share_id): ApiPath<String>,
-    query: Result<ApiQuery<PathQuery>, AppError>,
+    query: Result<ApiQuery<DeleteQuery>, AppError>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    let operation = match &query {
+        Ok(ApiQuery(DeleteQuery {
+            permanent: true, ..
+        })) => "delete_permanent",
+        _ => "delete",
+    };
     let result = async {
         let ApiQuery(query) = query?;
         delete_entry_inner(&state, &identity, &raw_share_id, query, &headers).await
     }
     .await;
-    audited(&state, &identity, &raw_share_id, "delete", result)
+    audited(&state, &identity, &raw_share_id, operation, result)
 }
 
 async fn delete_entry_inner(
     state: &AppState,
     identity: &AuthenticatedIdentity,
     raw_share_id: &str,
-    query: PathQuery,
+    query: DeleteQuery,
     headers: &HeaderMap,
 ) -> MutationResult<Response> {
     let raw_path = query.path.as_deref().ok_or(AppError::InvalidRequest)?;
     let (share_id, path, authorized) = authorize_write(state, identity, raw_share_id, raw_path)?;
     let current = gated_metadata(state, identity, &authorized, &path).await?;
     require_if_match(state, &share_id, &path, current, headers)?;
+    if query.permanent {
+        return delete_permanently(state, identity, share_id, path, authorized, current).await;
+    }
     let commit = state.mutations().commit_lock(&share_id).await;
     let target = path.clone();
     let subject = identity.subject().to_owned();
@@ -811,6 +837,107 @@ async fn delete_entry_inner(
             path: path.to_string(),
             outcome: "success",
             trash_id: trashed.id,
+        },
+    ))
+}
+
+/// Removes an entry without keeping it in Trash. The entry leaves the share
+/// under the same validation as a move to Trash, then its thumbnails and
+/// search entries go, then its payload is removed in batches that each hold
+/// the commit lock briefly. Once the entry has left the share the removal is
+/// committed: a batch that fails or runs out of time is reported as
+/// incomplete and left to the GC pass, never as a failed delete.
+async fn delete_permanently(
+    state: &AppState,
+    identity: &AuthenticatedIdentity,
+    share_id: ShareId,
+    path: VirtualPath,
+    authorized: OwnedAuthorizedShare,
+    current: EntryMetadata,
+) -> MutationResult<Response> {
+    let commit = state.mutations().commit_lock(&share_id).await;
+    let share = authorized.clone();
+    let target = path.clone();
+    let subject = identity.subject().to_owned();
+    let retention_days = state.trash_retention_days();
+    let thumbnails = Arc::clone(state.thumbnails());
+    let thumbnail_share = share_id.clone();
+    let result = run_blocking(move || {
+        let _commit = commit;
+        let view = share.view();
+        let id = view
+            .move_to_purge(&target, current, &subject, retention_days)
+            .map_err(Rejection::from)?;
+        // Identities are read from the payload, so this precedes its removal.
+        if thumbnails.has_cache()
+            && let Err(error) = view.visit_trash_files(
+                &id,
+                MAX_SUBTREE_CHECK_ENTRIES,
+                &mut |file, metadata| thumbnails.forget(&thumbnail_share, file, metadata),
+            )
+        {
+            tracing::warn!(
+                trash_id = id.as_str(),
+                code = ?error.code(),
+                "cannot walk a permanently deleted item for its thumbnails; they age out of the cache"
+            );
+        }
+        Ok::<_, Rejection>(id)
+    })
+    .await?;
+    let id = result?;
+    if let Some(search) = state.search().cloned() {
+        let search_share = share_id.clone();
+        let target = path.clone();
+        run_blocking(move || {
+            if search.forget(&search_share, &target).is_err() {
+                tracing::warn!("cannot remove a permanently deleted entry from the search index");
+            }
+        })
+        .await?;
+    }
+    let batch_entries = state.mutations().trash_empty_batch_entries;
+    let budget = state.mutations().trash_empty_budget;
+    let started = Instant::now();
+    let complete = loop {
+        let commit = state.mutations().commit_lock(&share_id).await;
+        let share = authorized.clone();
+        let item = id.clone();
+        let step = run_blocking(move || {
+            let _commit = commit;
+            share.view().purge_trash_step(&item, batch_entries)
+        })
+        .await?;
+        match step {
+            Ok(true) => break true,
+            Ok(false) if started.elapsed() >= budget => break false,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    trash_id = id.as_str(),
+                    code = ?error.code(),
+                    "permanent delete stopped early; Trash cleanup will finish it"
+                );
+                break false;
+            }
+        }
+    };
+    tracing::info!(
+        audit = true,
+        subject = identity.subject(),
+        share_id = share_id.as_str(),
+        operation = "delete_permanent",
+        path = %path,
+        complete,
+        outcome = "success"
+    );
+    Ok(inert_json(
+        StatusCode::OK,
+        PermanentlyDeletedResponse {
+            share_id: share_id.to_string(),
+            path: path.to_string(),
+            outcome: "success",
+            complete,
         },
     ))
 }
@@ -2327,6 +2454,118 @@ mod tests {
         assert_eq!(value["items"][0]["originalPath"], "nonempty");
         assert_eq!(value["items"][0]["kind"], "directory");
         assert_eq!(value["retentionDays"], 30);
+    }
+
+    fn permanent_delete_request(path: &str, etag: String) -> Request<Body> {
+        Request::delete(format!(
+            "/api/v1/shares/documents/entry?path={path}&permanent=true"
+        ))
+        .header(header::IF_MATCH, etag)
+        .body(Body::empty())
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_skips_trash_and_is_audited() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let etag = metadata_etag(&fixture, "nonempty").await;
+        let logs = crate::audit::capture::start();
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            permanent_delete_request("nonempty", etag),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await,
+            json!({
+                "shareId": "documents",
+                "path": "nonempty",
+                "outcome": "success",
+                "complete": true,
+            })
+        );
+        assert!(!fixture.root.path().join("nonempty").exists());
+        assert_eq!(trash_directory_entries(&fixture), 0);
+        let emitted = logs.take();
+        assert!(emitted.contains("delete_permanent"), "{emitted}");
+        assert!(emitted.contains("complete=true"), "{emitted}");
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_reports_a_removal_left_to_cleanup() {
+        // One entry per batch and no time budget stop after the first batch.
+        let mutations = MutationState::new(MutationLimits::default())
+            .unwrap()
+            .with_trash_empty_batches(1, Duration::ZERO);
+        let fixture = fixture_with_state(AccessLevel::ReadWrite, false, mutations);
+        fs::create_dir(fixture.root.path().join("many")).unwrap();
+        for index in 0..4 {
+            fs::write(fixture.root.path().join(format!("many/{index}")), "x").unwrap();
+        }
+        let etag = metadata_etag(&fixture, "many").await;
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            permanent_delete_request("many", etag),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["complete"], false);
+        assert!(!fixture.root.path().join("many").exists());
+        // Never listed, and collection finishes it without waiting for expiry.
+        let listing = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            Request::get("/api/v1/shares/documents/trash")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(json_body(listing).await["items"], json!([]));
+        assert!(trash_directory_entries(&fixture) > 0);
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_requires_a_current_validator_write_access_and_csrf() {
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+
+        let no_csrf = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            permanent_delete_request("existing.txt", etag.clone()),
+        )
+        .await;
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+
+        fs::write(fixture.root.path().join("existing.txt"), "changed").unwrap();
+        let stale = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            true,
+            permanent_delete_request("existing.txt", etag),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert!(fixture.root.path().join("existing.txt").exists());
+
+        let read_only = self::fixture(AccessLevel::ReadOnly, false, MutationLimits::default());
+        let etag = metadata_etag(&read_only, "existing.txt").await;
+        let refused = send(
+            &read_only.app,
+            Some(&read_only.identity),
+            true,
+            permanent_delete_request("existing.txt", etag),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert!(read_only.root.path().join("existing.txt").exists());
     }
 
     #[tokio::test]

@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiError, type DirectoryEntry } from "./api";
 import {
   archiveErrorMessage,
+  bulkPermanentDeleteMessage,
   bulkTrashMessage,
+  deleteEntriesPermanently,
   emptySelection,
   moveEntriesToTrash,
   pruneSelection,
@@ -198,6 +200,54 @@ describe("bulk moves to Trash", () => {
         2,
       ),
     ).toBe("Could not move 2 items to Trash.");
+  });
+});
+
+describe("permanent bulk delete", () => {
+  const entry = (name: string) =>
+    ({ name, kind: "file" }) as unknown as DirectoryEntry;
+  const items = ["a", "b", "c"].map((name) => ({
+    entry: entry(name),
+    path: name,
+  }));
+
+  it("counts unfinished removals and keeps failures apart", async () => {
+    const outcome = await deleteEntriesPermanently(items, async (_, path) => {
+      if (path === "b") throw new ApiError("conflict", "changed");
+      return path === "a";
+    });
+    expect(outcome.deleted.map(({ path }) => path)).toEqual(["a", "c"]);
+    expect(outcome.failed.map(({ path }) => path)).toEqual(["b"]);
+    expect(outcome.unfinished).toBe(1);
+    expect(bulkPermanentDeleteMessage(outcome, 3)).toBe(
+      "Permanently deleted 2 of 3 items. 1 could not be deleted. Removal continues in the background.",
+    );
+  });
+
+  it("stops when the session expires", async () => {
+    const deleteOne = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(new ApiError("unauthorized", "expired"));
+    const outcome = await deleteEntriesPermanently(items, deleteOne);
+    expect(deleteOne).toHaveBeenCalledTimes(2);
+    expect(outcome.sessionExpired).toBe(true);
+    expect(outcome.failed).toHaveLength(0);
+  });
+
+  it("words complete and failed outcomes", () => {
+    const base = {
+      deleted: [],
+      unfinished: 0,
+      failed: [],
+      sessionExpired: false,
+    };
+    expect(
+      bulkPermanentDeleteMessage({ ...base, deleted: [items[0]!] }, 1),
+    ).toBe("Permanently deleted 1 item.");
+    expect(bulkPermanentDeleteMessage(base, 2)).toBe(
+      "Could not delete 2 items.",
+    );
   });
 });
 

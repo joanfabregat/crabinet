@@ -221,15 +221,57 @@ export async function moveEntriesToTrash(
   moveOne: (entry: DirectoryEntry, path: string) => Promise<string>,
   onProgress?: (done: number) => void,
 ): Promise<BulkTrashOutcome> {
-  const outcome: BulkTrashOutcome = {
-    moved: [],
-    failed: [],
+  const outcome = await applyToEntries(items, moveOne, onProgress);
+  return {
+    moved: outcome.done.map(({ result, ...item }) => ({ id: result, ...item })),
+    failed: outcome.failed,
+    sessionExpired: outcome.sessionExpired,
+  };
+}
+
+export interface BulkPermanentDeleteOutcome {
+  deleted: Array<{ entry: DirectoryEntry; path: string }>;
+  /** How many deleted entries the server finishes in the background. */
+  unfinished: number;
+  failed: Array<{ entry: DirectoryEntry; path: string }>;
+  /** The session ended part way; the remaining items were not attempted. */
+  sessionExpired: boolean;
+}
+
+/**
+ * Deletes entries permanently one at a time through the per-entry API, with
+ * the same validator check, audit event, and server limits as a bulk move.
+ * `deleteOne` resolves to whether the server finished removing the entry.
+ */
+export async function deleteEntriesPermanently(
+  items: ReadonlyArray<{ entry: DirectoryEntry; path: string }>,
+  deleteOne: (entry: DirectoryEntry, path: string) => Promise<boolean>,
+  onProgress?: (done: number) => void,
+): Promise<BulkPermanentDeleteOutcome> {
+  const outcome = await applyToEntries(items, deleteOne, onProgress);
+  return {
+    deleted: outcome.done.map(({ entry, path }) => ({ entry, path })),
+    unfinished: outcome.done.filter(({ result }) => !result).length,
+    failed: outcome.failed,
+    sessionExpired: outcome.sessionExpired,
+  };
+}
+
+/** Runs `apply` on each entry in order; a failure does not stop the others. */
+async function applyToEntries<T>(
+  items: ReadonlyArray<{ entry: DirectoryEntry; path: string }>,
+  apply: (entry: DirectoryEntry, path: string) => Promise<T>,
+  onProgress?: (done: number) => void,
+) {
+  const outcome = {
+    done: [] as Array<{ result: T; entry: DirectoryEntry; path: string }>,
+    failed: [] as Array<{ entry: DirectoryEntry; path: string }>,
     sessionExpired: false,
   };
   for (const [index, item] of items.entries()) {
     try {
-      const id = await moveOne(item.entry, item.path);
-      outcome.moved.push({ id, ...item });
+      const result = await apply(item.entry, item.path);
+      outcome.done.push({ result, ...item });
     } catch (cause) {
       if (cause instanceof ApiError && cause.kind === "unauthorized") {
         outcome.sessionExpired = true;
@@ -251,6 +293,20 @@ export function bulkTrashMessage(
   if (moved === total) return `Moved ${items(total)} to Trash.`;
   if (moved === 0) return `Could not move ${items(total)} to Trash.`;
   return `Moved ${moved} of ${items(total)} to Trash. ${total - moved} could not be moved.`;
+}
+
+export function bulkPermanentDeleteMessage(
+  outcome: BulkPermanentDeleteOutcome,
+  total: number,
+): string {
+  const deleted = outcome.deleted.length;
+  const items = (count: number) => `${count} ${count === 1 ? "item" : "items"}`;
+  const background =
+    outcome.unfinished > 0 ? " Removal continues in the background." : "";
+  if (deleted === total)
+    return `Permanently deleted ${items(total)}.${background}`;
+  if (deleted === 0) return `Could not delete ${items(total)}.`;
+  return `Permanently deleted ${deleted} of ${items(total)}. ${total - deleted} could not be deleted.${background}`;
 }
 
 /**

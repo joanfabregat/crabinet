@@ -211,6 +211,11 @@ export interface TrashResult extends MutationResult {
   trashId: string;
 }
 
+export interface PermanentDeleteResult extends MutationResult {
+  /** False when the server finishes removing the entry in the background. */
+  complete: boolean;
+}
+
 export interface TextSaveResult extends MutationResult {
   /** The saved file's validator, for the next save without a metadata read. */
   etag: string;
@@ -488,6 +493,14 @@ export interface ApiClient {
     csrfToken: string,
     signal?: AbortSignal,
   ): Promise<TrashResult>;
+  /** Deletes an entry without keeping it in Trash. This cannot be undone. */
+  deleteEntryPermanently(
+    shareId: string,
+    path: string,
+    etag: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<PermanentDeleteResult>;
   /** One page of a share's Trash, newest first; pass `nextCursor` for more. */
   trash(
     shareId: string,
@@ -904,6 +917,22 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
             "If-Match": etag,
           },
         }),
+        shareId,
+        path,
+      ),
+    deleteEntryPermanently: async (shareId, path, etag, csrfToken, signal) =>
+      parsePermanentDeleteResult(
+        await request<unknown>(
+          `${fileApiUrl(shareId, path, "entry")}&permanent=true`,
+          {
+            method: "DELETE",
+            signal,
+            headers: {
+              "X-CSRF-Token": csrfToken,
+              "If-Match": etag,
+            },
+          },
+        ),
         shareId,
         path,
       ),
@@ -1861,6 +1890,18 @@ function parseTrashResult(
   if (!isRecord(value) || typeof value.trashId !== "string" || !value.trashId)
     throw invalidResponse();
   return value as unknown as TrashResult;
+}
+
+function parsePermanentDeleteResult(
+  value: unknown,
+  expectedShareId: string,
+  expectedPath: string,
+): PermanentDeleteResult {
+  parseMutationResult(value, expectedShareId, expectedPath);
+  // A server without this feature would answer as a move to Trash.
+  if (!isRecord(value) || typeof value.complete !== "boolean")
+    throw invalidResponse();
+  return value as unknown as PermanentDeleteResult;
 }
 
 function parseTextSaveResult(

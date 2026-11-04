@@ -98,7 +98,9 @@ import { TooltipLayer } from "./tooltip-layer";
 import { beginEntryDrag, ShareTree } from "./tree";
 import { ToastProvider, useToast } from "./toast";
 import {
+  bulkPermanentDeleteMessage,
   bulkTrashMessage,
+  deleteEntriesPermanently,
   isModifiedClick,
   moveEntriesToTrash,
   SelectionBar,
@@ -1140,20 +1142,40 @@ function DirectoryBrowser({
   const [pendingBulkDelete, setPendingBulkDelete] =
     useState<Array<{ entry: DirectoryEntry; path: string }>>();
   const [bulkProgress, setBulkProgress] = useState<number>();
+  const [deleteAction, setDeleteAction] = useState<"trash" | "permanent">();
 
-  /** Moves one entry to Trash if it is still of the listed kind. */
-  const trashOne = async (entry: DirectoryEntry, path: string) => {
+  /** The validator of an entry that is still of the listed kind. */
+  const currentEtag = async (entry: DirectoryEntry, path: string) => {
     const metadata = await api.metadata(share.id, path);
     if (metadata.kind !== entry.kind)
       throw new ApiError("conflict", "The item changed");
+    return metadata.etag;
+  };
+
+  /** Moves one entry to Trash if it is still of the listed kind. */
+  const trashOne = async (entry: DirectoryEntry, path: string) => {
+    const etag = await currentEtag(entry, path);
     const result = await withCsrfRetry(
       api,
       csrfToken,
       userId,
       onSessionRefreshed,
-      (token) => api.deleteEntry(share.id, path, metadata.etag, token),
+      (token) => api.deleteEntry(share.id, path, etag, token),
     );
     return result.trashId;
+  };
+
+  /** Deletes one entry permanently and reports whether removal finished. */
+  const deleteOnePermanently = async (entry: DirectoryEntry, path: string) => {
+    const etag = await currentEtag(entry, path);
+    const result = await withCsrfRetry(
+      api,
+      csrfToken,
+      userId,
+      onSessionRefreshed,
+      (token) => api.deleteEntryPermanently(share.id, path, etag, token),
+    );
+    return result.complete;
   };
 
   const deleteSelection = async (
@@ -1161,6 +1183,7 @@ function DirectoryBrowser({
   ) => {
     if (bulkProgress !== undefined || !writable) return;
     const shareId = share.id;
+    setDeleteAction("trash");
     setBulkProgress(0);
     const outcome = await moveEntriesToTrash(items, trashOne, setBulkProgress);
     setBulkProgress(undefined);
@@ -1186,6 +1209,38 @@ function DirectoryBrowser({
       });
     }
     if (outcome.moved.some((moved) => moved.path === activePreview.current)) {
+      navigation.go({ shareId, path: route.path }, { replace: true });
+    }
+    setRefreshKey((value) => value + 1);
+  };
+
+  const deleteSelectionPermanently = async (
+    items: Array<{ entry: DirectoryEntry; path: string }>,
+  ) => {
+    if (bulkProgress !== undefined || !writable) return;
+    const shareId = share.id;
+    setDeleteAction("permanent");
+    setBulkProgress(0);
+    const outcome = await deleteEntriesPermanently(
+      items,
+      deleteOnePermanently,
+      setBulkProgress,
+    );
+    setBulkProgress(undefined);
+    setPendingBulkDelete(undefined);
+    deselect(outcome.deleted.map((deleted) => deleted.entry.name));
+    if (outcome.sessionExpired) onSessionExpired();
+    if (outcome.deleted.length > 0 || outcome.failed.length > 0) {
+      showToast(bulkPermanentDeleteMessage(outcome, items.length), {
+        tone:
+          outcome.failed.length === 0
+            ? "success"
+            : outcome.deleted.length === 0
+              ? "error"
+              : "warning",
+      });
+    }
+    if (outcome.deleted.some(({ path }) => path === activePreview.current)) {
       navigation.go({ shareId, path: route.path }, { replace: true });
     }
     setRefreshKey((value) => value + 1);
@@ -1223,6 +1278,7 @@ function DirectoryBrowser({
 
   const deleteToTrash = async (entry: DirectoryEntry, path: string) => {
     if (deletingPath || !writable) return;
+    setDeleteAction("trash");
     setDeletingPath(path);
     setDeleteError(undefined);
     try {
@@ -1241,6 +1297,34 @@ function DirectoryBrowser({
           cause instanceof ApiError && cause.kind === "conflict"
             ? "This item changed. Reload the folder and try again."
             : "Could not move this item to Trash. Try again.",
+        );
+    } finally {
+      setDeletingPath(undefined);
+    }
+  };
+
+  const deletePermanently = async (entry: DirectoryEntry, path: string) => {
+    if (deletingPath || !writable) return;
+    setDeleteAction("permanent");
+    setDeletingPath(path);
+    setDeleteError(undefined);
+    try {
+      const complete = await deleteOnePermanently(entry, path);
+      setPendingDelete(undefined);
+      showToast(
+        complete
+          ? `Permanently deleted ${entry.name}.`
+          : `Deleted ${entry.name}. Removal continues in the background.`,
+      );
+      changed({ kind: "delete", entry, path });
+    } catch (cause) {
+      setPendingDelete(undefined);
+      if (isUnauthorized(cause)) onSessionExpired();
+      else
+        setDeleteError(
+          cause instanceof ApiError && cause.kind === "conflict"
+            ? "This item changed. Reload the folder and try again."
+            : "Could not delete this item. Try again.",
         );
     } finally {
       setDeletingPath(undefined);
@@ -1871,7 +1955,7 @@ function DirectoryBrowser({
         <div class="directory-column">
           {pendingDelete && (
             <Modal
-              title={`Move ${pendingDelete.entry.name} to Trash?`}
+              title={`Delete ${pendingDelete.entry.name}?`}
               busy={Boolean(deletingPath)}
               onClose={() => setPendingDelete(undefined)}
             >
@@ -1880,6 +1964,10 @@ function DirectoryBrowser({
                   ? `${pendingDelete.entry.name} and everything in it will move to Trash.`
                   : `${pendingDelete.entry.name} will move to Trash.`}{" "}
                 You can restore it from Trash until it expires.
+              </p>
+              <p>
+                Delete permanently skips Trash and cannot be undone. It does not
+                wipe the data from the disk or from backups.
               </p>
               <div class="dialog-actions">
                 <button
@@ -1892,20 +1980,38 @@ function DirectoryBrowser({
                 </button>
                 <button
                   type="button"
+                  class="button button-danger-quiet"
+                  disabled={Boolean(deletingPath)}
+                  onClick={() =>
+                    void deletePermanently(
+                      pendingDelete.entry,
+                      pendingDelete.path,
+                    )
+                  }
+                >
+                  {deletingPath && deleteAction === "permanent"
+                    ? "Deleting…"
+                    : "Delete permanently"}
+                </button>
+                <button
+                  type="button"
                   class="button button-danger"
+                  data-dialog-default
                   disabled={Boolean(deletingPath)}
                   onClick={() =>
                     void deleteToTrash(pendingDelete.entry, pendingDelete.path)
                   }
                 >
-                  {deletingPath ? "Moving…" : "Move to Trash"}
+                  {deletingPath && deleteAction === "trash"
+                    ? "Moving…"
+                    : "Move to Trash"}
                 </button>
               </div>
             </Modal>
           )}
           {pendingBulkDelete && (
             <Modal
-              title={`Move ${itemCount(pendingBulkDelete.length)} to Trash?`}
+              title={`Delete ${itemCount(pendingBulkDelete.length)}?`}
               busy={bulkProgress !== undefined}
               onClose={() => setPendingBulkDelete(undefined)}
             >
@@ -1913,6 +2019,10 @@ function DirectoryBrowser({
                 The selected items, including everything in selected folders,
                 will move to Trash. You can restore them from Trash until they
                 expire.
+              </p>
+              <p>
+                Delete permanently skips Trash and cannot be undone. It does not
+                wipe the data from the disk or from backups.
               </p>
               <div class="dialog-actions">
                 <button
@@ -1925,11 +2035,24 @@ function DirectoryBrowser({
                 </button>
                 <button
                   type="button"
+                  class="button button-danger-quiet"
+                  disabled={bulkProgress !== undefined}
+                  onClick={() =>
+                    void deleteSelectionPermanently(pendingBulkDelete)
+                  }
+                >
+                  {bulkProgress !== undefined && deleteAction === "permanent"
+                    ? `Deleting… ${bulkProgress} of ${pendingBulkDelete.length}`
+                    : "Delete permanently"}
+                </button>
+                <button
+                  type="button"
                   class="button button-danger"
+                  data-dialog-default
                   disabled={bulkProgress !== undefined}
                   onClick={() => void deleteSelection(pendingBulkDelete)}
                 >
-                  {bulkProgress !== undefined
+                  {bulkProgress !== undefined && deleteAction === "trash"
                     ? `Moving… ${bulkProgress} of ${pendingBulkDelete.length}`
                     : "Move to Trash"}
                 </button>

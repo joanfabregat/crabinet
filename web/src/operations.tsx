@@ -1820,11 +1820,14 @@ export function Modal({
     const previousFocus = document.activeElement as HTMLElement | null;
     const focusTimer = window.setTimeout(() => {
       if (!panel.current?.contains(document.activeElement)) {
-        panel.current
-          ?.querySelector<HTMLElement>(
+        (
+          panel.current?.querySelector<HTMLElement>(
+            "[data-dialog-default]:not(:disabled)",
+          ) ??
+          panel.current?.querySelector<HTMLElement>(
             "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [href]",
           )
-          ?.focus();
+        )?.focus();
       }
     }, 0);
     const keydown = (event: KeyboardEvent) => {

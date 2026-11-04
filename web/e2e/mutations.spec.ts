@@ -137,7 +137,7 @@ test.describe("writable share operations", () => {
     ).toBeVisible();
     await previewAction(page, "example.toml", "Delete").click();
     await page
-      .getByRole("dialog", { name: "Move example.toml to Trash?" })
+      .getByRole("dialog", { name: "Delete example.toml?" })
       .getByRole("button", { name: "Move to Trash" })
       .click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -165,7 +165,7 @@ test.describe("writable share operations", () => {
     await page.goto("/writable");
     await entryAction(page, "e2e-folder", "Delete").click();
     await page
-      .getByRole("dialog", { name: "Move e2e-folder to Trash?" })
+      .getByRole("dialog", { name: "Delete e2e-folder?" })
       .getByRole("button", { name: "Move to Trash" })
       .click();
     await expect(
@@ -308,7 +308,7 @@ test.describe("writable share operations", () => {
 
     await entryAction(page, "sse-external", "Delete").click();
     await page
-      .getByRole("dialog", { name: "Move sse-external to Trash?" })
+      .getByRole("dialog", { name: "Delete sse-external?" })
       .getByRole("button", { name: "Move to Trash" })
       .click();
     await expect(
@@ -320,7 +320,7 @@ test.describe("writable share operations", () => {
     page,
   }) => {
     const name = "251104_Note_cle_Scientifique_Metaux_2025_FR_long_name.pdf";
-    const title = `Move ${name} to Trash?`;
+    const title = `Delete ${name}?`;
     await openSignedIn(page, "/writable", "writer");
     await createEntry(page, "New file", "File name", name);
     await entryAction(page, name, "Delete").click();
@@ -344,6 +344,29 @@ test.describe("writable share operations", () => {
     await expect(
       directoryListing(page).getByRole("link", { name, exact: true }),
     ).toHaveCount(0);
+  });
+
+  test("deletes permanently without leaving an item in Trash", async ({
+    page,
+  }) => {
+    const name = "permanent-delete.txt";
+    await openSignedIn(page, "/writable", "writer");
+    await createEntry(page, "New file", "File name", name);
+    await entryAction(page, name, "Delete").click();
+
+    const dialog = page.getByRole("dialog", { name: `Delete ${name}?` });
+    await expect(
+      dialog.getByRole("button", { name: "Move to Trash" }),
+    ).toBeFocused();
+    await dialog.getByRole("button", { name: "Delete permanently" }).click();
+    await expect(page.getByText(`Permanently deleted ${name}.`)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Undo" })).toHaveCount(0);
+    await expect(
+      directoryListing(page).getByRole("link", { name, exact: true }),
+    ).toHaveCount(0);
+
+    await page.goto("/trash");
+    await expect(page.getByText(name, { exact: true })).toHaveCount(0);
   });
 
   test("empties a share's whole Trash, beyond the page shown", async ({
@@ -692,7 +715,7 @@ test.describe("writable share operations", () => {
 
     await bar.getByRole("button", { name: "Delete" }).click();
     const confirm = page.getByRole("dialog", {
-      name: "Move 2 items to Trash?",
+      name: "Delete 2 items?",
     });
     await confirm.getByRole("button", { name: "Move to Trash" }).click();
     await expect(page.getByText("Moved 2 items to Trash.")).toBeVisible();

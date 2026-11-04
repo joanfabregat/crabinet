@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
-    AuthorizedShare, DIRECTORY_QUOTA_BYTES, EntryKind, EntryMetadata, FsError, FsErrorCode,
-    FsResult, MAX_PATH_DEPTH, ShareFs, UsageError, UsageScan, VirtualPath,
+    AuthorizedShare, DIRECTORY_QUOTA_BYTES, EntryKind, EntryMetadata, EntryName, FsError,
+    FsErrorCode, FsResult, MAX_PATH_DEPTH, ShareFs, UsageError, UsageScan, VirtualPath,
     assert_no_external_alias, classify_metadata, ensure_same_device, ensure_subtree_within, map_io,
     measure_directory, metadata_in_parent_raw, random_internal_name, secure_file_options,
     sync_after_commit, sync_directory,
@@ -363,6 +363,34 @@ impl AuthorizedShare<'_> {
         deleted_by: &str,
         retention_days: u16,
     ) -> FsResult<TrashEntry> {
+        self.move_into_trash(path, expected, deleted_by, retention_days, State::Live)
+    }
+
+    /// Moves an entry out of the share for permanent removal and returns its
+    /// opaque ID. It gets the same validation as a move to Trash, and its
+    /// sidecar goes straight to the purging state, so it is never listed or
+    /// restorable and startup and GC passes finish a removal this request
+    /// does not. A crash before that state is written leaves an ordinary
+    /// Trash item.
+    pub fn move_to_purge(
+        &self,
+        path: &VirtualPath,
+        expected: EntryMetadata,
+        deleted_by: &str,
+        retention_days: u16,
+    ) -> FsResult<String> {
+        self.move_into_trash(path, expected, deleted_by, retention_days, State::Purging)
+            .map(|entry| entry.id)
+    }
+
+    fn move_into_trash(
+        &self,
+        path: &VirtualPath,
+        expected: EntryMetadata,
+        deleted_by: &str,
+        retention_days: u16,
+        published: State,
+    ) -> FsResult<TrashEntry> {
         self.require_write()?;
         if deleted_by.is_empty()
             || deleted_by.len() > 256
@@ -458,7 +486,7 @@ impl AuthorizedShare<'_> {
             }
             sync_after_commit(&parent);
             sync_after_commit(trash);
-            sidecar.state = State::Live;
+            sidecar.state = published;
             write_sidecar(trash, &sidecar, true)?;
             return sidecar.entry();
         }
@@ -616,6 +644,49 @@ impl AuthorizedShare<'_> {
             .as_ref()
             .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
         purge(trash, id, max_entries)
+    }
+
+    /// Runs one bounded step of removing a purging item and reports whether
+    /// the item is gone, including when a GC pass finished it first.
+    pub fn purge_trash_step(&self, id: &str, max_entries: usize) -> FsResult<bool> {
+        match self.purge_trash(id, max_entries) {
+            Ok(_) => {}
+            Err(error) if error.code() == FsErrorCode::NotFound => return Ok(true),
+            Err(error) => return Err(error),
+        }
+        let trash = self
+            .share
+            .trash
+            .as_ref()
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
+        Ok(!trash.exists(sidecar_name(id)))
+    }
+
+    /// Calls `visit` with the original path and metadata of every regular
+    /// file in a Trash item, walking at most `max_entries` entries without
+    /// following links. Entries the share never served are passed over.
+    pub fn visit_trash_files(
+        &self,
+        id: &str,
+        max_entries: usize,
+        visit: &mut dyn FnMut(&VirtualPath, &EntryMetadata),
+    ) -> FsResult<()> {
+        let trash = self
+            .share
+            .trash
+            .as_ref()
+            .ok_or_else(|| FsError::new(FsErrorCode::AccessDenied))?;
+        let sidecar = read_sidecar(trash, id)?;
+        let path = VirtualPath::parse_stored(&sidecar.original_path)?;
+        let metadata = payload_metadata(trash, id)?;
+        match metadata.kind {
+            EntryKind::File => visit(&path, &metadata),
+            EntryKind::Directory => {
+                let payload = trash.open_dir_nofollow(id).map_err(map_io)?;
+                walk_payload_files(&payload, &path, &mut 0, max_entries, visit)?;
+            }
+        }
+        Ok(())
     }
 
     /// Runs one bounded batch of emptying the whole Trash: picks up to
@@ -788,6 +859,44 @@ fn purge(trash: &Dir, id: &str, max_entries: usize) -> FsResult<usize> {
     trash.remove_file(sidecar_name(id)).map_err(map_io)?;
     sync_after_commit(trash);
     Ok(count)
+}
+
+fn walk_payload_files(
+    dir: &Dir,
+    path: &VirtualPath,
+    visited: &mut usize,
+    max_entries: usize,
+    visit: &mut dyn FnMut(&VirtualPath, &EntryMetadata),
+) -> FsResult<()> {
+    for entry in dir.entries().map_err(map_io)? {
+        *visited += 1;
+        if *visited > max_entries {
+            return Err(FsError::new(FsErrorCode::TooLarge));
+        }
+        let entry = entry.map_err(map_io)?;
+        let is_directory = entry.file_type().map_err(map_io)?.is_dir();
+        let Some(name) = entry
+            .file_name()
+            .into_string()
+            .ok()
+            .and_then(|name| EntryName::new(name).ok())
+        else {
+            continue;
+        };
+        let child_path = path.join(name.clone());
+        if is_directory {
+            if child_path.depth() > MAX_PATH_DEPTH {
+                return Err(FsError::new(FsErrorCode::TooDeep));
+            }
+            let child = dir.open_dir_nofollow(name.as_str()).map_err(map_io)?;
+            walk_payload_files(&child, &child_path, visited, max_entries, visit)?;
+        } else if let Ok(metadata) = metadata_in_parent_raw(dir, name.as_str())
+            && metadata.kind == EntryKind::File
+        {
+            visit(&child_path, &metadata);
+        }
+    }
+    Ok(())
 }
 
 /// Removes the entries of `dir`, whose own virtual depth is `depth`, without
@@ -1246,6 +1355,87 @@ mod tests {
                 .join(TRASH)
                 .join(&item.id)
                 .exists()
+        );
+    }
+
+    #[test]
+    fn a_permanent_removal_is_never_listed_or_restorable_and_resumes_in_gc() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        fs::create_dir(temp.path().join("folder")).unwrap();
+        for index in 0..5 {
+            fs::write(temp.path().join(format!("folder/{index}")), "x").unwrap();
+        }
+        let path = VirtualPath::parse("folder").unwrap();
+        let id = view
+            .move_to_purge(&path, view.metadata(&path).unwrap(), "user-1", 30)
+            .unwrap();
+        assert!(!temp.path().join("folder").exists());
+        assert!(view.list_trash(100).unwrap().is_empty());
+        assert_eq!(
+            view.restore_trash(&id, None).unwrap_err().code(),
+            FsErrorCode::Conflict
+        );
+
+        // A bounded step leaves the rest for the next pass, here GC, well
+        // before the sidecar's expiry.
+        assert!(!view.purge_trash_step(&id, 2).unwrap());
+        assert!(trash_path(&temp, &id).exists());
+        let batch = share.gc_expired_trash(SystemTime::now(), 100).unwrap();
+        assert_eq!(batch.purged, 1);
+        assert!(!trash_path(&temp, &id).exists());
+        assert!(view.purge_trash_step(&id, 2).unwrap());
+    }
+
+    #[test]
+    fn a_stale_validator_refuses_a_permanent_removal() {
+        let (temp, share, grant) = setup();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        fs::write(temp.path().join("file"), "one").unwrap();
+        let path = VirtualPath::parse("file").unwrap();
+        let stale = view.metadata(&path).unwrap();
+        fs::write(temp.path().join("file"), "changed").unwrap();
+        assert_eq!(
+            view.move_to_purge(&path, stale, "user-1", 30)
+                .unwrap_err()
+                .code(),
+            FsErrorCode::Conflict
+        );
+        assert_eq!(fs::read(temp.path().join("file")).unwrap(), b"changed");
+    }
+
+    #[test]
+    fn visiting_a_trash_item_reports_original_paths_and_never_follows_links() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, share, grant) = setup();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret"), "x").unwrap();
+        let view = share
+            .authorize(Some(&grant), GlobalPolicy::default())
+            .unwrap();
+        fs::create_dir_all(temp.path().join("folder/nested")).unwrap();
+        fs::write(temp.path().join("folder/top"), "a").unwrap();
+        fs::write(temp.path().join("folder/nested/deep"), "b").unwrap();
+        symlink(outside.path(), temp.path().join("folder/link")).unwrap();
+        let path = VirtualPath::parse("folder").unwrap();
+        let id = view
+            .move_to_purge(&path, view.metadata(&path).unwrap(), "user-1", 30)
+            .unwrap();
+        let mut seen = Vec::new();
+        view.visit_trash_files(&id, 100, &mut |path, _| seen.push(path.to_string()))
+            .unwrap();
+        seen.sort();
+        assert_eq!(seen, ["folder/nested/deep", "folder/top"]);
+        assert_eq!(
+            view.visit_trash_files(&id, 1, &mut |_, _| {})
+                .unwrap_err()
+                .code(),
+            FsErrorCode::TooLarge
         );
     }
 
