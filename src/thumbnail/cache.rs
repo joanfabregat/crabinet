@@ -248,6 +248,17 @@ impl ThumbnailCache {
         }
     }
 
+    /// Removes one entry, if present.
+    pub(crate) fn remove(&self, key: &CacheKey) {
+        let removed = match self.index.lock() {
+            Ok(mut index) => index.remove(key),
+            Err(_) => return,
+        };
+        if let Some(entry) = removed {
+            let _ = self.dir.remove(&file_name(key, entry.kind));
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn totals(&self) -> (usize, u64) {
         let index = self.index.lock().expect("index");

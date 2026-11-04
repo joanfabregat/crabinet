@@ -247,6 +247,24 @@ impl SearchService {
         }
     }
 
+    /// Removes an entry and everything indexed beneath it now, instead of at
+    /// the next pass that notices it is gone.
+    pub fn forget(&self, id: &ShareId, path: &VirtualPath) -> Result<(), rusqlite::Error> {
+        let path = path.to_string();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        // "/" sorts immediately before "0", so the descendants of a path are
+        // exactly the paths in ["path/", "path0").
+        let removed = writer.connection.execute(
+            "DELETE FROM entries WHERE share=?1 AND (path=?2 OR (path>=?3 AND path<?4))",
+            params![id.as_str(), path, format!("{path}/"), format!("{path}0")],
+        )?;
+        writer.total -= i64::try_from(removed).unwrap_or(i64::MAX);
+        Ok(())
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
@@ -1500,6 +1518,29 @@ mod tests {
             fixture.names("q=deep%20size:%3E10kb").await,
             ["drop/inner/deep.pdf"]
         );
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_entry_removes_it_and_its_descendants_at_once() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.root.join("forget-me")).unwrap();
+        fs::write(fixture.root.join("forget-me/child-marker.txt"), "x").unwrap();
+        fs::write(fixture.root.join("forget-me0.txt"), "x").unwrap();
+        fixture.full_pass("documents");
+        assert_eq!(
+            fixture.names("q=child-marker").await,
+            ["forget-me/child-marker.txt"]
+        );
+        fixture
+            .service
+            .forget(
+                &ShareId::new("documents").unwrap(),
+                &VirtualPath::parse("forget-me").unwrap(),
+            )
+            .unwrap();
+        assert!(fixture.names("q=child-marker").await.is_empty());
+        // The range ends before a sibling that sorts right after the folder.
+        assert_eq!(fixture.names("q=forget-me0").await, ["forget-me0.txt"]);
     }
 
     #[tokio::test]

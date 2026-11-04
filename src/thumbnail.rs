@@ -181,6 +181,33 @@ impl ThumbnailService {
         cache_key(&self.key, share_id, path, size, source)
     }
 
+    /// Whether a disk cache is configured.
+    pub(crate) fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
+    /// Drops the cached thumbnails of one version of a file, in every size.
+    /// Names are keyed, so only the current path and version can be found:
+    /// entries for an earlier name or version remain until they are evicted.
+    pub(crate) fn forget(
+        &self,
+        share_id: &ShareId,
+        path: &VirtualPath,
+        metadata: &crate::filesystem::EntryMetadata,
+    ) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let source = SourceIdentity {
+            len: metadata.size,
+            modified: metadata.modified,
+            file_id: metadata.file_id,
+        };
+        for size in SIZES {
+            cache.remove(&self.cache_key(share_id, path, size, &source));
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_budget_wait(mut self, wait: Duration) -> Self {
         self.budget_wait = wait;
@@ -972,6 +999,31 @@ pub(crate) mod tests {
         let changed = fixture.get(uri).await;
         assert_eq!(jpeg_size(&body(changed).await), (41, 30));
         assert_eq!(fixture.service().render_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_file_drops_its_sizes_and_nothing_else() {
+        let fixture = fixture();
+        for uri in [
+            "/api/v1/shares/documents/thumbnail?path=photo.png&size=256",
+            "/api/v1/shares/documents/thumbnail?path=photo.png&size=1600",
+            "/api/v1/shares/other/thumbnail?path=photo.png&size=256",
+        ] {
+            assert_eq!(fixture.get(uri).await.status(), StatusCode::OK);
+        }
+        assert_eq!(fixture.service().cache().unwrap().totals().0, 3);
+
+        let share = ShareId::new("documents").unwrap();
+        let path = VirtualPath::parse("photo.png").unwrap();
+        let identity = AuthenticatedIdentity::new("user-1", vec![grant("documents")]);
+        let authorized = fixture
+            .state
+            .browse()
+            .authorize_owned(&identity, &share)
+            .unwrap();
+        let metadata = authorized.view().metadata(&path).unwrap();
+        fixture.service().forget(&share, &path, &metadata);
+        assert_eq!(fixture.service().cache().unwrap().totals().0, 1);
     }
 
     #[tokio::test]
