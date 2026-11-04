@@ -12,6 +12,10 @@ concurrency:
   group: weekly-security
   cancel-in-progress: false
 
+env:
+  # Trivy's version check calls check.trivy.dev, which no longer resolves.
+  TRIVY_SKIP_VERSION_CHECK: "true"
+
 jobs:
   frontend:
     name: Build security-test frontend
