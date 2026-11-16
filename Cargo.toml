@@ -1,6 +1,6 @@
 [package]
 name = "crabinet"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -36,10 +36,10 @@ mime_guess = "2.0.5"
 # Keep the WebAuthn crypto self-contained in the scratch-based release image.
 openssl = { version = "0.10.81", features = ["vendored"] }
 rust-embed = { version = "8.12.0", features = ["include-exclude"] }
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs"] }
 rpassword = "7.5.4"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "hooks"] }
 schemars = { version = "1.2.2", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

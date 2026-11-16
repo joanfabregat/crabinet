@@ -1104,7 +1104,7 @@ impl SearchService {
         ]);
         // The gate admits at most READERS searches, so a free reader exists
         // unless a caller bypassed it.
-        let connection = self
+        let mut connection = self
             .readers
             .iter()
             .find_map(|reader| match reader.try_lock() {
