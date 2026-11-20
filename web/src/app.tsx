@@ -68,6 +68,7 @@ import {
   EntryActionButtons,
   Modal,
   OperationDialog,
+  PermissionsDialog,
   UploadQueue,
   WriteToolbar,
   type EntryOperation,
@@ -548,6 +549,18 @@ function AuthenticatedShell({
   const [signingOut, setSigningOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [uploadSelections, setUploadSelections] = useState<UploadSelection[]>(
+    [],
+  );
+  const enqueueUploads = useCallback((selection: UploadSelection) => {
+    setUploadSelections((current) => [...current, selection]);
+  }, []);
+  const [uploadRevision, setUploadRevision] = useState(0);
+  const consumeUploadSelection = useCallback((id: string) => {
+    setUploadSelections((current) =>
+      current.filter((selection) => selection.id !== id),
+    );
+  }, []);
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
   const [passkeysVisible, setPasskeysVisible] = useState(false);
@@ -986,6 +999,9 @@ function AuthenticatedShell({
             autosave={autosave}
             wrapLines={wrapLines}
             folderSizes={session.folderSizes === true}
+            showUnixMetadata={session.showUnixMetadata !== false}
+            onUpload={enqueueUploads}
+            uploadRevision={uploadRevision}
             onSessionExpired={onSessionExpired}
             onSessionRefreshed={onSessionRefreshed}
           />
@@ -999,25 +1015,41 @@ function AuthenticatedShell({
       )}
     </div>
   );
-  return selectedShare &&
+  const browser =
+    selectedShare &&
     route.view !== "trash" &&
     (selectedShare.searchEnabled !== false ||
       route.searchQuery !== undefined) ? (
-    <SearchPanel
-      api={api}
-      route={route}
-      navigation={navigation}
-      shares={session.shares}
-      hidden={showHiddenFiles}
-      onSessionExpired={onSessionExpired}
-      renderLayout={layout}
-    />
-  ) : (
-    layout()
+      <SearchPanel
+        api={api}
+        route={route}
+        navigation={navigation}
+        shares={session.shares}
+        hidden={showHiddenFiles}
+        onSessionExpired={onSessionExpired}
+        renderLayout={layout}
+      />
+    ) : (
+      layout()
+    );
+  return (
+    <>
+      {browser}
+      <UploadQueue
+        api={api}
+        csrfToken={session.csrfToken}
+        selections={uploadSelections}
+        onSelectionConsumed={consumeUploadSelection}
+        onChanged={() => setUploadRevision((current) => current + 1)}
+        onSessionExpired={onSessionExpired}
+      />
+    </>
   );
 }
 
 interface DirectoryBrowserProps {
+  onUpload: (selection: UploadSelection) => void;
+  uploadRevision: number;
   searchResults?: preact.ComponentChildren;
   api: ApiClient;
   csrfToken: string;
@@ -1033,11 +1065,14 @@ interface DirectoryBrowserProps {
   wrapLines: boolean;
   /** Whether the server computes folder sizes for the Size column. */
   folderSizes: boolean;
+  showUnixMetadata: boolean;
   onSessionExpired: () => void;
   onSessionRefreshed: (session: Session) => void;
 }
 
 function DirectoryBrowser({
+  onUpload,
+  uploadRevision,
   searchResults,
   api,
   csrfToken,
@@ -1050,6 +1085,7 @@ function DirectoryBrowser({
   autosave,
   wrapLines,
   folderSizes: folderSizesEnabled,
+  showUnixMetadata,
   onSessionExpired,
   onSessionRefreshed,
 }: DirectoryBrowserProps) {
@@ -1062,7 +1098,6 @@ function DirectoryBrowser({
   // only once a reload has listed the sizes still cached.
   const [listingRevision, setListingRevision] = useState(0);
   const [operation, setOperation] = useState<EntryOperation>();
-  const [uploadSelection, setUploadSelection] = useState<UploadSelection>();
   const [fileDragActive, setFileDragActive] = useState(false);
   const [previewOperationError, setPreviewOperationError] = useState<string>();
   const [deleteError, setDeleteError] = useState<string>();
@@ -1374,14 +1409,12 @@ function DirectoryBrowser({
 
   useEffect(() => {
     // A history/share change invalidates every relative operation target.
-    // Unmounting an upload queue also aborts its active transports.
     const nextLocation = `${share.id}\u0000${route.path}`;
     if (operationLocation.current !== nextLocation) {
       operationLocation.current = nextLocation;
       setOperation(undefined);
       setPendingDelete(undefined);
       setPendingBulkDelete(undefined);
-      setUploadSelection(undefined);
     }
   }, [route.path, share.id]);
 
@@ -1463,7 +1496,13 @@ function DirectoryBrowser({
       const files = Array.from(event.dataTransfer?.files ?? []);
       resetFileDrag();
       if (writable && files.length > 0) {
-        setUploadSelection({ id: crypto.randomUUID(), files });
+        onUpload({
+          id: crypto.randomUUID(),
+          files,
+          directory: route.path,
+          shareId: share.id,
+          shareName: share.name,
+        });
       }
     };
 
@@ -1488,7 +1527,7 @@ function DirectoryBrowser({
       window.removeEventListener("blur", dragEnd);
       resetFileDrag();
     };
-  }, [route.path, share.id, writable]);
+  }, [onUpload, route.path, share.id, share.name, writable]);
 
   useEffect(() => {
     if (route.view === "trash") return;
@@ -1625,6 +1664,7 @@ function DirectoryBrowser({
     navigation,
     onSessionExpired,
     refreshKey,
+    uploadRevision,
     route.path,
     route.unresolved,
     route.view,
@@ -2155,7 +2195,13 @@ function DirectoryBrowser({
                           setOperation({ kind: "create-folder" })
                         }
                         onUpload={(files) =>
-                          setUploadSelection({ id: crypto.randomUUID(), files })
+                          onUpload({
+                            id: crypto.randomUUID(),
+                            files,
+                            directory: route.path,
+                            shareId: share.id,
+                            shareName: share.name,
+                          })
                         }
                       />
                     )}
@@ -2306,6 +2352,27 @@ function DirectoryBrowser({
           revision={refreshKey}
           writable={writable && route.searchQuery === undefined}
           fullScreen={route.previewMode === "full"}
+          showUnixMetadata={showUnixMetadata}
+          onChangePermissions={async (metadata, mode, signal) => {
+            await withCsrfRetry(
+              api,
+              csrfToken,
+              userId,
+              onSessionRefreshed,
+              (token) =>
+                api.changePermissions(
+                  metadata.shareId,
+                  metadata.path,
+                  mode,
+                  metadata.mode!,
+                  metadata.etag,
+                  token,
+                  signal,
+                ),
+            );
+            setRefreshKey((current) => current + 1);
+            showToast("Permissions updated.");
+          }}
           onOperation={operateOnPreview}
           operationError={previewOperationError}
           onClose={closePreview}
@@ -2337,19 +2404,6 @@ function DirectoryBrowser({
           onSessionExpired={onSessionExpired}
           onSessionRefreshed={onSessionRefreshed}
           userId={userId}
-        />
-      )}
-      {uploadSelection && (
-        <UploadQueue
-          key={uploadSelection.id}
-          api={api}
-          csrfToken={csrfToken}
-          directory={route.path}
-          files={uploadSelection.files}
-          shareId={share.id}
-          onClose={() => setUploadSelection(undefined)}
-          onChanged={() => setRefreshKey((value) => value + 1)}
-          onSessionExpired={onSessionExpired}
         />
       )}
       {fileDragActive && (
@@ -2558,6 +2612,12 @@ interface PreviewPanelProps {
   revision: number;
   writable: boolean;
   fullScreen: boolean;
+  showUnixMetadata: boolean;
+  onChangePermissions: (
+    metadata: EntryMetadata,
+    mode: string,
+    signal: AbortSignal,
+  ) => Promise<void>;
   onOperation: (kind: "edit" | "rename" | "move" | "delete") => void;
   operationError?: string;
   onClose: () => void;
@@ -2584,6 +2644,8 @@ function PreviewPanel({
   revision,
   writable,
   fullScreen,
+  showUnixMetadata,
+  onChangePermissions,
   onOperation,
   operationError,
   onClose,
@@ -2596,6 +2658,7 @@ function PreviewPanel({
     status: "loading",
   });
   const [refreshKey, setRefreshKey] = useState(0);
+  const [editingPermissions, setEditingPermissions] = useState<EntryMetadata>();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const filename = path.split("/").at(-1) ?? path;
@@ -2842,7 +2905,10 @@ function PreviewPanel({
         </div>
         {operationError && <Notice tone="danger">{operationError}</Notice>}
 
-        <dl class="preview-metadata" aria-label="File details">
+        <dl
+          class={`preview-metadata${showUnixMetadata ? "" : " preview-metadata-basic"}`}
+          aria-label="File details"
+        >
           <div>
             <dt>Size</dt>
             <dd>{formatSize(metadata?.size ?? previewDocument?.size)}</dd>
@@ -2867,8 +2933,58 @@ function PreviewPanel({
                 : formatTimestamp(metadata?.createdAtMs)}
             </dd>
           </div>
+          {showUnixMetadata && (
+            <>
+              <div>
+                <dt>Permissions</dt>
+                <dd>
+                  {metadataState.status === "loading"
+                    ? "Loading…"
+                    : (metadata?.mode ?? "—")}
+                  {writable && metadata?.mode && (
+                    <button
+                      type="button"
+                      class="permissions-edit"
+                      aria-label={`Change permissions for ${filename}`}
+                      onClick={() => setEditingPermissions(metadata)}
+                    >
+                      <Pencil size={13} aria-hidden="true" />
+                    </button>
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>Owner</dt>
+                <dd>
+                  {metadataState.status === "loading" ? (
+                    "Loading…"
+                  ) : metadata?.uid !== undefined &&
+                    metadata?.gid !== undefined ? (
+                    <span
+                      title={`User ID ${metadata.uid} · Group ID ${metadata.gid}`}
+                    >
+                      {metadata.ownerUser ?? metadata.uid} :{" "}
+                      {metadata.ownerGroup ?? metadata.gid}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
+                </dd>
+              </div>
+            </>
+          )}
         </dl>
 
+        {editingPermissions && (
+          <PermissionsDialog
+            metadata={editingPermissions}
+            onSave={(mode, signal) =>
+              onChangePermissions(editingPermissions, mode, signal)
+            }
+            onClose={() => setEditingPermissions(undefined)}
+            onSessionExpired={onSessionExpired}
+          />
+        )}
         <div class="preview-body">
           {state.status === "loading" ? (
             <p class="status-message" role="status" aria-live="polite">

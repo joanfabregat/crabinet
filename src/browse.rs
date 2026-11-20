@@ -195,6 +195,7 @@ pub struct BrowseLimits {
     pub stream_chunk_bytes: usize,
     /// Whether the folder-size route walks folders (`server.folder_sizes`).
     pub folder_sizes: bool,
+    pub show_unix_metadata: bool,
     /// How archives compress their files (`server.archive_compression`).
     pub archive_compression: ArchiveCompression,
 }
@@ -210,6 +211,7 @@ impl Default for BrowseLimits {
             max_archive_entries: 10_000,
             stream_chunk_bytes: 65_536,
             folder_sizes: true,
+            show_unix_metadata: true,
             archive_compression: ArchiveCompression::Auto,
         }
     }
@@ -269,6 +271,7 @@ impl ConfiguredShare {
 }
 
 pub struct BrowseState {
+    owner_names: crate::ownership::OwnerNames,
     shares: HashMap<ShareId, Arc<ConfiguredShare>>,
     limits: BrowseLimits,
     policy: GlobalPolicy,
@@ -415,6 +418,7 @@ impl BrowseState {
         cursor_key: [u8; 32],
     ) -> Self {
         Self {
+            owner_names: crate::ownership::OwnerNames::default(),
             shares,
             limits,
             policy,
@@ -446,6 +450,15 @@ impl BrowseState {
             ),
             folder_sizes: Arc::new(FolderSizeCache::default()),
         }
+    }
+
+    pub fn with_owner_names(mut self, names: crate::ownership::OwnerNames) -> Self {
+        self.owner_names = names;
+        self
+    }
+
+    pub(crate) fn show_unix_metadata(&self) -> bool {
+        self.limits.show_unix_metadata
     }
 
     /// Replaces the folder-size cache, so a test can fill it or age it.
@@ -1054,6 +1067,16 @@ struct MetadataResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<u64>,
     etag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_group: Option<String>,
 }
 
 async fn read_metadata(
@@ -1090,6 +1113,19 @@ async fn read_metadata(
         accessed_at_ms: system_time_millis(metadata.accessed),
         created_at_ms: system_time_millis(metadata.created),
         etag: etag.clone(),
+        mode: browse
+            .show_unix_metadata()
+            .then(|| format!("{:04o}", metadata.mode)),
+        uid: browse.show_unix_metadata().then_some(metadata.uid),
+        gid: browse.show_unix_metadata().then_some(metadata.gid),
+        owner_user: browse
+            .show_unix_metadata()
+            .then(|| browse.owner_names.user(metadata.uid).map(str::to_owned))
+            .flatten(),
+        owner_group: browse
+            .show_unix_metadata()
+            .then(|| browse.owner_names.group(metadata.gid).map(str::to_owned))
+            .flatten(),
     });
     response
         .headers_mut()
@@ -2240,6 +2276,17 @@ mod tests {
         };
         let mut browse =
             BrowseState::new(vec![share], limits, policy, [0x5a; 32]).expect("browse state");
+        let metadata = fs::metadata(root.path()).unwrap();
+        browse = browse.with_owner_names(crate::ownership::OwnerNames {
+            users: HashMap::from([(
+                std::os::unix::fs::MetadataExt::uid(&metadata),
+                "alice".into(),
+            )]),
+            groups: HashMap::from([(
+                std::os::unix::fs::MetadataExt::gid(&metadata),
+                "staff".into(),
+            )]),
+        });
         if let Some(cache) = cache {
             browse = browse.with_folder_size_cache(cache);
         }
@@ -2616,6 +2663,15 @@ mod tests {
         assert_eq!(value["name"], "a.txt");
         assert_eq!(value["kind"], "file");
         assert_eq!(value["size"], 6);
+        assert_eq!(value["ownerUser"], "alice");
+        assert_eq!(value["ownerGroup"], "staff");
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let actual = fs::metadata(fixture._root.path().join("a.txt")).unwrap();
+            assert_eq!(value["mode"], format!("{:04o}", actual.mode() & 0o7777));
+            assert_eq!(value["uid"], actual.uid());
+            assert_eq!(value["gid"], actual.gid());
+        }
         assert_eq!(value["etag"], header_etag.to_str().unwrap());
         assert!(value.get("modifiedAt").is_none());
         for timestamp in ["modifiedAtMs", "accessedAtMs", "createdAtMs"] {
@@ -2660,6 +2716,28 @@ mod tests {
         )
         .await;
         assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn disabled_unix_metadata_is_omitted_from_api_responses() {
+        let fixture = fixture(BrowseLimits {
+            show_unix_metadata: false,
+            ..BrowseLimits::default()
+        });
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            Request::get("/api/v1/shares/documents/metadata?path=a.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = json(response).await;
+        for field in ["mode", "uid", "gid", "ownerUser", "ownerGroup"] {
+            assert!(value.get(field).is_none(), "exposed {field}");
+        }
+        assert_eq!(value["size"], 6);
     }
 
     #[tokio::test]

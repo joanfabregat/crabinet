@@ -10,7 +10,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{client_address::IpNetwork, filesystem::ShareId};
+use crate::{client_address::IpNetwork, filesystem::ShareId, ownership::OwnerNames};
 
 const CONFIG_VERSION: u32 = 1;
 const MIN_SESSION_SECRET_BYTES: usize = 32;
@@ -198,6 +198,17 @@ struct RawServerConfig {
     /// Show folder sizes in listings. Each shown folder is walked in the background, within a budget of 200,000 entries or 2 seconds.
     #[serde(default = "default_true")]
     folder_sizes: bool,
+    /// Show Unix permissions and ownership in file details; false also omits them from metadata responses.
+    #[serde(default = "default_true")]
+    show_unix_metadata: bool,
+    /// Optional UID-to-name display overrides, useful when container accounts differ from the host.
+    #[serde(default)]
+    #[schemars(length(max = 256))]
+    owner_users: HashMap<String, String>,
+    /// Optional GID-to-name display overrides. These never change ownership or access.
+    #[serde(default)]
+    #[schemars(length(max = 256))]
+    owner_groups: HashMap<String, String>,
     /// Compression of folder and selection ZIP downloads. `auto` deflates text files of at least 1 KiB, decided per file, and stores media, archives, and other binary files; `off` stores every file and always sends an exact `Content-Length`.
     #[serde(default)]
     archive_compression: ArchiveCompression,
@@ -238,6 +249,14 @@ struct RawShare {
     /// Include this share in filename and metadata search.
     #[serde(default = "default_true")]
     search_enabled: bool,
+    /// Exact Unix permissions for new files, as four octal digits. Unset uses the process umask.
+    #[serde(default)]
+    #[schemars(regex(pattern = "^0[0-7]{3}$"))]
+    default_file_mode: Option<String>,
+    /// Exact Unix permissions for new directories. Owner read/write/search is required.
+    #[serde(default)]
+    #[schemars(regex(pattern = "^07[0-7]{2}$"))]
+    default_directory_mode: Option<String>,
     #[serde(default)]
     grants: Vec<RawGrant>,
 }
@@ -374,6 +393,8 @@ pub struct ServerConfig {
     thumbnail_cache_path: Option<PathBuf>,
     max_thumbnail_cache_size: u64,
     folder_sizes: bool,
+    show_unix_metadata: bool,
+    owner_names: OwnerNames,
     archive_compression: ArchiveCompression,
 }
 
@@ -405,6 +426,8 @@ pub struct Share {
     root: PathBuf,
     read_only: bool,
     search_enabled: bool,
+    default_file_mode: Option<u32>,
+    default_directory_mode: Option<u32>,
     grants: HashMap<String, Permission>,
 }
 
@@ -772,6 +795,11 @@ impl Config {
                 }
             }
             shares.push(Share {
+                default_file_mode: parse_creation_mode(share.default_file_mode.as_deref(), false)?,
+                default_directory_mode: parse_creation_mode(
+                    share.default_directory_mode.as_deref(),
+                    true,
+                )?,
                 id: share.id,
                 name: share.name,
                 root,
@@ -882,6 +910,16 @@ impl Config {
                 thumbnail_cache_path,
                 max_thumbnail_cache_size,
                 folder_sizes: raw.server.folder_sizes,
+                show_unix_metadata: raw.server.show_unix_metadata,
+                owner_names: {
+                    let users = parse_owner_labels(raw.server.owner_users, "owner_users")?;
+                    let groups = parse_owner_labels(raw.server.owner_groups, "owner_groups")?;
+                    if raw.server.show_unix_metadata {
+                        OwnerNames::load(users, groups)
+                    } else {
+                        OwnerNames::default()
+                    }
+                },
                 archive_compression: raw.server.archive_compression,
             },
             users,
@@ -1020,6 +1058,14 @@ impl ServerConfig {
     /// Whether listings show folder sizes, walked in the background.
     pub fn folder_sizes(&self) -> bool {
         self.folder_sizes
+    }
+
+    pub fn show_unix_metadata(&self) -> bool {
+        self.show_unix_metadata
+    }
+
+    pub fn owner_names(&self) -> &OwnerNames {
+        &self.owner_names
     }
 
     /// How folder and selection archives compress their files.
@@ -1185,7 +1231,56 @@ fn default_max_thumbnail_cache_size() -> String {
     "256 MiB".into()
 }
 
+fn parse_owner_labels(
+    labels: HashMap<String, String>,
+    field: &str,
+) -> Result<HashMap<u32, String>, ConfigError> {
+    if labels.len() > 256 {
+        return Err(ConfigError::Validation(format!(
+            "server.{field} accepts at most 256 entries"
+        )));
+    }
+    labels.into_iter().map(|(id, name)| {
+        let parsed = id.parse::<u32>().ok().filter(|value| value.to_string() == id);
+        match parsed {
+            Some(id) if crate::ownership::valid_account_name(&name) => Ok((id, name)),
+            _ => Err(ConfigError::Validation(format!("server.{field} requires canonical numeric IDs and names of 1–128 bytes without colons, control characters, or surrounding whitespace"))),
+        }
+    }).collect()
+}
+
+fn parse_creation_mode(value: Option<&str>, directory: bool) -> Result<Option<u32>, ConfigError> {
+    let Some(value) = value else { return Ok(None) };
+    let field = if directory {
+        "default_directory_mode"
+    } else {
+        "default_file_mode"
+    };
+    if value.len() != 4
+        || !value.starts_with('0')
+        || !value.bytes().all(|b| (b'0'..=b'7').contains(&b))
+    {
+        return Err(ConfigError::Validation(format!(
+            "{field} must be a quoted four-digit octal mode between 0000 and 0777"
+        )));
+    }
+    let mode = u32::from_str_radix(value, 8).expect("validated octal mode");
+    if directory && mode & 0o700 != 0o700 {
+        return Err(ConfigError::Validation(format!(
+            "{field} must include owner read, write, and search permissions"
+        )));
+    }
+    Ok(Some(mode))
+}
+
 impl Share {
+    pub fn default_file_mode(&self) -> Option<u32> {
+        self.default_file_mode
+    }
+
+    pub fn default_directory_mode(&self) -> Option<u32> {
+        self.default_directory_mode
+    }
     pub fn search_enabled(&self) -> bool {
         self.search_enabled
     }
@@ -1959,6 +2054,30 @@ permission = "write"
     }
 
     #[test]
+    fn share_creation_modes_are_optional_strict_octal_strings() {
+        let tree = TestTree::new();
+        let config = tree.load(&tree.valid_text()).unwrap();
+        assert_eq!(config.shares()[0].default_file_mode(), None);
+        assert_eq!(config.shares()[0].default_directory_mode(), None);
+        let text = tree.valid_text().replace(
+            "read_only = false",
+            "read_only = false\ndefault_file_mode = \"0600\"\ndefault_directory_mode = \"0700\"",
+        );
+        let config = tree.load(&text).unwrap();
+        assert_eq!(config.shares()[0].default_file_mode(), Some(0o600));
+        assert_eq!(config.shares()[0].default_directory_mode(), Some(0o700));
+        for invalid in ["600", "0888", "1600", "0o600", " 0600", "0600\n"] {
+            assert!(
+                tree.load(&text.replace("\"0600\"", &format!("{invalid:?}")))
+                    .is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(tree.load(&text.replace("\"0600\"", "600")).is_err());
+        assert!(tree.load(&text.replace("\"0700\"", "\"0600\"")).is_err());
+    }
+
+    #[test]
     fn loads_valid_config_and_applies_share_read_only() {
         let tree = TestTree::new();
         let text = tree
@@ -1991,6 +2110,41 @@ permission = "write"
         );
         assert_eq!(config.shares()[0].permission_for("bob"), None);
         assert!(!format!("{config:?}").contains(HASH));
+    }
+
+    #[test]
+    fn unix_metadata_display_and_owner_labels_are_validated() {
+        let tree = TestTree::new();
+        assert!(
+            tree.load(&tree.valid_text())
+                .unwrap()
+                .server()
+                .show_unix_metadata()
+        );
+        let text = tree.valid_text().replace("max_preview_size = \"1 MiB\"", "max_preview_size = \"1 MiB\"\nowner_users = { \"4294967295\" = \"alice\" }\nowner_groups = { \"4294967295\" = \"staff\" }");
+        let config = tree.load(&text).unwrap();
+        assert_eq!(config.server().owner_names().user(u32::MAX), Some("alice"));
+        assert_eq!(config.server().owner_names().group(u32::MAX), Some("staff"));
+        let hidden = text.replace("[server]", "[server]\nshow_unix_metadata = false");
+        let config = tree.load(&hidden).unwrap();
+        assert!(!config.server().show_unix_metadata());
+        assert_eq!(config.server().owner_names().user(u32::MAX), None);
+        assert!(
+            tree.load(&hidden.replace(
+                "show_unix_metadata = false",
+                "show_unix_metadata = \"false\""
+            ))
+            .is_err()
+        );
+        for id in ["-1", "01", "+1", "4294967296", "bad"] {
+            assert!(tree.load(&text.replace("4294967295", id)).is_err());
+        }
+        for name in ["", " alice", "alice:staff", "bad\nname", &"a".repeat(129)] {
+            assert!(
+                tree.load(&text.replace("\"alice\" }", &format!("{name:?} }}")))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

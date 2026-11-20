@@ -1510,6 +1510,36 @@ describe("API client", () => {
     });
   });
 
+  it.each([
+    { mode: "600" },
+    { mode: "0888" },
+    { mode: 600 },
+    { uid: -1 },
+    { uid: 1.5 },
+    { gid: 4294967296 },
+    { gid: "1000" },
+    { ownerUser: 1000 },
+    { ownerUser: "" },
+    { ownerGroup: "bad\nname" },
+    { ownerGroup: "bad:group" },
+    { ownerUser: " alice" },
+    { ownerUser: "a".repeat(129) },
+  ])("rejects malformed permission and owner metadata: %j", async (fields) => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        shareId: "docs",
+        path: "a.txt",
+        name: "a.txt",
+        kind: "file",
+        etag: 'W/"v"',
+        ...fields,
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).metadata("docs", "a.txt"),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
   it("parses optional metadata timestamps, including the modification time", async () => {
     const fetch = vi
       .fn<typeof globalThis.fetch>()
@@ -1523,6 +1553,11 @@ describe("API client", () => {
           modifiedAtMs: 1_789_599_000_000,
           accessedAtMs: 1_789_599_600_000,
           createdAtMs: 1_789_513_200_000,
+          mode: "0600",
+          uid: 0,
+          gid: 4294967295,
+          ownerUser: "alice",
+          ownerGroup: "staff",
           etag: 'W/"v"',
         }),
       )
@@ -1541,6 +1576,11 @@ describe("API client", () => {
       modifiedAtMs: 1_789_599_000_000,
       accessedAtMs: 1_789_599_600_000,
       createdAtMs: 1_789_513_200_000,
+      mode: "0600",
+      uid: 0,
+      gid: 4294967295,
+      ownerUser: "alice",
+      ownerGroup: "staff",
     });
     const directory = await api.metadata("docs", "folder");
     expect(directory.modifiedAtMs).toBeUndefined();

@@ -17,6 +17,7 @@ pub(crate) mod folder_sizes;
 pub mod fuzzing;
 pub mod mutations;
 pub mod oidc;
+pub mod ownership;
 pub mod password;
 pub mod preview;
 pub mod search;

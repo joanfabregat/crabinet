@@ -532,6 +532,42 @@ test("keyboard navigation, responsive layout, and primary views pass axe", async
   await page.getByRole("link", { name: "hello.rs", exact: true }).click();
   await expect(page.getByLabel("File source")).toBeVisible();
 
+  const details = page.getByLabel("File details");
+  await expect(
+    page.getByRole("button", { name: "Change permissions for hello.rs" }),
+  ).toHaveCount(0);
+  await expect(details.locator("dt")).toHaveText([
+    "Size",
+    "Type",
+    "Modified",
+    "Created",
+    "Permissions",
+    "Owner",
+  ]);
+  await expect(
+    details
+      .locator("div")
+      .filter({ has: page.locator("dt", { hasText: /^Permissions$/ }) })
+      .locator("dd"),
+  ).toHaveText(/^[0-7]{4}$/);
+  const metadataResponse = await page.request.get(
+    "/api/v1/shares/read-only/metadata?path=hello.rs",
+  );
+  const ownerMetadata = (await metadataResponse.json()) as {
+    ownerUser?: string;
+    ownerGroup?: string;
+    uid: number;
+    gid: number;
+  };
+  await expect(
+    details
+      .locator("div")
+      .filter({ has: page.locator("dt", { hasText: /^Owner$/ }) })
+      .locator("dd"),
+  ).toHaveText(
+    `${ownerMetadata.ownerUser ?? ownerMetadata.uid} : ${ownerMetadata.ownerGroup ?? ownerMetadata.gid}`,
+  );
+
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Zoom out" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Zoom in" })).toHaveCount(0);

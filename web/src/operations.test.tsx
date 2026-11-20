@@ -7,14 +7,94 @@ import {
 } from "@testing-library/preact";
 import { describe, expect, it, vi } from "vitest";
 
-import { type ApiClient, type DirectoryPage } from "./api";
+import { ApiError, type ApiClient, type DirectoryPage } from "./api";
 import {
   detectIndent,
   EntryActionButtons,
   indentEdit,
   OperationDialog,
+  PermissionsDialog,
   type EntryOperation,
 } from "./operations";
+
+describe("permission editor", () => {
+  const metadata = {
+    shareId: "work",
+    path: "note.txt",
+    name: "note.txt",
+    kind: "file" as const,
+    mode: "0600",
+    etag: 'W/"original"',
+  };
+
+  it("edits octal permissions through checkboxes and saves with keyboard focus", async () => {
+    const onSave = vi.fn(async () => undefined),
+      onClose = vi.fn();
+    render(
+      <PermissionsDialog
+        metadata={metadata}
+        onSave={onSave}
+        onClose={onClose}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    const input = screen.getByLabelText("Octal permissions");
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(
+      screen.getByRole("button", { name: "Save permissions" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Group read" }));
+    expect(input).toHaveValue("0640");
+    fireEvent.click(screen.getByRole("button", { name: "Save permissions" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(onSave).toHaveBeenCalledWith("0640", expect.any(AbortSignal));
+  });
+
+  it("rejects special bits and warns before removing owner read access", () => {
+    render(
+      <PermissionsDialog
+        metadata={metadata}
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    fireEvent.input(screen.getByLabelText("Octal permissions"), {
+      target: { value: "4600" },
+    });
+    expect(
+      screen.getByRole("button", { name: "Save permissions" }),
+    ).toBeDisabled();
+    fireEvent.input(screen.getByLabelText("Octal permissions"), {
+      target: { value: "0000" },
+    });
+    expect(screen.getByText(/Removing owner read access/)).toBeVisible();
+    expect(
+      screen.getByRole("checkbox", { name: "Owner read" }),
+    ).not.toBeChecked();
+  });
+
+  it("keeps edits visible when the file changes before saving", async () => {
+    const onClose = vi.fn();
+    render(
+      <PermissionsDialog
+        metadata={metadata}
+        onSave={vi.fn(async () => {
+          throw new ApiError("conflict", "stale");
+        })}
+        onClose={onClose}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Group read" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save permissions" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "permissions changed",
+    );
+    expect(screen.getByLabelText("Octal permissions")).toHaveValue("0640");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
 
 const pages: Record<string, DirectoryPage> = {
   "": {
@@ -45,6 +125,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
       etag: 'W/"test"',
     })),
     createFile: vi.fn(),
+    changePermissions: vi.fn(),
     createDirectory: vi.fn(),
     moveEntry: vi.fn(),
     ...overrides,

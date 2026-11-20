@@ -57,11 +57,14 @@ The cursor contains no host path. Its HMAC binds the authenticated subject, effe
   "name": "summary.md",
   "kind": "file",
   "size": 1234,
+  "mode": "0644",
+  "uid": 1000,
+  "gid": 1000,
   "etag": "W/\"opaque-validator\""
 }
 ```
 
-Directory metadata omits `size`. The ETag is also returned in the response header and changes after an atomic entry replacement without exposing inode, device, owner, or ambient path information.
+Directory metadata omits `size`. With `server.show_unix_metadata = true` (the default), metadata includes `mode` (a four-digit octal string including special permission bits), `uid`, and `gid` (numeric Unix user and group IDs), read from the opened handle, plus `ownerUser` and `ownerGroup` when names resolve. IDs describe the service's filesystem namespace. Names come from startup-loaded runtime account files or the operator's `server.owner_users`/`server.owner_groups` overrides; each missing name falls back to its numeric ID in the UI. The preview shows six details: Size, Type, Modified, Created, Permissions, and Owner (user : group); numeric IDs remain in the Owner tooltip. With `show_unix_metadata = false`, the API omits all five Unix metadata fields, the session advertises `showUnixMetadata: false`, and the preview shows its original four details. These OS permissions are separate from Crabinet's read/write share grants. The ETag is also returned in the response header and changes after an atomic entry replacement without exposing inode, device, or ambient path information.
 
 Metadata lookups and the pre-commit lookup of a move or move-to-Trash share one gate for blocking filesystem work that no narrower limit bounds: at most 64 run concurrently across the process and 16 per authenticated user, so a slow disk or network filesystem cannot let them occupy the runtime's blocking thread pool. Further requests receive `429` with code `busy` and `Retry-After`. Session lookups and sign-in are not counted against this gate.
 

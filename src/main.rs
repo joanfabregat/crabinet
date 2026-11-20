@@ -171,7 +171,9 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
             } else {
                 ShareFs::open_read_only(id, share.root())
             }
-            .context("cannot open configured share")?;
+            .context("cannot open configured share")?
+            .with_creation_modes(share.default_file_mode(), share.default_directory_mode())
+            .context("invalid share creation modes")?;
             let recovered = filesystem
                 .recover_staging_files(100_000)
                 .context("cannot recover interrupted staged writes")?;
@@ -192,6 +194,7 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
     let limits = BrowseLimits {
         max_text_bytes: config.server().max_preview_size(),
         folder_sizes: config.server().folder_sizes(),
+        show_unix_metadata: config.server().show_unix_metadata(),
         archive_compression: config.server().archive_compression(),
         ..BrowseLimits::default()
     };
@@ -201,6 +204,7 @@ fn browse_state(config: &Config) -> Result<BrowseState> {
         GlobalPolicy::default(),
         derive_key(b"index:browse-cursor:v1\0", config.session_secret()),
     )
+    .map(|browse| browse.with_owner_names(config.server().owner_names().clone()))
     .context("invalid browse policy")
 }
 

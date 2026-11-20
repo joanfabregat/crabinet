@@ -31,6 +31,8 @@ export function CopyPathButton({
   const [copied, setCopied] = useState(false);
   const [showFallback, setShowFallback] = useState(false);
   const fallbackInput = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
+  const copyButton = useRef<HTMLButtonElement>(null);
+  const fallbackPanel = useRef<HTMLDivElement>(null);
   const showToast = useToast();
   // A multi-line value, such as a file's source, needs a text area to keep
   // its line breaks.
@@ -40,6 +42,7 @@ export function CopyPathButton({
     if (showFallback) {
       fallbackInput.current?.focus();
       fallbackInput.current?.select();
+      return () => copyButton.current?.focus();
     }
   }, [showFallback]);
 
@@ -59,6 +62,7 @@ export function CopyPathButton({
   return (
     <>
       <button
+        ref={copyButton}
         class={text ? className : `${className} tooltip-action`}
         role={role}
         type="button"
@@ -76,10 +80,33 @@ export function CopyPathButton({
       {showFallback && (
         <div class="modal-backdrop copy-fallback-backdrop">
           <div
+            ref={fallbackPanel}
             class="modal-panel copy-fallback"
             role="dialog"
             aria-modal="true"
             aria-labelledby="copy-path-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                setShowFallback(false);
+              } else if (event.key === "Tab") {
+                event.stopPropagation();
+                const controls =
+                  fallbackPanel.current?.querySelectorAll<HTMLElement>(
+                    "button, input, textarea",
+                  );
+                const first = controls?.[0],
+                  last = controls?.[controls.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                  event.preventDefault();
+                  last?.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                  event.preventDefault();
+                  first?.focus();
+                }
+              }
+            }}
           >
             <div class="modal-header">
               <h2 id="copy-path-title">{fallbackTitle}</h2>
