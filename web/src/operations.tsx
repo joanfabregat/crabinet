@@ -1831,6 +1831,12 @@ export function Modal({
       }
     }, 0);
     const keydown = (event: KeyboardEvent) => {
+      // The expanded preview underneath has its own window-level trap.
+      // Only this dialog should handle Escape and Tab while it is open,
+      // including when a busy dialog cannot be dismissed.
+      if (event.key === "Escape" || event.key === "Tab") {
+        event.stopPropagation();
+      }
       if (event.key === "Escape" && !busyRef.current) closeRef.current();
       if (event.key !== "Tab" || !panel.current) return;
       const focusable = Array.from(

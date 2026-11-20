@@ -19,6 +19,39 @@ test.describe("writable share operations", () => {
     );
   });
 
+  test("edits above an expanded preview and returns focus without collapsing it", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/writable", "writer");
+    await directoryListing(page)
+      .getByRole("link", { name: "README.md", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Expand preview" }).click();
+    const preview = page.getByRole("dialog", {
+      name: "README.md",
+      exact: true,
+    });
+    const edit = preview.getByRole("button", { name: "Edit README.md" });
+    await edit.click();
+
+    const dialog = page.getByRole("dialog", { name: "Edit README.md" });
+    const editor = dialog.getByLabel("UTF-8 text content");
+    await expect(editor).toBeFocused();
+    // A real click catches the editor being covered by the preview/backdrop.
+    await editor.click();
+    const close = dialog.getByRole("button", { name: "Close", exact: true });
+    await close.focus();
+    await page.keyboard.press("Tab");
+    await expect(
+      dialog.getByRole("button", { name: "Close Edit README.md" }),
+    ).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(preview).toBeVisible();
+    await expect(edit).toBeFocused();
+    await expect(page).toHaveURL(/view=full/);
+  });
+
   test("creates, edits, moves, trashes, and restores without crossing shares or overwriting", async ({
     page,
   }) => {
