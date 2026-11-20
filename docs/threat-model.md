@@ -8,6 +8,8 @@ This model covers the application, its OCI image, its configuration and secret m
 
 ## Assets
 
+Writable share grants include changing ordinary Unix permission bits on entries the service can open and is permitted by the OS to chmod. The application never executes share contents, changes ownership, or assigns setuid/setgid/sticky bits. Permission changes use the same authentication, CSRF, capability, concurrency, and audit boundaries as other mutations; changing OS permissions does not grant another Crabinet user access to a share.
+
 - File contents and metadata inside configured shares.
 - Password hashes, session secrets, session records, CSRF tokens, and passkey credentials and user handles.
 - Configuration, audit records, and security logs.

@@ -15,6 +15,8 @@ pub(crate) struct PendingTree {
     temporary: String,
     destination: EntryName,
     published: bool,
+    file_mode: Option<u32>,
+    directory_mode: Option<u32>,
 }
 
 impl AuthorizedShare<'_> {
@@ -94,6 +96,8 @@ impl AuthorizedShare<'_> {
                         temporary,
                         destination: destination.clone(),
                         published: false,
+                        file_mode: self.share.default_file_mode,
+                        directory_mode: self.share.default_directory_mode,
                     });
                 }
                 Err(rustix::io::Errno::EXIST) => continue,
@@ -119,7 +123,10 @@ impl PendingTree {
     pub(crate) fn directory(&self, path: &VirtualPath) -> FsResult<()> {
         let (parent, name) = self.parent(path)?;
         parent.create_dir(name.as_str()).map_err(map_io)?;
-        parent.open_dir_nofollow(name.as_str()).map_err(map_io)?;
+        let directory = parent.open_dir_nofollow(name.as_str()).map_err(map_io)?;
+        if let Some(mode) = self.directory_mode {
+            set_directory_mode(&directory, mode)?;
+        }
         Ok(())
     }
 
@@ -129,10 +136,16 @@ impl PendingTree {
         options.write(true).create_new(true);
         let file = parent.open_with(name.as_str(), &options).map_err(map_io)?;
         validate_regular_handle(&file)?;
+        if let Some(mode) = self.file_mode {
+            set_file_mode(&file, mode)?;
+        }
         Ok(file.into_std())
     }
 
     pub(crate) fn publish(mut self) -> FsResult<()> {
+        if let Some(mode) = self.directory_mode {
+            set_directory_mode(&self.root, mode)?;
+        }
         sync_directory(&self.root)?;
         rustix::fs::renameat_with(
             &self.staging,
@@ -183,6 +196,44 @@ impl Drop for PendingTree {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn extraction_uses_share_modes_including_the_published_root() {
+        let root = TempDir::new().unwrap();
+        let id = ShareId::new("archive").unwrap();
+        let fs = ShareFs::open(id.clone(), root.path())
+            .unwrap()
+            .with_creation_modes(Some(0o640), Some(0o750))
+            .unwrap();
+        let grant = ShareGrant {
+            share_id: id,
+            access: AccessLevel::ReadWrite,
+        };
+        let share = fs.authorize(Some(&grant), GlobalPolicy::default()).unwrap();
+        let tree = share
+            .begin_tree(&VirtualPath::parse("extracted").unwrap())
+            .unwrap();
+        tree.directory(&VirtualPath::parse("nested").unwrap())
+            .unwrap();
+        tree.file(&VirtualPath::parse("nested/file.txt").unwrap())
+            .unwrap()
+            .write_all(b"hello")
+            .unwrap();
+        tree.publish().unwrap();
+        for (path, mode) in [
+            ("extracted", 0o750),
+            ("extracted/nested", 0o750),
+            ("extracted/nested/file.txt", 0o640),
+        ] {
+            assert_eq!(
+                share
+                    .metadata(&VirtualPath::parse(path).unwrap())
+                    .unwrap()
+                    .mode,
+                mode
+            );
+        }
+    }
 
     #[test]
     fn extraction_names_skip_all_existing_entry_kinds_and_preserve_utf8() {

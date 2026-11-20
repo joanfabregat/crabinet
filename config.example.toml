@@ -38,6 +38,12 @@ max_thumbnail_cache_size = "256 MiB"
 # seconds and then showing a lower bound such as "≥ 14 GB". Results are cached for
 # 60 seconds. Turn it off on slow or network storage to avoid those walks.
 folder_sizes = true
+# Show Permissions and Owner in file details. False hides both and omits their API fields.
+show_unix_metadata = true
+# Optional display names for IDs absent from the runtime's /etc/passwd or /etc/group.
+# Overrides take precedence; unresolved IDs remain numeric. These never grant access.
+# owner_users = { "1000" = "alice" }
+# owner_groups = { "1000" = "staff" }
 # Folder and selection ZIP downloads. "auto" deflates text files of at least 1 KiB,
 # chosen per file from its name and first bytes, and stores photos, video, audio,
 # archives, and other binary files as they are. An archive that may contain a
@@ -124,6 +130,11 @@ path = "/srv/crabinet/documents"
 read_only = false
 # Index filenames and metadata in this share. Set false to exclude it from search.
 search_enabled = true
+# Optional exact Unix modes for new entries; unset follows the process umask.
+# Quoted octal strings only (0000–0777); directories must include owner rwx.
+# Existing files keep ordinary permission bits when their content is replaced.
+# default_file_mode = "0600"
+# default_directory_mode = "0700"
 
 [[shares.grants]]
 user = "alice"

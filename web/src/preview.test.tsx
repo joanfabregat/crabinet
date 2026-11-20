@@ -124,6 +124,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     createDirectory: overrides.createDirectory ?? vi.fn(),
     localArchive: overrides.localArchive ?? vi.fn(),
     createFile: overrides.createFile ?? vi.fn(),
+    changePermissions: overrides.changePermissions ?? vi.fn(),
     saveText: overrides.saveText ?? vi.fn(),
     moveEntry: overrides.moveEntry ?? vi.fn(),
     deleteEntry: overrides.deleteEntry ?? vi.fn(),
@@ -606,110 +607,155 @@ describe("secure file previews", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("opens an expanded modal raster preview from validated metadata", async () => {
+  it("returns to four details when Unix metadata display is disabled", async () => {
     const navigation = new MemoryNavigation({
       shareId: "docs",
       path: "",
-      previewPath: "photo.png",
+      previewPath: "code.rs",
     });
     const api = fakeApi({
-      preview: vi.fn<ApiClient["preview"]>(async () => ({
-        kind: "image",
-        source: "",
-        mimeType: "image/png",
-        width: 800,
-        height: 600,
-        size: 2048,
-        truncated: false,
-        openable: true,
-      })),
-      metadata: vi.fn(async () => ({
-        shareId: "docs",
-        path: "photo.png",
-        name: "photo.png",
-        kind: "file" as const,
-        size: 2048,
-        modifiedAtMs: 1_699_000_000_000,
-        accessedAtMs: 1_700_000_000_000,
-        createdAtMs: 1_690_000_000_000,
-        etag: 'W/"photo"',
-      })),
+      session: vi.fn(async () => ({ ...session, showUnixMetadata: false })),
     });
     render(<App api={api} navigation={navigation} />);
-
-    const image = await screen.findByRole("img", {
-      name: "Preview of photo.png",
-    });
-    expect(image).toHaveAttribute(
-      "src",
-      "/api/v1/shares/docs/preview/image?path=photo.png&v=0-0",
-    );
-    // The toolbar action is the only new-tab link; the image is not a link.
-    const imageLink = screen.getByRole("link", {
-      name: "Open photo.png in a new tab",
-    });
-    expect(imageLink).toHaveAttribute(
-      "href",
-      "/api/v1/shares/docs/open?path=photo.png",
-    );
-    expect(imageLink).toHaveAttribute("target", "_blank");
-    expect(imageLink).toHaveAttribute("rel", "noopener noreferrer");
-    expect(image.closest("a")).toBeNull();
-    expect(image).toHaveAttribute("draggable", "false");
-    expect(screen.getByText(/800 × 600/)).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "Reset zoom" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Zoom out" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Zoom in" }),
-    ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
-    expect(navigation.visits.at(-1)).toEqual({
-      shareId: "docs",
-      path: "",
-      previewPath: "photo.png",
-      previewMode: "full",
-    });
-    const fullScreenPanel = screen.getByRole("dialog", {
-      name: "photo.png",
-    });
-    expect(fullScreenPanel).toHaveClass("is-fullscreen");
-    expect(screen.getByText("Expanded preview")).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "Restore side preview" }),
-    ).toHaveAttribute("data-tooltip", "Restore side preview");
-    expect(document.querySelector(".preview-modal-backdrop")).toBeVisible();
-    expect(document.documentElement).toHaveClass("preview-fullscreen-open");
+    await screen.findByLabelText("File source");
     const details = screen.getByLabelText("File details");
-    expect(details).toHaveTextContent("2.0 kB");
-    expect(details).toHaveTextContent("image/png");
-    expect(details).not.toHaveTextContent("Unavailable");
-
-    fireEvent.click(document.querySelector(".preview-modal-backdrop")!);
-    expect(navigation.visits.at(-1)).toEqual({
-      shareId: "docs",
-      path: "",
-      previewPath: "photo.png",
-      previewMode: "side",
-    });
-    await waitFor(() =>
-      expect(document.documentElement).not.toHaveClass(
-        "preview-fullscreen-open",
-      ),
-    );
-
+    expect(details.querySelectorAll("dt")).toHaveLength(4);
+    expect(within(details).queryByText("Permissions")).not.toBeInTheDocument();
+    expect(within(details).queryByText("Owner")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(navigation.visits.at(-1)).toEqual({
-      shareId: "docs",
-      path: "",
-      previewPath: "photo.png",
-      previewMode: "side",
-    });
+    expect(details).toHaveClass("preview-metadata-basic");
   });
+
+  it.each([
+    { ownerUser: "alice", ownerGroup: "staff", owner: "alice : staff" },
+    { ownerUser: undefined, ownerGroup: undefined, owner: "1000 : 100" },
+    {
+      ownerUser: "<b>alice</b>",
+      ownerGroup: undefined,
+      owner: "<b>alice</b> : 100",
+    },
+  ])(
+    "opens an expanded modal raster preview with owner $owner",
+    async ({ ownerUser, ownerGroup, owner }) => {
+      const navigation = new MemoryNavigation({
+        shareId: "docs",
+        path: "",
+        previewPath: "photo.png",
+      });
+      const api = fakeApi({
+        preview: vi.fn<ApiClient["preview"]>(async () => ({
+          kind: "image",
+          source: "",
+          mimeType: "image/png",
+          width: 800,
+          height: 600,
+          size: 2048,
+          truncated: false,
+          openable: true,
+        })),
+        metadata: vi.fn(async () => ({
+          shareId: "docs",
+          path: "photo.png",
+          name: "photo.png",
+          kind: "file" as const,
+          size: 2048,
+          modifiedAtMs: 1_699_000_000_000,
+          accessedAtMs: 1_700_000_000_000,
+          createdAtMs: 1_690_000_000_000,
+          mode: "0600",
+          uid: 1000,
+          gid: 100,
+          ownerUser,
+          ownerGroup,
+          etag: 'W/"photo"',
+        })),
+      });
+      render(<App api={api} navigation={navigation} />);
+
+      const image = await screen.findByRole("img", {
+        name: "Preview of photo.png",
+      });
+      expect(image).toHaveAttribute(
+        "src",
+        "/api/v1/shares/docs/preview/image?path=photo.png&v=0-0",
+      );
+      // The toolbar action is the only new-tab link; the image is not a link.
+      const imageLink = screen.getByRole("link", {
+        name: "Open photo.png in a new tab",
+      });
+      expect(imageLink).toHaveAttribute(
+        "href",
+        "/api/v1/shares/docs/open?path=photo.png",
+      );
+      expect(imageLink).toHaveAttribute("target", "_blank");
+      expect(imageLink).toHaveAttribute("rel", "noopener noreferrer");
+      expect(image.closest("a")).toBeNull();
+      expect(image).toHaveAttribute("draggable", "false");
+      expect(screen.getByText(/800 × 600/)).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: "Reset zoom" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Zoom out" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Zoom in" }),
+      ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
+      expect(navigation.visits.at(-1)).toEqual({
+        shareId: "docs",
+        path: "",
+        previewPath: "photo.png",
+        previewMode: "full",
+      });
+      const fullScreenPanel = screen.getByRole("dialog", {
+        name: "photo.png",
+      });
+      expect(fullScreenPanel).toHaveClass("is-fullscreen");
+      expect(screen.getByText("Expanded preview")).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Restore side preview" }),
+      ).toHaveAttribute("data-tooltip", "Restore side preview");
+      expect(document.querySelector(".preview-modal-backdrop")).toBeVisible();
+      expect(document.documentElement).toHaveClass("preview-fullscreen-open");
+      const details = screen.getByLabelText("File details");
+      expect(details.querySelectorAll("dt")).toHaveLength(6);
+      expect(within(details).getByText("Permissions")).toBeVisible();
+      expect(within(details).getByText("0600")).toBeVisible();
+      const ownerLabel = within(details).getByText(owner);
+      expect(ownerLabel).toBeVisible();
+      expect(ownerLabel).toHaveAttribute(
+        "title",
+        "User ID 1000 · Group ID 100",
+      );
+      expect(ownerLabel.querySelector("b")).toBeNull();
+      expect(details).toHaveTextContent("2.0 kB");
+      expect(details).toHaveTextContent("image/png");
+      expect(details).not.toHaveTextContent("Unavailable");
+
+      fireEvent.click(document.querySelector(".preview-modal-backdrop")!);
+      expect(navigation.visits.at(-1)).toEqual({
+        shareId: "docs",
+        path: "",
+        previewPath: "photo.png",
+        previewMode: "side",
+      });
+      await waitFor(() =>
+        expect(document.documentElement).not.toHaveClass(
+          "preview-fullscreen-open",
+        ),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Expand preview" }));
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(navigation.visits.at(-1)).toEqual({
+        shareId: "docs",
+        path: "",
+        previewPath: "photo.png",
+        previewMode: "side",
+      });
+    },
+  );
 
   it("collapses the expanded preview to the side panel from its X", async () => {
     const navigation = new MemoryNavigation({

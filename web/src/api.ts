@@ -67,6 +67,7 @@ export interface Session {
    * setting leave it out, which means no.
    */
   folderSizes?: boolean;
+  showUnixMetadata?: boolean;
 }
 
 export interface DefaultFolder {
@@ -149,6 +150,11 @@ export interface EntryMetadata {
   accessedAtMs?: number;
   createdAtMs?: number;
   etag: string;
+  mode?: string;
+  uid?: number;
+  gid?: number;
+  ownerUser?: string;
+  ownerGroup?: string;
 }
 
 /** The total size of the files beneath one folder. */
@@ -467,6 +473,15 @@ export interface ApiClient {
   createFile(
     shareId: string,
     path: string,
+    csrfToken: string,
+    signal?: AbortSignal,
+  ): Promise<MutationResult>;
+  changePermissions(
+    shareId: string,
+    path: string,
+    mode: string,
+    expectedMode: string,
+    etag: string,
     csrfToken: string,
     signal?: AbortSignal,
   ): Promise<MutationResult>;
@@ -874,6 +889,25 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
           signal,
           headers: mutationJsonHeaders(csrfToken),
           body: JSON.stringify({ path }),
+        }),
+        shareId,
+        path,
+      ),
+    changePermissions: async (
+      shareId,
+      path,
+      mode,
+      expectedMode,
+      etag,
+      csrfToken,
+      signal,
+    ) =>
+      parseMutationResult(
+        await request<unknown>(shareApiUrl(shareId, "permissions"), {
+          method: "PUT",
+          signal,
+          headers: { ...mutationJsonHeaders(csrfToken), "If-Match": etag },
+          body: JSON.stringify({ path, mode, expectedMode }),
         }),
         shareId,
         path,
@@ -1530,6 +1564,8 @@ function parseSession(value: unknown): Session {
     (value.version !== undefined && typeof value.version !== "string") ||
     (value.folderSizes !== undefined &&
       typeof value.folderSizes !== "boolean") ||
+    (value.showUnixMetadata !== undefined &&
+      typeof value.showUnixMetadata !== "boolean") ||
     !Array.isArray(value.shares) ||
     !value.shares.every(isShare) ||
     !isOptionalDefaultFolder(value.defaultFolder) ||
@@ -1775,7 +1811,29 @@ function parseMetadata(
         value.size < 0)) ||
     !isOptionalTimestamp(value.modifiedAtMs) ||
     !isOptionalTimestamp(value.accessedAtMs) ||
-    !isOptionalTimestamp(value.createdAtMs)
+    !isOptionalTimestamp(value.createdAtMs) ||
+    (value.mode !== undefined &&
+      (typeof value.mode !== "string" || !/^[0-7]{4}$/.test(value.mode))) ||
+    [value.uid, value.gid].some(
+      (id) =>
+        id !== undefined &&
+        (typeof id !== "number" ||
+          !Number.isInteger(id) ||
+          id < 0 ||
+          id > 0xffffffff),
+    ) ||
+    [value.ownerUser, value.ownerGroup].some(
+      (name) =>
+        name !== undefined &&
+        (typeof name !== "string" ||
+          name.length === 0 ||
+          name.length > 128 ||
+          Array.from(name).some((c) => {
+            const code = c.codePointAt(0) ?? 0;
+            return code < 32 || (code >= 127 && code <= 159) || c === ":";
+          }) ||
+          name.trim() !== name),
+    )
   ) {
     throw invalidResponse();
   }

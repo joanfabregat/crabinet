@@ -166,6 +166,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
         path,
         outcome: "success" as const,
       })),
+    changePermissions: overrides.changePermissions ?? vi.fn(),
     createFile:
       overrides.createFile ??
       vi.fn(async (shareId, path) => ({
@@ -3059,6 +3060,242 @@ describe("writable file operations", () => {
     expect(saveText).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps uploads in their original folder while browsing and pauses only queued files", async () => {
+    const pending = new Map<string, () => void>();
+    const signals: AbortSignal[] = [];
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      (shareId, directory, file, _token, options) =>
+        new Promise((resolve, reject) => {
+          signals.push(options!.signal!);
+          options?.onProgress?.(1, 4);
+          pending.set(file.name, () =>
+            resolve({
+              shareId,
+              outcomes: [
+                { path: `${directory}/${file.name}`, outcome: "created" },
+              ],
+            }),
+          );
+          options?.signal?.addEventListener("abort", () =>
+            reject(new ApiError("aborted", "cancelled")),
+          );
+        }),
+    );
+    const navigation = writableNavigation();
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            entries: [],
+          })),
+          uploadFile,
+        })}
+        navigation={navigation}
+      />,
+    );
+    const picker = await screen.findByLabelText("Choose files to upload");
+    const files = [
+      "Café # notes.txt",
+      "two.txt",
+      "three.txt",
+      "four.txt",
+      "five.txt",
+    ].map((name) => new File(["data"], name));
+    fireEvent.change(picker, { target: { files } });
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(3));
+    fireEvent.click(await screen.findByRole("button", { name: "Pause queue" }));
+    pending.get("Café # notes.txt")!();
+    await screen.findByRole("link", { name: "Open Café # notes.txt" });
+    expect(uploadFile).toHaveBeenCalledTimes(3);
+    expect(signals.every((signal) => !signal.aborted)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Continue browsing" }));
+    const reopen = await screen.findByRole("button", {
+      name: /Show uploads: 1 of 5 complete/,
+    });
+    await waitFor(() => expect(reopen).toHaveFocus());
+    navigation.go({ shareId: "read-only", path: "" });
+    await screen.findByRole("heading", { name: "Reference", exact: true });
+    expect(signals.every((signal) => !signal.aborted)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /Show uploads:/ }));
+    expect(
+      await screen.findByRole("dialog", { name: "Uploads" }),
+    ).toHaveTextContent("Working files");
+    const open = screen.getByRole("link", { name: "Open Café # notes.txt" });
+    expect(open).toHaveAttribute(
+      "href",
+      "/work/projects/Caf%C3%A9%20%23%20notes.txt",
+    );
+    expect(open).toHaveAttribute("target", "_blank");
+    expect(open).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy link for Café # notes.txt" }),
+    );
+    const copy = await screen.findByRole("dialog", { name: "Copy file link" });
+    expect(within(copy).getByRole("textbox")).toHaveValue(
+      `${window.location.origin}/work/projects/Caf%C3%A9%20%23%20notes.txt`,
+    );
+    fireEvent.keyDown(within(copy).getByRole("textbox"), { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Copy file link" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("dialog", { name: "Uploads" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Resume queue" }));
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(4));
+    for (const name of ["two.txt", "three.txt", "four.txt"])
+      pending.get(name)!();
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(5));
+    pending.get("five.txt")!();
+    await screen.findByRole("button", { name: "Done" });
+    for (const call of uploadFile.mock.calls)
+      expect(call.slice(0, 2)).toEqual(["work", "projects"]);
+    fireEvent.click(screen.getByRole("button", { name: "Clear completed" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploads" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("aborts the queue and never starts pending files when the upload session expires", async () => {
+    const signals: AbortSignal[] = [];
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      (_share, _path, file, _token, options) => {
+        signals.push(options!.signal!);
+        if (file.name === "0.txt")
+          return Promise.reject(new ApiError("unauthorized", "expired"));
+        return new Promise((_resolve, reject) =>
+          options?.signal?.addEventListener("abort", () =>
+            reject(new ApiError("aborted", "cancelled")),
+          ),
+        );
+      },
+    );
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          uploadFile,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    fireEvent.change(await screen.findByLabelText("Choose files to upload"), {
+      target: {
+        files: Array.from(
+          { length: 5 },
+          (_, i) => new File(["data"], `${i}.txt`),
+        ),
+      },
+    });
+    await screen.findByText("Your session expired. Sign in again to continue.");
+    expect(uploadFile.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(
+      screen.queryByRole("dialog", { name: "Uploads" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("cancels pending files without starting them and aborts transports on unmount", async () => {
+    const signals: AbortSignal[] = [];
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      (_shareId, _directory, _file, _token, options) =>
+        new Promise((_resolve, reject) => {
+          signals.push(options!.signal!);
+          options?.signal?.addEventListener("abort", () =>
+            reject(new ApiError("aborted", "cancelled")),
+          );
+        }),
+    );
+    const view = render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async () => writablePage),
+          uploadFile,
+        })}
+        navigation={writableNavigation()}
+      />,
+    );
+    fireEvent.change(await screen.findByLabelText("Choose files to upload"), {
+      target: {
+        files: Array.from(
+          { length: 5 },
+          (_, i) => new File(["data"], `${i}.txt`),
+        ),
+      },
+    });
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel all" }));
+    await screen.findByRole("button", { name: "Done" });
+    expect(uploadFile).toHaveBeenCalledTimes(3);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    fireEvent.click(screen.getAllByRole("button", { name: "Retry" })[0]!);
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(4));
+    view.unmount();
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(uploadFile).toHaveBeenCalledTimes(4);
+  });
+
+  it("adds a second destination without replacing an active upload", async () => {
+    const pending: Array<() => void> = [];
+    const uploadFile = vi.fn<ApiClient["uploadFile"]>(
+      (shareId, directory, file) =>
+        new Promise((resolve) =>
+          pending.push(() =>
+            resolve({
+              shareId,
+              outcomes: [
+                {
+                  path: directory ? `${directory}/${file.name}` : file.name,
+                  outcome: "created",
+                },
+              ],
+            }),
+          ),
+        ),
+    );
+    const navigation = writableNavigation();
+    render(
+      <App
+        api={fakeApi({
+          directory: vi.fn(async (shareId, path) => ({
+            shareId,
+            path,
+            entries: [],
+          })),
+          uploadFile,
+        })}
+        navigation={navigation}
+      />,
+    );
+    fireEvent.change(await screen.findByLabelText("Choose files to upload"), {
+      target: { files: [new File(["one"], "first.txt")] },
+    });
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Continue browsing" }));
+    navigation.go({ shareId: "work", path: "" });
+    await screen.findByRole("heading", { name: "Working files", exact: true });
+    fireEvent.change(screen.getByLabelText("Choose files to upload"), {
+      target: { files: [new File(["two"], "second.txt")] },
+    });
+    await waitFor(() => expect(uploadFile).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByRole("dialog", { name: "Uploads" }),
+    ).toHaveTextContent("2 folders");
+    pending.forEach((resolve) => resolve());
+    await screen.findByRole("button", { name: "Done" });
+    expect(
+      screen.getByRole("link", { name: "Open first.txt" }),
+    ).toHaveAttribute("href", "/work/projects/first.txt");
+    expect(
+      screen.getByRole("link", { name: "Open second.txt" }),
+    ).toHaveAttribute("href", "/work/second.txt");
+  });
+
   it("uploads dropped files independently, exposes conflicts, and supports replacement", async () => {
     const uploadFile = vi.fn<ApiClient["uploadFile"]>(
       async (shareId, directory, file, _csrf, options) => {
@@ -3123,7 +3360,7 @@ describe("writable file operations", () => {
     );
     expect(screen.queryByTestId("upload-drop-overlay")).not.toBeInTheDocument();
 
-    expect(await screen.findByText("Succeeded")).toBeVisible();
+    expect(await screen.findByText("Uploaded")).toBeVisible();
     expect(screen.getByText("Needs attention")).toBeVisible();
     fireEvent.click(
       screen.getByRole("button", { name: "Replace existing file" }),
@@ -3167,7 +3404,7 @@ describe("writable file operations", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect((await screen.findAllByText("Cancelled")).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
     fireEvent.click(screen.getByRole("button", { name: "New folder" }));
     fireEvent.input(screen.getByLabelText("Folder name"), {
       target: { value: "expired" },

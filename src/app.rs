@@ -619,6 +619,16 @@ pub(crate) mod tests {
             )
             .body(Sample::Json(r#"{"path":"new.txt"}"#)),
             Route::new(
+                "PUT",
+                "/api/v1/shares/{share_id}/permissions",
+                Share,
+                Csrf,
+                BLOCKING,
+            )
+            .body(Sample::Json(
+                r#"{"path":"a.txt","mode":"0600","expectedMode":"0644"}"#,
+            )),
+            Route::new(
                 "POST",
                 "/api/v1/shares/{share_id}/compress",
                 Share,
@@ -1061,6 +1071,11 @@ pub(crate) mod tests {
         /// own reads it, so held subject leases do not refuse the lookup.
         async fn prepare(&self) -> String {
             fs::write(self.root.path().join("a.txt"), b"abcdef").expect("text fixture");
+            fs::set_permissions(
+                self.root.path().join("a.txt"),
+                std::os::unix::fs::PermissionsExt::from_mode(0o644),
+            )
+            .expect("fixture permissions");
             let mut empty_zip = vec![0; 22];
             empty_zip[..4].copy_from_slice(b"PK\x05\x06");
             fs::write(self.root.path().join("input.zip"), empty_zip).expect("archive fixture");

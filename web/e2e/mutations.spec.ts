@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 import {
   chooseFiles,
@@ -17,6 +18,41 @@ test.describe("writable share operations", () => {
       !ownsServerState(testInfo),
       "mutation state is exercised once per engine, in its desktop project",
     );
+  });
+
+  test("changes permissions from the expanded preview with a fresh validator", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/writable", "writer");
+    await directoryListing(page)
+      .getByRole("link", { name: "README.md", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Expand preview" }).click();
+    const edit = page.getByRole("button", {
+      name: "Change permissions for README.md",
+    });
+    await edit.click();
+    const dialog = page.getByRole("dialog", {
+      name: "Permissions for README.md",
+      exact: true,
+    });
+    const input = dialog.getByLabel("Octal permissions");
+    await expect(input).toBeFocused();
+    const before = await input.inputValue();
+    const mode = before === "0600" ? "0640" : "0600";
+    await input.fill(mode);
+    await dialog.getByRole("button", { name: "Save permissions" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByText("Permissions updated.", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "README.md", exact: true }),
+    ).toBeVisible();
+    const response = await page.request.get(
+      "/api/v1/shares/writable/metadata?path=README.md",
+    );
+    expect(await response.json()).toMatchObject({ mode });
   });
 
   test("edits above an expanded preview and returns focus without collapsing it", async ({
@@ -58,6 +94,11 @@ test.describe("writable share operations", () => {
     await openSignedIn(page, "/writable", "writer");
 
     await createEntry(page, "New folder", "Folder name", "e2e-folder");
+    const folderMetadata = await page.request.get(
+      "/api/v1/shares/writable/metadata?path=e2e-folder",
+    );
+    expect(folderMetadata.ok()).toBe(true);
+    expect(await folderMetadata.json()).toMatchObject({ mode: "0700" });
     await expect(
       directoryListing(page).getByRole("link", {
         name: "e2e-folder",
@@ -66,6 +107,11 @@ test.describe("writable share operations", () => {
     ).toBeVisible();
 
     await createEntry(page, "New file", "File name", "e2e-note.txt");
+    const fileMetadata = await page.request.get(
+      "/api/v1/shares/writable/metadata?path=e2e-note.txt",
+    );
+    expect(fileMetadata.ok()).toBe(true);
+    expect(await fileMetadata.json()).toMatchObject({ mode: "0600" });
     await expect(
       directoryListing(page).getByRole("link", {
         name: "e2e-note.txt",
@@ -89,6 +135,10 @@ test.describe("writable share operations", () => {
 
     const saved = await readText(page, "writable", "e2e-note.txt");
     expect(saved).toBe("Production-backed browser edit\n");
+    const savedMetadata = await page.request.get(
+      "/api/v1/shares/writable/metadata?path=e2e-note.txt",
+    );
+    expect(await savedMetadata.json()).toMatchObject({ mode: "0600" });
 
     await previewAction(page, "e2e-note.txt", "Move").click();
     const moveDialog = page.getByRole("dialog", { name: "Move e2e-note.txt" });
@@ -495,7 +545,7 @@ test.describe("writable share operations", () => {
 
     const uploads = page.getByRole("dialog", { name: "Uploads" });
     const outcomes = [
-      { name: "dragged.txt", expected: "Succeeded" },
+      { name: "dragged.txt", expected: "Uploaded" },
       { name: "replace-me.txt", expected: "Needs attention" },
       {
         name: "too-large.bin",
@@ -506,7 +556,7 @@ test.describe("writable share operations", () => {
     // jobs may need a retry. Wait for all initial requests to release their slots.
     for (const { name } of outcomes) {
       await expect(uploadJob(uploads, name)).toContainText(
-        /Succeeded|Needs attention|This file is larger than the server allows\.|The server is busy\. Retry shortly\./,
+        /Uploaded|Needs attention|This file is larger than the server allows\.|The server is busy\. Retry shortly\./,
       );
     }
     for (const { name, expected } of outcomes) {
@@ -533,7 +583,7 @@ test.describe("writable share operations", () => {
       "/api/v1/shares/writable/metadata?path=too-large.bin",
     );
     expect(oversized.status()).toBe(404);
-    await uploads.getByRole("button", { name: "Close", exact: true }).click();
+    await uploads.getByRole("button", { name: "Done", exact: true }).click();
 
     await chooseFiles(page.getByLabel("Choose files to upload"), [
       {
@@ -544,10 +594,10 @@ test.describe("writable share operations", () => {
     ]);
     const pickerUploads = page.getByRole("dialog", { name: "Uploads" });
     await expect(uploadJob(pickerUploads, "picked.txt")).toContainText(
-      "Succeeded",
+      "Uploaded",
     );
     await pickerUploads
-      .getByRole("button", { name: "Close", exact: true })
+      .getByRole("button", { name: "Done", exact: true })
       .click();
     await expect(
       page.getByRole("link", { name: "dragged.txt", exact: true }),
@@ -559,6 +609,129 @@ test.describe("writable share operations", () => {
       "/api/v1/shares/read-only/metadata?path=dragged.txt",
     );
     expect(readOnlyLeak.status()).toBe(404);
+  });
+
+  test("keeps minimized uploads at their original destination and exposes file links", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/writable", "writer");
+    // Delay sending in the page, so multipart file data stays with the browser
+    // rather than being serialized through Playwright's request interceptor.
+    await page.evaluate(() => {
+      const gate = { holding: true, pending: [] as Array<() => void> };
+      (window as unknown as { uploadGate: typeof gate }).uploadGate = gate;
+      const send = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function (body) {
+        if (gate.holding && body instanceof FormData && body.has("file")) {
+          gate.pending.push(() => send.call(this, body));
+        } else send.call(this, body);
+      };
+    });
+    let started = 0;
+    page.on("request", (request) => {
+      if (request.url().includes("/api/v1/shares/writable/uploads?"))
+        started += 1;
+    });
+    await chooseFiles(
+      page.getByLabel("Choose files to upload"),
+      [0, 1, 2, 3].map((i) => ({
+        name: `queue-${i}.txt`,
+        mimeType: "text/plain",
+        contents: `queued upload ${i}\n`,
+      })),
+    );
+    const uploads = page.getByRole("dialog", { name: "Uploads", exact: true });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { uploadGate: { pending: unknown[] } })
+              .uploadGate.pending.length,
+        ),
+      )
+      .toBe(3);
+    await uploads.getByRole("button", { name: "Pause queue" }).click();
+    await uploads.getByRole("button", { name: "Continue browsing" }).click();
+    const mini = page.getByRole("button", { name: /Show uploads:/ });
+    await expect(mini).toBeFocused();
+    await directoryListing(page)
+      .getByRole("link", { name: "Projects", exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/writable\/Projects$/);
+    await page.evaluate(() => {
+      const gate = (
+        window as unknown as {
+          uploadGate: { holding: boolean; pending: Array<() => void> };
+        }
+      ).uploadGate;
+      gate.holding = false;
+      gate.pending.splice(0).forEach((send) => send());
+    });
+    await expect(
+      page.getByRole("button", { name: /Show uploads: 3 of 4 complete/ }),
+    ).toBeVisible();
+    expect(started).toBe(3);
+    await mini.click();
+    await uploads.getByRole("button", { name: "Resume queue" }).click();
+    await expect(
+      uploads.getByRole("button", { name: "Done", exact: true }),
+    ).toBeVisible();
+    await expect.poll(() => started).toBe(4);
+    const open = uploads.getByRole("link", {
+      name: "Open queue-0.txt",
+      exact: true,
+    });
+    await expect(open).toHaveAttribute("href", "/writable/queue-0.txt");
+    await expect(open).toHaveAttribute("rel", "noopener noreferrer");
+    const popup = page.waitForEvent("popup");
+    await open.click();
+    const file = await popup;
+    await expect(file.getByLabel("File source")).toContainText(
+      "queued upload 0",
+    );
+    await file.close();
+    await page.evaluate(() =>
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: async (value: string) => {
+            (window as unknown as { copiedLink: string }).copiedLink = value;
+          },
+        },
+      }),
+    );
+    await uploads
+      .getByRole("button", { name: "Copy link for queue-0.txt" })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as unknown as { copiedLink: string }).copiedLink,
+        ),
+      )
+      .toBe(new URL("/writable/queue-0.txt", page.url()).href);
+    const audit = await new AxeBuilder({ page }).analyze();
+    expect(
+      audit.violations.filter(
+        ({ impact }) => impact === "critical" || impact === "serious",
+      ),
+    ).toEqual([]);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(
+      uploads.getByRole("button", { name: "Done", exact: true }),
+    ).toBeVisible();
+    const box = await uploads.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    await uploads.getByRole("button", { name: "Clear completed" }).click();
+    await expect(uploads).toHaveCount(0);
+    expect(await readText(page, "writable", "queue-0.txt")).toBe(
+      "queued upload 0\n",
+    );
+    const wrongFolder = await page.request.get(
+      "/api/v1/shares/writable/metadata?path=Projects/queue-0.txt",
+    );
+    expect(wrongFolder.status()).toBe(404);
   });
 
   test("shows upload progress, survives a disconnect retry, and cancels explicitly", async ({
@@ -592,8 +765,8 @@ test.describe("writable share operations", () => {
         name: "Upload progress for retry-after-disconnect.txt",
       }),
     ).toBeVisible();
-    await expect(retryJob).toContainText("Succeeded");
-    await uploads.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(retryJob).toContainText("Uploaded");
+    await uploads.getByRole("button", { name: "Done", exact: true }).click();
     await page.unroute("**/api/v1/shares/writable/uploads?**");
 
     let releaseUpload!: () => void;
@@ -618,7 +791,7 @@ test.describe("writable share operations", () => {
     releaseUpload();
     await expect(cancelJob).toContainText("Cancelled");
     await cancelUploads
-      .getByRole("button", { name: "Close", exact: true })
+      .getByRole("button", { name: "Done", exact: true })
       .click();
     const cancelled = await page.request.get(
       "/api/v1/shares/writable/metadata?path=cancelled.txt",
@@ -626,7 +799,7 @@ test.describe("writable share operations", () => {
     expect(cancelled.status()).toBe(404);
   });
 
-  test("aborts an upload when browser history changes its destination", async ({
+  test("keeps an upload at its original destination across browser history changes", async ({
     page,
   }) => {
     await openSignedIn(page, "/writable", "writer");
@@ -642,29 +815,31 @@ test.describe("writable share operations", () => {
     });
     await page.route("**/api/v1/shares/writable/uploads?**", async (route) => {
       await holdUpload;
-      await route.abort("aborted").catch(() => undefined);
+      await route.continue();
     });
     await chooseFiles(page.getByLabel("Choose files to upload"), [
       {
-        name: "cancel-on-navigation.txt",
+        name: "keep-on-navigation.txt",
         mimeType: "text/plain",
-        contents: "must remain temporary\n",
+        contents: "stays at its original destination\n",
       },
     ]);
     await expect(
       page.getByRole("progressbar", {
-        name: "Upload progress for cancel-on-navigation.txt",
+        name: "Upload progress for keep-on-navigation.txt",
       }),
     ).toBeVisible();
 
     await page.goBack();
     releaseUpload();
     await expect(page).toHaveURL(/\/writable$/);
-    await expect(page.getByRole("dialog", { name: "Uploads" })).toHaveCount(0);
-    const cancelled = await page.request.get(
-      "/api/v1/shares/writable/metadata?path=Projects%2Fcancel-on-navigation.txt",
-    );
-    expect(cancelled.status()).toBe(404);
+    const uploads = page.getByRole("dialog", { name: "Uploads" });
+    await expect(
+      uploads.getByRole("link", { name: "Open keep-on-navigation.txt" }),
+    ).toHaveAttribute("href", "/writable/Projects/keep-on-navigation.txt");
+    expect(
+      await readText(page, "writable", "Projects/keep-on-navigation.txt"),
+    ).toBe("stays at its original destination\n");
   });
 
   test("selects files with click and Shift-click, downloads them as one ZIP, and moves them to Trash", async ({
@@ -681,8 +856,8 @@ test.describe("writable share operations", () => {
       { name: "select-c.txt", mimeType: "text/plain", contents: "third\n" },
     ]);
     const uploads = page.getByRole("dialog", { name: "Uploads" });
-    await expect(uploadJob(uploads, "select-c.txt")).toContainText("Succeeded");
-    await uploads.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(uploadJob(uploads, "select-c.txt")).toContainText("Uploaded");
+    await uploads.getByRole("button", { name: "Done", exact: true }).click();
 
     const listing = directoryListing(page);
     const first = listing.getByRole("checkbox", {

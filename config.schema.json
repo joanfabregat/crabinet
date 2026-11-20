@@ -274,6 +274,22 @@
           "description": "Maximum request upload size, for example \"100 MiB\".",
           "type": "string"
         },
+        "owner_groups": {
+          "description": "Optional GID-to-name display overrides. These never change ownership or access.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "owner_users": {
+          "description": "Optional UID-to-name display overrides, useful when container accounts differ from the host.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
         "search_index_path": {
           "description": "Rebuildable search SQLite file; defaults to search.sqlite3 beside database_path.",
           "type": [
@@ -300,6 +316,11 @@
         "session_secret_file": {
           "description": "File containing 32 to 4096 random bytes. Its contents are never printed.",
           "type": "string"
+        },
+        "show_unix_metadata": {
+          "description": "Show Unix permissions and ownership in file details; false also omits them from metadata responses.",
+          "type": "boolean",
+          "default": true
         },
         "thumbnail_cache_path": {
           "description": "Directory for cached thumbnails, created with owner-only permissions.\nRelative paths are resolved from the configuration directory. Defaults\nto `thumbnails` next to `database_path`.",
@@ -344,6 +365,24 @@
     "RawShare": {
       "type": "object",
       "properties": {
+        "default_directory_mode": {
+          "description": "Exact Unix permissions for new directories. Owner read/write/search is required.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "pattern": "^07[0-7]{2}$"
+        },
+        "default_file_mode": {
+          "description": "Exact Unix permissions for new files, as four octal digits. Unset uses the process umask.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "pattern": "^0[0-7]{3}$"
+        },
         "grants": {
           "type": "array",
           "items": {

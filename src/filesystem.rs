@@ -396,6 +396,9 @@ pub struct EntryMetadata {
     pub modified: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
     pub created: Option<SystemTime>,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub(crate) file_id: u64,
 }
 
@@ -405,6 +408,9 @@ impl EntryMetadata {
             && self.size == other.size
             && self.modified == other.modified
             && self.file_id == other.file_id
+            && self.mode == other.mode
+            && self.uid == other.uid
+            && self.gid == other.gid
     }
 }
 
@@ -455,6 +461,8 @@ impl PendingWrite {
     /// after the exchange, so its validator is the one a follow-up write needs.
     pub fn publish_replacement(mut self, expected: EntryMetadata) -> FsResult<EntryMetadata> {
         validate_regular_handle(&self.file)?;
+        // Content replacement must never restore setuid/setgid/sticky bits.
+        set_file_mode(&self.file, expected.mode & 0o777)?;
         let replacement = raw_file_metadata(&self.file)?;
         self.file.sync_all().map_err(map_io)?;
         let current = metadata_in_parent(&self.destination_parent, &self.destination_name)?;
@@ -588,6 +596,8 @@ pub struct ShareFs {
     staging: Option<Dir>,
     trash: Option<Dir>,
     gc_cookie: std::sync::Mutex<u64>,
+    default_file_mode: Option<u32>,
+    default_directory_mode: Option<u32>,
 }
 
 impl ShareFs {
@@ -633,12 +643,30 @@ impl ShareFs {
             staging,
             trash,
             gc_cookie: std::sync::Mutex::new(0),
+            default_file_mode: None,
+            default_directory_mode: None,
         })
     }
 
     #[must_use]
     pub fn id(&self) -> &ShareId {
         &self.id
+    }
+
+    /// Set validated operator defaults before sharing this capability.
+    pub fn with_creation_modes(
+        mut self,
+        file: Option<u32>,
+        directory: Option<u32>,
+    ) -> FsResult<Self> {
+        if file.is_some_and(|mode| mode > 0o777)
+            || directory.is_some_and(|mode| mode > 0o777 || mode & 0o700 != 0o700)
+        {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+        self.default_file_mode = file;
+        self.default_directory_mode = directory;
+        Ok(self)
     }
 
     /// Produces an owned, `'static` authorization for work that must run on a
@@ -1024,8 +1052,48 @@ impl AuthorizedShare<'_> {
         pending.publish_new()
     }
 
+    /// Change only ordinary permission bits on an authorized, validated handle.
+    pub fn change_permissions(
+        &self,
+        path: &VirtualPath,
+        expected: EntryMetadata,
+        mode: u32,
+    ) -> FsResult<()> {
+        self.require_write()?;
+        if mode > 0o777 {
+            return Err(FsError::new(FsErrorCode::InvalidPath));
+        }
+        if expected.kind == EntryKind::Directory {
+            let directory = self.share.open_directory(&path.0)?;
+            let current = entry_metadata(
+                &directory.dir_metadata().map_err(map_io)?,
+                EntryKind::Directory,
+            );
+            if !current.matches_validator(&expected) {
+                return Err(FsError::new(FsErrorCode::Conflict));
+            }
+            set_directory_mode(&directory, mode)?;
+            sync_after_commit(&directory);
+        } else {
+            let file = self.open_regular_file(path, false)?;
+            if !raw_file_metadata(&file)?.matches_validator(&expected) {
+                return Err(FsError::new(FsErrorCode::Conflict));
+            }
+            set_file_mode(&file, mode)?;
+            if file.sync_all().is_err() {
+                tracing::warn!("file sync failed after a committed permission change");
+            }
+        }
+        Ok(())
+    }
+
     pub fn create_directory(&self, path: &VirtualPath) -> FsResult<()> {
         self.require_write()?;
+        if self.share.default_directory_mode.is_some() {
+            // Apply exact modes in private staging before atomic publication,
+            // so a name swap cannot redirect chmod onto an existing directory.
+            return self.begin_tree(path)?.publish();
+        }
         let (parent, name) = self.share.open_parent(path)?;
         parent.create_dir(name.as_str()).map_err(map_io)?;
         // Re-open without following so a concurrently substituted link is never accepted.
@@ -1052,6 +1120,12 @@ impl AuthorizedShare<'_> {
             match staging.open_with(&temporary_name, &options) {
                 Ok(file) => {
                     validate_regular_handle(&file)?;
+                    if let Some(mode) = self.share.default_file_mode
+                        && let Err(error) = set_file_mode(&file, mode)
+                    {
+                        let _ = staging.remove_file(&temporary_name);
+                        return Err(error);
+                    }
                     return Ok(PendingWrite {
                         staging,
                         destination_parent,
@@ -1816,6 +1890,28 @@ fn sync_directory(directory: &Dir) -> FsResult<()> {
     }
 }
 
+fn set_file_mode(file: &File, mode: u32) -> FsResult<()> {
+    rustix::fs::fchmod(file, rustix::fs::Mode::from_bits_truncate(mode))
+        .map_err(|error| map_io(error.into()))
+}
+
+fn set_directory_mode(directory: &Dir, mode: u32) -> FsResult<()> {
+    // cap-std directory capabilities may use O_PATH, which fchmod rejects.
+    // Reopen this same directory, without re-resolving its user-controlled name.
+    let descriptor = rustix::fs::openat(
+        directory,
+        ".",
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| map_io(error.into()))?;
+    rustix::fs::fchmod(&descriptor, rustix::fs::Mode::from_bits_truncate(mode))
+        .map_err(|error| map_io(error.into()))
+}
+
 fn secure_file_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.follow(FollowSymlinks::No).nonblock(true);
@@ -1848,6 +1944,9 @@ fn entry_metadata(metadata: &cap_std::fs::Metadata, kind: EntryKind) -> EntryMet
         modified: metadata.modified().ok().map(|time| time.into_std()),
         accessed: metadata.accessed().ok().map(|time| time.into_std()),
         created: metadata.created().ok().map(|time| time.into_std()),
+        mode: cap_fs_ext::OsMetadataExt::mode(metadata) & 0o7777,
+        uid: cap_fs_ext::OsMetadataExt::uid(metadata),
+        gid: cap_fs_ext::OsMetadataExt::gid(metadata),
         file_id: metadata_identity(metadata),
     }
 }
@@ -1952,6 +2051,76 @@ mod tests {
             access: AccessLevel::ReadWrite,
         };
         (temporary, share, read, write)
+    }
+
+    #[test]
+    fn creation_modes_are_exact_and_replacements_keep_existing_permissions() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let (root, share, read, write) = fixture();
+        let share = share.with_creation_modes(Some(0o600), Some(0o700)).unwrap();
+        let view = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .unwrap();
+        let path = VirtualPath::parse("private.txt").unwrap();
+        view.create_file(&path, b"private").unwrap();
+        let metadata = view.metadata(&path).unwrap();
+        assert_eq!(metadata.mode, 0o600);
+        let actual = fs::metadata(root.path().join("private.txt")).unwrap();
+        assert_eq!(metadata.uid, actual.uid());
+        assert_eq!(metadata.gid, actual.gid());
+        view.create_directory(&VirtualPath::parse("private").unwrap())
+            .unwrap();
+        assert_eq!(
+            fs::metadata(root.path().join("private")).unwrap().mode() & 0o777,
+            0o700
+        );
+
+        // An executable keeps its ordinary bits even when share defaults differ.
+        fs::set_permissions(
+            root.path().join("private.txt"),
+            fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+        let expected = view.metadata(&path).unwrap();
+        let pending = view.begin_write(&path).unwrap();
+        pending.writer().unwrap().write_all(b"changed").unwrap();
+        let replaced = pending.publish_replacement(expected).unwrap();
+        assert_eq!(replaced.mode, 0o750);
+        assert_eq!(view.read_file(&path, 100).unwrap(), b"changed");
+        assert!(
+            share
+                .authorize(Some(&read), GlobalPolicy::default())
+                .unwrap()
+                .create_file(&VirtualPath::parse("denied").unwrap(), b"")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replacement_rejects_a_concurrent_permission_change() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (root, share, _, write) = fixture();
+        let view = share
+            .authorize(Some(&write), GlobalPolicy::default())
+            .unwrap();
+        let path = VirtualPath::parse("hello.txt").unwrap();
+        fs::set_permissions(
+            root.path().join("hello.txt"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let expected = view.metadata(&path).unwrap();
+        let pending = view.begin_write(&path).unwrap();
+        fs::set_permissions(
+            root.path().join("hello.txt"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            pending.publish_replacement(expected).unwrap_err().code(),
+            FsErrorCode::Conflict
+        );
+        assert_eq!(view.read_file(&path, 100).unwrap(), b"hello");
     }
 
     #[test]

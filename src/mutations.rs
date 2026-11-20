@@ -322,6 +322,10 @@ pub fn router(http_body_limit: usize) -> Router<AppState> {
     Router::new()
         .route("/shares/{share_id}/directories", post(create_directory))
         .route("/shares/{share_id}/files", post(create_file))
+        .route(
+            "/shares/{share_id}/permissions",
+            put(change_permissions).layer(DefaultBodyLimit::max(MAX_METADATA_BODY_BYTES)),
+        )
         .route("/shares/{share_id}/text", put(save_text))
         .route("/shares/{share_id}/move", post(move_entry))
         .route(
@@ -355,6 +359,73 @@ pub fn read_router() -> Router<AppState> {
 #[derive(Deserialize)]
 struct PathBody {
     path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PermissionsBody {
+    path: String,
+    mode: String,
+    expected_mode: String,
+}
+
+async fn change_permissions(
+    State(state): State<AppState>,
+    identity: AuthenticatedIdentity,
+    _csrf: CsrfVerified,
+    ApiPath(raw_share_id): ApiPath<String>,
+    headers: HeaderMap,
+    body: Result<ApiJson<PermissionsBody>, AppError>,
+) -> Result<Response, AppError> {
+    let result = async {
+        let ApiJson(body) = body?;
+        reject_oversized_metadata(&body.path)?;
+        let (share_id, path, authorized) =
+            authorize_write(&state, &identity, &raw_share_id, &body.path)?;
+        let parse_mode = |value: &str| {
+            if value.len() != 4 || !value.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+                return Err(AppError::InvalidRequest);
+            }
+            u32::from_str_radix(value, 8).map_err(|_| AppError::InvalidRequest)
+        };
+        let mode = parse_mode(&body.mode)?;
+        let expected_mode = parse_mode(&body.expected_mode)?;
+        if mode > 0o777 {
+            return Err(AppError::InvalidRequest.into());
+        }
+        let current = gated_metadata(&state, &identity, &authorized, &path).await?;
+        require_if_match(&state, &share_id, &path, current, &headers)?;
+        if current.mode != expected_mode {
+            return Err(Rejection::new(AppError::Conflict, "stale_validator"));
+        }
+        let lease = state.browse().acquire_blocking(&identity)?;
+        let commit = state.mutations().commit_lock(&share_id).await;
+        let target = path.clone();
+        let result = run_blocking(move || {
+            let (_lease, _commit) = (lease, commit);
+            authorized
+                .view()
+                .change_permissions(&target, current, mode)
+                .map_err(Rejection::from)
+        })
+        .await?;
+        finish_mutation(
+            &identity,
+            &share_id,
+            &path,
+            "change_permissions",
+            result,
+            StatusCode::OK,
+        )
+    }
+    .await;
+    audited(
+        &state,
+        &identity,
+        &raw_share_id,
+        "change_permissions",
+        result,
+    )
 }
 
 #[derive(Deserialize)]
@@ -2180,6 +2251,175 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert!(!fixture.root.path().join("new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn permission_changes_enforce_grants_csrf_modes_validators_and_no_follow() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+        let fixture = fixture(AccessLevel::ReadWrite, false, MutationLimits::default());
+        let path = fixture.root.path().join("existing.txt");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let etag = metadata_etag(&fixture, "existing.txt").await;
+        let request = |path: &str, mode: &str, expected: &str, validator: &str| {
+            let mut request = json_request(
+                "PUT",
+                "/api/v1/shares/documents/permissions",
+                json!({"path":path,"mode":mode,"expectedMode":expected}),
+            );
+            request
+                .headers_mut()
+                .insert(header::IF_MATCH, validator.parse().unwrap());
+            request
+        };
+        let response = send(
+            &fixture.app,
+            Some(&fixture.identity),
+            false,
+            request("existing.txt", "0600", "0644", &etag),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let reader = AuthenticatedIdentity::new(
+            "reader",
+            vec![ShareGrant {
+                share_id: ShareId::new("documents").unwrap(),
+                access: AccessLevel::ReadOnly,
+            }],
+        );
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&reader),
+                true,
+                request("existing.txt", "0600", "0644", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                &fixture.app,
+                None,
+                true,
+                request("existing.txt", "0600", "0644", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for mode in ["600", "0888", "1600", "4600", "07777", "0o600", " 0600"] {
+            assert_eq!(
+                send(
+                    &fixture.app,
+                    Some(&fixture.identity),
+                    true,
+                    request("existing.txt", mode, "0644", &etag)
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST,
+                "accepted {mode}"
+            );
+        }
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                request("existing.txt", "0600", "0644", "W/\"stale\"")
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                request("existing.txt", "0600", "0600", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o644);
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                request("existing.txt", "0600", "0644", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                request("existing.txt", "0644", "0644", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("file"), b"outside").unwrap();
+        fs::set_permissions(
+            outside.path().join("file"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("file"),
+            fixture.root.path().join("link"),
+        )
+        .unwrap();
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                request("link", "0600", "0644", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            fs::metadata(outside.path().join("file")).unwrap().mode() & 0o777,
+            0o644
+        );
+        let locked = self::fixture(AccessLevel::ReadWrite, true, MutationLimits::default());
+        assert_eq!(
+            send(
+                &locked.app,
+                Some(&locked.identity),
+                true,
+                request("existing.txt", "0600", "0644", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        fs::hard_link(&path, fixture.root.path().join("alias")).unwrap();
+        assert_eq!(
+            send(
+                &fixture.app,
+                Some(&fixture.identity),
+                true,
+                request("alias", "0644", "0600", &etag)
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

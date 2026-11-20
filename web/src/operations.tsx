@@ -18,6 +18,13 @@ import {
   Pencil,
   Trash2,
   Upload,
+  Check,
+  CircleAlert,
+  ExternalLink,
+  ChevronRight,
+  Pause,
+  Play,
+  ShieldCheck,
   X,
 } from "lucide-preact";
 
@@ -31,6 +38,8 @@ import {
   type TextSaveResult,
 } from "./api";
 import { CopyPathButton } from "./copy-path-button";
+import { EntryIcon } from "./file-icons";
+import { previewRouteUrl } from "./navigation";
 import { isValidPathComponent } from "./virtual-path";
 import { FolderPicker } from "./tree";
 import { useToast } from "./toast";
@@ -49,6 +58,9 @@ export type EntryOperation =
 export interface UploadSelection {
   id: string;
   files: File[];
+  directory: string;
+  shareId: string;
+  shareName: string;
 }
 
 export function WriteToolbar({
@@ -1549,116 +1561,99 @@ function EditorDialog({
 interface UploadJob {
   id: string;
   file: File;
+  directory: string;
+  shareId: string;
+  shareName: string;
   status:
     "queued" | "uploading" | "succeeded" | "failed" | "cancelled" | "conflict";
   loaded: number;
   total?: number;
   message?: string;
-  /** The existing file's validator, captured when the conflict was shown. */
+  /** The existing version captured when the conflict was shown. */
   replaceEtag?: string;
+  replaceRequested?: boolean;
 }
 
 export function UploadQueue({
   api,
   csrfToken,
-  directory,
-  files,
-  shareId,
-  onClose,
+  selections,
+  onSelectionConsumed,
   onChanged,
   onSessionExpired,
 }: {
   api: ApiClient;
   csrfToken: string;
-  directory: string;
-  files: File[];
-  shareId: string;
-  onClose: () => void;
+  selections: UploadSelection[];
+  onSelectionConsumed: (id: string) => void;
   onChanged: () => void;
   onSessionExpired: () => void;
 }) {
-  const [jobs, setJobs] = useState<UploadJob[]>(() =>
-    files.map((file, index) => ({
-      id: `${index}:${file.name}`,
-      file,
-      status: isValidPathComponent(file.name) ? "queued" : "failed",
-      loaded: 0,
-      message: isValidPathComponent(file.name)
-        ? undefined
-        : "The filename is not valid for this server.",
-    })),
-  );
+  const [jobs, setJobs] = useState<UploadJob[]>([]);
+  const [minimized, setMinimized] = useState(false);
+  const [paused, setPaused] = useState(false);
   const controllers = useRef(new Map<string, AbortController>());
-  const started = useRef(false);
+  const consumed = useRef(new Set<string>());
+  const alive = useRef(true);
+  const stopped = useRef(false);
+  const pausedQueue = useRef(false);
+  const cancellations = useRef(new Set<string>());
+  const mini = useRef<HTMLButtonElement>(null);
+  const wasMinimized = useRef(false);
 
-  const update = (id: string, change: Partial<UploadJob>) =>
-    setJobs((current) =>
-      current.map((job) => (job.id === id ? { ...job, ...change } : job)),
-    );
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      controllers.current.forEach((controller) => controller.abort());
+    };
+  }, []);
 
-  const run = async (job: UploadJob, replace = false) => {
-    if (controllers.current.has(job.id)) return;
-    // Replacement only ever uses the validator captured when the conflict
-    // was shown, so a version the person never saw is not overwritten.
-    const etag = replace ? job.replaceEtag : undefined;
-    if (replace && !etag) return;
-    const controller = new AbortController();
-    controllers.current.set(job.id, controller);
-    update(job.id, {
-      status: "uploading",
-      loaded: 0,
-      message: undefined,
-      replaceEtag: undefined,
-    });
-    try {
-      const result = await api.uploadFile(
-        shareId,
-        directory,
-        job.file,
-        csrfToken,
-        {
-          replace,
-          etag,
-          signal: controller.signal,
-          onProgress: (loaded, total) => update(job.id, { loaded, total }),
-        },
-      );
-      const outcome = result.outcomes[0]?.outcome;
-      if (outcome === "created" || outcome === "replaced") {
-        update(job.id, {
-          status: "succeeded",
-          loaded: job.file.size,
-          total: job.file.size,
-          message: outcome === "replaced" ? "Replaced" : "Uploaded",
-        });
-        onChanged();
-      } else if (outcome === "conflict") {
-        update(job.id, await describeConflict(job, controller.signal));
-      } else if (outcome === "quota_exceeded") {
-        update(job.id, {
-          status: "failed",
-          message: "The shared folder quota was exceeded.",
-        });
-      } else if (outcome && shareStateMessages[outcome]) {
-        update(job.id, {
-          status: "failed",
-          message: shareStateMessages[outcome],
-        });
-      } else {
-        update(job.id, { status: "failed", message: "The upload failed." });
-      }
-    } catch (cause) {
-      if (isUnauthorized(cause)) {
-        controllers.current.forEach((item) => item.abort());
-        onSessionExpired();
-      } else if (isAborted(cause)) {
-        update(job.id, { status: "cancelled", message: "Cancelled" });
-      } else {
-        update(job.id, { status: "failed", message: uploadError(cause) });
-      }
-    } finally {
-      controllers.current.delete(job.id);
+  useEffect(() => {
+    if (!jobs.length) {
+      pausedQueue.current = false;
+      setPaused(false);
+      cancellations.current.clear();
     }
+  }, [jobs]);
+
+  useEffect(() => {
+    if (!selections.length) {
+      consumed.current.clear();
+      return;
+    }
+    for (const selection of selections) {
+      if (consumed.current.has(selection.id)) continue;
+      consumed.current.add(selection.id);
+      const added = selection.files.map((file, index): UploadJob => ({
+        id: `${selection.id}:${index}`,
+        file,
+        directory: selection.directory,
+        shareId: selection.shareId,
+        shareName: selection.shareName,
+        status: isValidPathComponent(file.name) ? "queued" : "failed",
+        loaded: 0,
+        message: isValidPathComponent(file.name)
+          ? undefined
+          : "The filename is not valid for this server.",
+      }));
+      setJobs((current) => [...current, ...added]);
+      setMinimized(false);
+      stopped.current = false;
+      onSelectionConsumed(selection.id);
+    }
+  }, [selections, onSelectionConsumed]);
+
+  useEffect(() => {
+    if (minimized && !wasMinimized.current) mini.current?.focus();
+    wasMinimized.current = minimized;
+  }, [minimized]);
+
+  const update = (id: string, change: Partial<UploadJob>) => {
+    if (alive.current)
+      setJobs((current) =>
+        current.map((job) => (job.id === id ? { ...job, ...change } : job)),
+      );
   };
 
   const describeConflict = async (
@@ -1667,16 +1662,15 @@ export function UploadQueue({
   ): Promise<Partial<UploadJob>> => {
     try {
       const existing = await api.metadata(
-        shareId,
-        joinPath(directory, job.file.name),
+        job.shareId,
+        joinPath(job.directory, job.file.name),
         signal,
       );
-      if (existing.kind !== "file") {
+      if (existing.kind !== "file")
         return {
           status: "failed",
           message: "A folder with this name already exists.",
         };
-      }
       return {
         status: "conflict",
         message: "A file with this name already exists.",
@@ -1692,103 +1686,575 @@ export function UploadQueue({
     }
   };
 
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    const queue = jobs.filter((job) => job.status === "queued");
-    let next = 0;
-    const worker = async () => {
-      while (next < queue.length) {
-        const job = queue[next++];
-        if (job) await run(job);
+  const run = async (job: UploadJob) => {
+    if (
+      !alive.current ||
+      stopped.current ||
+      pausedQueue.current ||
+      cancellations.current.has(job.id) ||
+      controllers.current.has(job.id)
+    )
+      return;
+    const replace = job.replaceRequested === true;
+    const etag = replace ? job.replaceEtag : undefined;
+    if (replace && !etag) return;
+    const controller = new AbortController();
+    controllers.current.set(job.id, controller);
+    update(job.id, {
+      status: "uploading",
+      loaded: 0,
+      total: undefined,
+      message: undefined,
+      replaceEtag: undefined,
+      replaceRequested: undefined,
+    });
+    try {
+      const result = await api.uploadFile(
+        job.shareId,
+        job.directory,
+        job.file,
+        csrfToken,
+        {
+          replace,
+          etag,
+          signal: controller.signal,
+          onProgress: (loaded, total) => update(job.id, { loaded, total }),
+        },
+      );
+      if (!alive.current || controller.signal.aborted) return;
+      const outcome = result.outcomes.find(
+        (item) => item.path === joinPath(job.directory, job.file.name),
+      )?.outcome;
+      if (outcome === "created" || outcome === "replaced") {
+        update(job.id, {
+          status: "succeeded",
+          loaded: job.file.size,
+          total: job.file.size,
+          message: outcome === "replaced" ? "Replaced" : "Uploaded",
+        });
+        onChanged();
+      } else if (outcome === "conflict") {
+        update(job.id, await describeConflict(job, controller.signal));
+      } else {
+        update(job.id, {
+          status: "failed",
+          message:
+            outcome === "quota_exceeded"
+              ? "The shared folder quota was exceeded."
+              : (outcome && shareStateMessages[outcome]) ||
+                "The upload failed.",
+        });
       }
-    };
-    // The server allows each user three concurrent uploads (src/mutations.rs).
-    for (let index = 0; index < Math.min(3, queue.length); index += 1) {
-      void worker();
+    } catch (cause) {
+      if (!alive.current) return;
+      if (isUnauthorized(cause)) {
+        stopped.current = true;
+        controllers.current.forEach((item) => item.abort());
+        onSessionExpired();
+      } else if (isAborted(cause)) {
+        update(job.id, { status: "cancelled", message: "Cancelled" });
+      } else {
+        update(job.id, { status: "failed", message: uploadError(cause) });
+      }
+    } finally {
+      controllers.current.delete(job.id);
+      // Wake the scheduler only after this transport has released its slot.
+      update(job.id, {});
     }
-    return () =>
-      controllers.current.forEach((controller) => controller.abort());
-  }, []);
+  };
 
+  useEffect(() => {
+    if (paused || stopped.current) return;
+    const available = Math.max(0, 3 - controllers.current.size);
+    for (const job of jobs
+      .filter(
+        (item) => item.status === "queued" && !controllers.current.has(item.id),
+      )
+      .slice(0, available))
+      void run(job);
+  }, [jobs, paused]);
+
+  const cancel = (job: UploadJob) => {
+    cancellations.current.add(job.id);
+    controllers.current.get(job.id)?.abort();
+    update(job.id, { status: "cancelled", message: "Cancelled" });
+  };
+  const cancelAll = () => {
+    stopped.current = true;
+    jobs.forEach((job) => {
+      if (job.status === "queued" || job.status === "uploading")
+        cancellations.current.add(job.id);
+    });
+    controllers.current.forEach((controller) => controller.abort());
+    setJobs((current) =>
+      current.map((job) =>
+        job.status === "queued" || job.status === "uploading"
+          ? { ...job, status: "cancelled", message: "Cancelled" }
+          : job,
+      ),
+    );
+  };
+  const retry = (job: UploadJob, replace = false) => {
+    stopped.current = false;
+    cancellations.current.delete(job.id);
+    update(job.id, {
+      status: "queued",
+      loaded: 0,
+      total: undefined,
+      message: undefined,
+      replaceRequested: replace,
+    });
+  };
   const active = jobs.some(
     (job) => job.status === "queued" || job.status === "uploading",
   );
+  const transferring = jobs.filter((job) => job.status === "uploading").length;
   const complete = jobs.filter((job) => job.status === "succeeded").length;
+  const attention = jobs.filter(
+    (job) => job.status === "failed" || job.status === "conflict",
+  ).length;
+  const destinations = new Set(
+    jobs.map((job) => `${job.shareId}\0${job.directory}`),
+  );
+  const first = jobs[0];
+  const total = jobs.reduce((sum, job) => sum + job.file.size, 0);
+  const loaded = jobs.reduce(
+    (sum, job) =>
+      sum +
+      (job.status === "succeeded"
+        ? job.file.size
+        : job.file.size * uploadFraction(job)),
+    0,
+  );
+  const percent = total
+    ? Math.min(100, Math.round((loaded / total) * 100))
+    : active
+      ? 0
+      : 100;
+  const close = () => {
+    if (active) setMinimized(true);
+    else {
+      setJobs([]);
+      setPaused(false);
+      pausedQueue.current = false;
+      cancellations.current.clear();
+    }
+  };
+
+  if (!first) return null;
+  const liveSummary = active
+    ? `${complete} of ${jobs.length} uploads complete`
+    : `Uploads finished: ${complete} succeeded`;
+  if (minimized)
+    return (
+      <>
+        <p class="sr-only" role="status" aria-live="polite">
+          {liveSummary}
+        </p>
+        <button
+          ref={mini}
+          type="button"
+          class="upload-mini"
+          onClick={() => setMinimized(false)}
+          aria-label={`Show uploads: ${complete} of ${jobs.length} complete${attention ? `, ${attention} need attention` : ""}`}
+        >
+          <Upload size={20} aria-hidden="true" />
+          <span>
+            <strong>Uploads</strong>
+            <span>
+              {complete} of {jobs.length} complete
+              {attention > 0 && ` · ${attention} need attention`}
+            </span>
+          </span>
+          <ChevronRight size={18} aria-hidden="true" />
+        </button>
+      </>
+    );
 
   return (
-    <Modal title="Uploads" onClose={onClose} busy={false} wide>
+    <Modal
+      title="Uploads"
+      onClose={close}
+      busy={false}
+      wide
+      className="uploads-dialog"
+      headingIcon={<Upload size={23} aria-hidden="true" />}
+      subtitle={
+        <span class="upload-destination">
+          To{" "}
+          {destinations.size === 1 ? (
+            <>
+              <strong>{first.shareName}</strong>
+              {first.directory
+                .split("/")
+                .filter(Boolean)
+                .map((part, index) => (
+                  <span key={index}>
+                    <ChevronRight size={12} aria-hidden="true" />
+                    {part}
+                  </span>
+                ))}
+            </>
+          ) : (
+            <strong>{destinations.size} folders</strong>
+          )}
+        </span>
+      }
+      closeLabel={active ? "Minimize uploads" : "Close Uploads"}
+    >
       <p class="sr-only" role="status" aria-live="polite">
-        {active
-          ? `${complete} of ${jobs.length} uploads complete`
-          : `Uploads finished: ${complete} succeeded`}
+        {liveSummary}
       </p>
-      <ul class="upload-list">
-        {jobs.map((job) => (
-          <li key={job.id}>
-            <div class="upload-job-heading">
-              <span class="upload-name">{job.file.name}</span>
-              <span>{uploadStatus(job.status)}</span>
-            </div>
-            {job.status === "uploading" && (
-              <progress
-                value={job.loaded}
-                max={job.total ?? (job.file.size || 1)}
-                aria-label={`Upload progress for ${job.file.name}`}
-              />
-            )}
-            {job.message && <p class="upload-message">{job.message}</p>}
-            <div class="upload-job-actions">
-              {job.status === "uploading" && (
-                <button
-                  class="entry-action"
-                  type="button"
-                  onClick={() => controllers.current.get(job.id)?.abort()}
-                >
-                  Cancel
-                </button>
-              )}
-              {(job.status === "failed" ||
-                job.status === "cancelled" ||
-                (job.status === "conflict" && !job.replaceEtag)) &&
-                isValidPathComponent(job.file.name) && (
+      <div class="upload-summary">
+        <div class="upload-summary-top">
+          <strong>
+            {complete} of {jobs.length} files uploaded
+          </strong>
+          <span>{percent}%</span>
+        </div>
+        <progress
+          value={percent}
+          max={100}
+          aria-label="Overall upload progress"
+        />
+        <div class="upload-summary-bottom">
+          <span>
+            {formatUploadSize(loaded)} of {formatUploadSize(total)} transferred
+          </span>
+          <span>
+            {paused && active
+              ? transferring
+                ? "Queue paused · active uploads will finish"
+                : "Queue paused"
+              : attention
+                ? `${attention} ${attention === 1 ? "file needs" : "files need"} attention`
+                : active
+                  ? `${transferring} uploading`
+                  : "All uploads finished"}
+          </span>
+        </div>
+      </div>
+      <div class="upload-section-heading">
+        <span>Files ({jobs.length})</span>
+        <button
+          type="button"
+          disabled={!complete}
+          onClick={() =>
+            setJobs((current) =>
+              current.filter((job) => job.status !== "succeeded"),
+            )
+          }
+        >
+          Clear completed
+        </button>
+      </div>
+      <ul class="upload-list" aria-label="Upload queue">
+        {jobs.map((job) => {
+          const url = previewRouteUrl(
+            job.shareId,
+            job.directory,
+            joinPath(job.directory, job.file.name),
+          );
+          return (
+            <li key={job.id} class={`upload-job is-${job.status}`}>
+              <span class="upload-file-icon">
+                <EntryIcon
+                  entry={{ name: job.file.name, kind: "file" }}
+                  size={21}
+                  aria-hidden="true"
+                />
+              </span>
+              <div class="upload-file-info">
+                <p class="upload-name">{job.file.name}</p>
+                <div class="upload-file-meta">
+                  <span>{formatUploadSize(job.file.size)}</span>
+                  <span aria-hidden="true">·</span>
+                  <span class={`upload-status is-${job.status}`}>
+                    {job.status === "succeeded" ? (
+                      <Check size={12} aria-hidden="true" />
+                    ) : job.status === "failed" || job.status === "conflict" ? (
+                      <CircleAlert size={12} aria-hidden="true" />
+                    ) : null}
+                    {job.status === "succeeded" && job.message === "Replaced"
+                      ? "Replaced"
+                      : uploadStatus(job.status)}
+                  </span>
+                </div>
+                {destinations.size > 1 && (
+                  <p class="upload-item-destination">
+                    {job.shareName}
+                    {job.directory ? ` / ${job.directory}` : ""}
+                  </p>
+                )}
+                {job.status === "uploading" && (
+                  <progress
+                    value={Math.round(uploadFraction(job) * 100)}
+                    max={100}
+                    aria-label={`Upload progress for ${job.file.name}`}
+                  />
+                )}
+                {job.message && job.status !== "succeeded" && (
+                  <p class="upload-message">{job.message}</p>
+                )}
+              </div>
+              <div class="upload-job-actions">
+                {job.status === "succeeded" && (
+                  <>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="upload-action"
+                      aria-label={`Open ${job.file.name}`}
+                    >
+                      <ExternalLink size={13} aria-hidden="true" />
+                      <span>Open</span>
+                    </a>
+                    <CopyPathButton
+                      value={new URL(url, window.location.origin).href}
+                      className="upload-action upload-copy"
+                      size={14}
+                      label={`Copy link for ${job.file.name}`}
+                      copiedMessage={`Link copied for ${job.file.name}.`}
+                      fallbackTitle="Copy file link"
+                      fallbackLabel="Select and copy this file link"
+                    />
+                  </>
+                )}
+                {(job.status === "uploading" || job.status === "queued") && (
                   <button
-                    class="entry-action"
                     type="button"
-                    onClick={() => void run(job)}
+                    class="upload-text-action"
+                    onClick={() => cancel(job)}
                   >
-                    Retry
+                    Cancel
                   </button>
                 )}
-              {job.status === "conflict" && job.replaceEtag && (
-                <button
-                  class="entry-action entry-action-danger"
-                  type="button"
-                  onClick={() => void run(job, true)}
-                >
-                  Replace existing file
-                </button>
-              )}
-            </div>
-          </li>
-        ))}
+                {(job.status === "failed" ||
+                  job.status === "cancelled" ||
+                  (job.status === "conflict" && !job.replaceEtag)) &&
+                  isValidPathComponent(job.file.name) && (
+                    <button
+                      type="button"
+                      class="upload-action"
+                      onClick={() => retry(job)}
+                    >
+                      Retry
+                    </button>
+                  )}
+                {job.status === "conflict" && job.replaceEtag && (
+                  <button
+                    type="button"
+                    class="upload-action"
+                    onClick={() => retry(job, true)}
+                  >
+                    Replace existing file
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
-      <div class="dialog-actions">
-        <button class="button button-secondary" type="button" onClick={onClose}>
-          {active ? "Close and cancel uploads" : "Close"}
-        </button>
-        {active && (
-          <button
-            class="button button-danger"
-            type="button"
-            onClick={() =>
-              controllers.current.forEach((controller) => controller.abort())
-            }
-          >
-            Cancel all
+      <div class="upload-footer">
+        <p>
+          <ShieldCheck size={15} aria-hidden="true" />
+          File links keep your share’s access rules.
+        </p>
+        <div class="upload-footer-actions">
+          {active && (
+            <button
+              type="button"
+              class="upload-text-action upload-cancel-all"
+              onClick={cancelAll}
+            >
+              Cancel all
+            </button>
+          )}
+          {active && (
+            <button
+              type="button"
+              class="upload-action"
+              aria-pressed={paused}
+              onClick={() => {
+                pausedQueue.current = !pausedQueue.current;
+                setPaused(pausedQueue.current);
+              }}
+            >
+              {paused ? (
+                <Play size={13} aria-hidden="true" />
+              ) : (
+                <Pause size={13} aria-hidden="true" />
+              )}
+              {paused ? "Resume queue" : "Pause queue"}
+            </button>
+          )}
+          <button type="button" class="button button-primary" onClick={close}>
+            {active ? "Continue browsing" : "Done"}
           </button>
-        )}
+        </div>
       </div>
+    </Modal>
+  );
+}
+
+function uploadFraction(job: UploadJob): number {
+  const total = job.total ?? job.file.size;
+  return total > 0 ? Math.max(0, Math.min(1, job.loaded / total)) : 0;
+}
+
+function formatUploadSize(bytes: number): string {
+  if (bytes < 1000) return `${Math.round(bytes)} B`;
+  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(1)} kB`;
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+}
+
+export function PermissionsDialog({
+  metadata,
+  onSave,
+  onClose,
+  onSessionExpired,
+}: {
+  metadata: EntryMetadata;
+  onSave: (mode: string, signal: AbortSignal) => Promise<void>;
+  onClose: () => void;
+  onSessionExpired: () => void;
+}) {
+  const [mode, setMode] = useState(`0${metadata.mode?.slice(-3) ?? "600"}`);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const controller = useRef<AbortController>();
+  useEffect(() => () => controller.current?.abort(), []);
+  const valid = /^0[0-7]{3}$/.test(mode);
+  const value = valid ? Number.parseInt(mode, 8) : 0;
+  const toggle = (bit: number) =>
+    setMode(`0${(value ^ bit).toString(8).padStart(3, "0")}`);
+  const save = async (event: Event) => {
+    event.preventDefault();
+    if (!valid || saving || mode === metadata.mode) return;
+    const request = new AbortController();
+    controller.current = request;
+    setSaving(true);
+    setError(undefined);
+    try {
+      await onSave(mode, request.signal);
+      if (!request.signal.aborted) onClose();
+    } catch (cause) {
+      if (request.signal.aborted) return;
+      if (isUnauthorized(cause)) {
+        onSessionExpired();
+        return;
+      }
+      setError(
+        cause instanceof ApiError && cause.kind === "conflict"
+          ? "This file or its permissions changed. Close this dialog, refresh the file, and try again."
+          : cause instanceof ApiError && cause.kind === "forbidden"
+            ? "The server’s filesystem permissions or your share access denied this change."
+            : "Could not change permissions. Check your connection and try again.",
+      );
+    } finally {
+      if (!request.signal.aborted) setSaving(false);
+    }
+  };
+  return (
+    <Modal
+      title={`Permissions for ${metadata.name}`}
+      onClose={onClose}
+      busy={saving}
+    >
+      <form onSubmit={(event) => void save(event)}>
+        <p class="permissions-description">
+          Choose who can read, write, or execute this file.
+        </p>
+        <fieldset disabled={saving} class="permissions-fields">
+          <legend class="sr-only">File permission bits</legend>
+          <table class="permissions-table">
+            <thead>
+              <tr>
+                <th scope="col">Who</th>
+                {["Read", "Write", "Execute"].map((label) => (
+                  <th scope="col" key={label}>
+                    {label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {["Owner", "Group", "Others"].map((who, row) => (
+                <tr key={who}>
+                  <th scope="row">{who}</th>
+                  {["read", "write", "execute"].map((permission, column) => {
+                    const bit = 1 << ((2 - row) * 3 + 2 - column);
+                    return (
+                      <td key={permission}>
+                        <input
+                          type="checkbox"
+                          aria-label={`${who} ${permission}`}
+                          checked={Boolean(value & bit)}
+                          disabled={!valid || saving}
+                          onChange={() => toggle(bit)}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <label class="permissions-octal">
+            Octal permissions
+            <input
+              data-dialog-default
+              inputMode="numeric"
+              value={mode}
+              maxLength={4}
+              pattern="0[0-7]{3}"
+              required
+              aria-describedby="permissions-hint"
+              aria-invalid={!valid}
+              onInput={(event) => setMode(event.currentTarget.value)}
+            />
+          </label>
+          <p id="permissions-hint" class="permissions-description">
+            Four octal digits, from 0000 to 0777. Changes apply only to this
+            file.
+          </p>
+          {metadata.mode?.[0] !== "0" && (
+            <p class="permissions-description">
+              Saving clears the file’s special permission bits.
+            </p>
+          )}
+          {valid && !(value & 0o400) && (
+            <p class="permissions-warning">
+              Removing owner read access can make this file unavailable in
+              Crabinet.
+            </p>
+          )}
+        </fieldset>
+        {error && (
+          <p role="alert" class="operation-error">
+            {error}
+          </p>
+        )}
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="button button-secondary"
+            disabled={saving}
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="button"
+            disabled={!valid || saving || mode === metadata.mode}
+          >
+            {saving ? "Saving…" : "Save permissions"}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }
@@ -1800,6 +2266,9 @@ export function Modal({
   busy,
   wide = false,
   className,
+  headingIcon,
+  subtitle,
+  closeLabel,
 }: {
   title: string;
   children: preact.ComponentChildren;
@@ -1808,6 +2277,9 @@ export function Modal({
   wide?: boolean;
   /** An extra class on the panel, for a dialog with its own layout. */
   className?: string;
+  headingIcon?: preact.ComponentChildren;
+  subtitle?: preact.ComponentChildren;
+  closeLabel?: string;
 }) {
   const titleId = `dialog-${title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`;
   const panel = useRef<HTMLDivElement>(null);
@@ -1880,11 +2352,21 @@ export function Modal({
       >
         {/* A <header> here would add a second banner landmark. */}
         <div class="modal-header">
-          <h2 id={titleId}>{title}</h2>
+          {headingIcon || subtitle ? (
+            <div class="modal-heading">
+              <span class="modal-heading-icon">{headingIcon}</span>
+              <div>
+                <h2 id={titleId}>{title}</h2>
+                {subtitle}
+              </div>
+            </div>
+          ) : (
+            <h2 id={titleId}>{title}</h2>
+          )}
           <button
             class="modal-close"
             type="button"
-            aria-label={`Close ${title}`}
+            aria-label={closeLabel ?? `Close ${title}`}
             disabled={busy}
             onClick={onClose}
           >
@@ -1960,7 +2442,7 @@ function uploadStatus(status: UploadJob["status"]): string {
     : status === "uploading"
       ? "Uploading"
       : status === "succeeded"
-        ? "Succeeded"
+        ? "Uploaded"
         : status === "cancelled"
           ? "Cancelled"
           : status === "conflict"

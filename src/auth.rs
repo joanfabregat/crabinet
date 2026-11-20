@@ -319,6 +319,7 @@ struct SessionResponse {
     version: &'static str,
     /// Whether listings may request folder sizes (`server.folder_sizes`).
     folder_sizes: bool,
+    show_unix_metadata: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -995,6 +996,7 @@ impl AuthService {
             csrf_token,
             version: env!("CARGO_PKG_VERSION"),
             folder_sizes: browse.folder_sizes_enabled(),
+            show_unix_metadata: browse.show_unix_metadata(),
         })
     }
 

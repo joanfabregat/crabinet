@@ -46,6 +46,8 @@ permission = "write"
 id = "writable"
 name = "Working files"
 path = "__STATE_DIR__/writable"
+default_file_mode = "0600"
+default_directory_mode = "0700"
 
 [[shares.grants]]
 user = "writer"
