@@ -1,6 +1,6 @@
 [package]
 name = "crabinet"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -54,7 +54,7 @@ toml = "1.1.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 unicode-normalization = "0.1.25"
-url = "2.5.8"
+url = "2.5.9"
 webauthn-rs = { version = "=0.5.5", features = ["conditional-ui"] }
 webauthn-rs-proto = "=0.5.5"
 # Thumbnail decoders and encoders: pure Rust, all `forbid(unsafe_code)`

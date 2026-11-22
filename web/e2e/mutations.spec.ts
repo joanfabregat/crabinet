@@ -734,6 +734,49 @@ test.describe("writable share operations", () => {
     expect(wrongFolder.status()).toBe(404);
   });
 
+  test("wraps long uploaded filenames inside copy-link tooltips", async ({
+    page,
+  }) => {
+    await openSignedIn(page, "/writable", "writer");
+    const name = `${"longfilename".repeat(16)}.json`;
+    await chooseFiles(page.getByLabel("Choose files to upload"), [
+      { name, mimeType: "application/json", contents: "{}" },
+    ]);
+    const uploads = page.getByRole("dialog", { name: "Uploads", exact: true });
+    const copy = uploads.getByRole("button", { name: `Copy link for ${name}` });
+    await expect(copy).toBeVisible();
+
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      // Exercise pointer and keyboard tooltips at each viewport size.
+      for (const interaction of ["hover", "focus"] as const) {
+        if (interaction === "hover") await copy.hover();
+        else await copy.focus();
+        const tooltip = page.getByRole("tooltip");
+        await expect(tooltip).toBeVisible();
+        await expect(tooltip).toHaveText(`Copy link for ${name}`);
+        const bounds = await tooltip.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          return {
+            left: box.left,
+            right: box.right,
+            textFits: Array.from(range.getClientRects()).every(
+              (line) => line.left >= box.left && line.right <= box.right,
+            ),
+          };
+        });
+        expect(bounds.left).toBeGreaterThanOrEqual(8);
+        expect(bounds.right).toBeLessThanOrEqual(width - 8);
+        expect(bounds.textFits).toBe(true);
+        await copy.blur();
+        await page.mouse.move(0, 0);
+        await expect(tooltip).toHaveCount(0);
+      }
+    }
+  });
+
   test("shows upload progress, survives a disconnect retry, and cancels explicitly", async ({
     page,
   }) => {
