@@ -1357,6 +1357,7 @@ html.preview-fullscreen-open body {
   line-height: 1.25;
   max-width: min(15rem, calc(100vw - 1rem));
   opacity: 0;
+  overflow-wrap: anywhere;
   padding: 0.4rem 0.55rem;
   pointer-events: none;
   position: fixed;
