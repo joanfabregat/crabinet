@@ -77,7 +77,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `flate2` | `1.1.10` | `MIT OR Apache-2.0` |
 | `foreign-types` | `0.3.2` | `MIT/Apache-2.0` |
 | `foreign-types-shared` | `0.1.1` | `MIT/Apache-2.0` |
-| `form_urlencoded` | `1.2.2` | `MIT OR Apache-2.0` |
+| `form_urlencoded` | `1.2.3` | `MIT OR Apache-2.0` |
 | `fs-set-times` | `0.20.3` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
 | `futures-channel` | `0.3.34` | `MIT OR Apache-2.0` |
 | `futures-core` | `0.3.34` | `MIT OR Apache-2.0` |
@@ -206,7 +206,7 @@ The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.
 | `unicase` | `2.9.0` | `MIT OR Apache-2.0` |
 | `unicode-ident` | `1.0.25` | `(MIT OR Apache-2.0) AND Unicode-3.0` |
 | `unicode-normalization` | `0.1.25` | `MIT OR Apache-2.0` |
-| `url` | `2.5.8` | `MIT OR Apache-2.0` |
+| `url` | `2.5.9` | `MIT OR Apache-2.0` |
 | `utf8_iter` | `1.0.4` | `Apache-2.0 OR MIT` |
 | `utf8parse` | `0.2.2` | `Apache-2.0 OR MIT` |
 | `uuid` | `1.26.1` | `Apache-2.0 OR MIT` |
