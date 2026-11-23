@@ -13,6 +13,8 @@ Crabinet's own source and original assets are licensed under [MIT](LICENSE). Thi
 
 Source code for the MPL-licensed WebAuthn crates is available from the [upstream repository](https://github.com/kanidm/webauthn-rs) and the exact crate versions listed in `Cargo.lock` are available from [crates.io](https://crates.io/crates/webauthn-rs). Crabinet does not relicense these components.
 
+Mermaid 11.17.2 and the runtime dependencies it introduces are covered by the complete notices in [Mermaid dependency licenses](MERMAID_LICENSES.md), included in release archives and images with this document. Mermaid is MIT licensed; DOMPurify is distributed under its Apache-2.0 option. KaTeX is pinned to patched version 0.18.2 under MIT. Type-only and development packages are not bundled.
+
 ## Apache License 2.0
 
 The release executable includes OpenSSL 3.6.3, built through `openssl-src 300.6.1+3.6.3`, under Apache-2.0. The embedded web frontend includes PDF.js from `pdfjs-dist` 6.3.289 (Copyright Mozilla Foundation and contributors) under Apache-2.0: its library and worker scripts, and the Mozilla glue code of its JavaScript JBIG2 decoder. The locked Linux runtime graph also contains the following crates whose declared license expression includes Apache-2.0. Some offer an alternative license; the expression for each crate is reproduced as declared. Build-only and development dependencies are omitted from this list.

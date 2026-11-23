@@ -1,9 +1,33 @@
 import preact from "@preact/preset-vite";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+import { MERMAID_FRAME_CSP } from "./src/mermaid-policy";
+
+function mermaidFrame(): Plugin {
+  return {
+    name: "crabinet-mermaid-frame",
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const path = (request.url ?? "").split("?")[0]!;
+        if (path === "/mermaid-renderer.html")
+          response.setHeader("Content-Security-Policy", MERMAID_FRAME_CSP);
+        // Development modules are also public, never proxied API content.
+        if (
+          request.headers.origin === "null" &&
+          (path.startsWith("/src/") ||
+            path.startsWith("/node_modules/.vite/") ||
+            path.startsWith("/@vite/") ||
+            path.startsWith("/@id/"))
+        )
+          response.setHeader("Access-Control-Allow-Origin", "*");
+        next();
+      });
+    },
+  };
+}
 
 // pdf.js loads its CMaps, standard fonts, and non-WebAssembly image decoders
 // by file name from a base URL, so they cannot take Vite's hashed names. The
@@ -72,7 +96,7 @@ export default defineConfig(({ command }) => {
   );
 
   return {
-    plugins: [preact(), pdfjsAssets()],
+    plugins: [preact(), pdfjsAssets(), mermaidFrame()],
     define: {
       __CRABINET_DEV_REVISION__: JSON.stringify(revision),
     },
@@ -109,6 +133,12 @@ export default defineConfig(({ command }) => {
     build: {
       outDir: "dist",
       emptyOutDir: true,
+      rollupOptions: {
+        input: {
+          app: resolve(import.meta.dirname, "index.html"),
+          mermaid: resolve(import.meta.dirname, "mermaid-renderer.html"),
+        },
+      },
     },
   };
 });

@@ -13,6 +13,27 @@ async function renderMarkdown(source: string) {
 }
 
 describe("SafeMarkdown", () => {
+  it("renders Mermaid fences in bounded sandboxed views and retains their source", async () => {
+    const source = "flowchart LR\nA --> B";
+    const document = await renderMarkdown(
+      Array.from({ length: 18 }, () => `\`\`\`mermaid\n${source}\n\`\`\``).join(
+        "\n\n",
+      ),
+    );
+    const frames = document.querySelectorAll("iframe");
+    expect(frames).toHaveLength(16);
+    for (const frame of frames) {
+      expect(frame).toHaveAttribute("src", "/mermaid-renderer.html");
+      expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+      expect(frame).not.toHaveAttribute("srcdoc");
+    }
+    expect(screen.getAllByLabelText("Mermaid source")).toHaveLength(18);
+    expect(document).toHaveTextContent(
+      "Only the first 16 diagrams are rendered.",
+    );
+    expect(document.querySelector("svg, script")).toBeNull();
+  });
+
   it("renders GitHub Flavored Markdown inline and block syntax", async () => {
     const document = await renderMarkdown(
       [

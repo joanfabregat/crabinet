@@ -84,6 +84,7 @@ import { HighlightedCode } from "./highlighted-code";
 import { LoadingSpinner } from "./loading-spinner";
 import { PdfFirstPage } from "./pdf-preview";
 import { CopyPathButton } from "./copy-path-button";
+import { MermaidDiagram } from "./mermaid-diagram";
 import {
   browserNavigation,
   directoryUrl,
@@ -3126,6 +3127,10 @@ function PreviewContent({
     return <MarkdownPreview document={document} filename={filename} />;
   }
 
+  if (document.kind === "code" && document.language === "mermaid") {
+    return <MarkdownPreview document={document} filename={filename} diagram />;
+  }
+
   if (document.kind === "svg") {
     return (
       <SvgPreview
@@ -3933,9 +3938,11 @@ function SourcePreview({ document }: { document: PreviewDocument }) {
 function MarkdownPreview({
   document,
   filename,
+  diagram = false,
 }: {
   document: PreviewDocument;
   filename: string;
+  diagram?: boolean;
 }) {
   const [mode, setMode] = useState<"readable" | "source">("readable");
   const readableTab = useRef<HTMLButtonElement>(null);
@@ -3961,7 +3968,11 @@ function MarkdownPreview({
   return (
     <div class="markdown-preview">
       <div class="preview-tabs-row">
-        <div class="preview-tabs" role="tablist" aria-label="Markdown view">
+        <div
+          class="preview-tabs"
+          role="tablist"
+          aria-label={diagram ? "Mermaid view" : "Markdown view"}
+        >
           <button
             ref={readableTab}
             type="button"
@@ -3973,7 +3984,7 @@ function MarkdownPreview({
             onClick={() => chooseMode("readable")}
             onKeyDown={handleKeys}
           >
-            Readable
+            {diagram ? "Diagram" : "Readable"}
           </button>
           <button
             ref={sourceTab}
@@ -3990,8 +4001,9 @@ function MarkdownPreview({
           </button>
         </div>
         <SecurityNote>
-          Scripts, styles, forms, images, and embeds are never loaded. Only web
-          and email links open, in a new tab.
+          {diagram
+            ? "Diagrams cannot open links, load external resources, or access your session."
+            : "Document scripts, styles, forms, images, and embeds are not loaded. Diagrams cannot open links or load external resources. Web and email links open in a new tab."}
         </SecurityNote>
         <CopySourceButton source={document.source} filename={filename} />
       </div>
@@ -4005,6 +4017,15 @@ function MarkdownPreview({
         >
           {document.source === "" ? (
             <p class="preview-empty">This file is empty.</p>
+          ) : diagram ? (
+            document.truncated ? (
+              <p class="preview-empty">
+                This diagram is too large to render. The Source tab shows the
+                available text.
+              </p>
+            ) : (
+              <MermaidDiagram source={document.source} />
+            )
           ) : (
             <SafeMarkdown source={document.source} />
           )}
@@ -4018,7 +4039,7 @@ function MarkdownPreview({
         >
           <pre
             class="source-code source-code-wrap"
-            aria-label="Markdown source"
+            aria-label={diagram ? "Mermaid source" : "Markdown source"}
           >
             <code>{document.source}</code>
           </pre>

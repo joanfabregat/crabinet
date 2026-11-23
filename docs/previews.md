@@ -51,6 +51,18 @@ The application CSP (`default-src 'self'` without `'unsafe-inline'`) is the back
 
 Code highlighting uses Shiki with a fixed language allowlist and dynamically loaded grammars. Highlighted tokens are rendered as Preact text children; generated or uploaded HTML is never assigned through `innerHTML`.
 
+## Mermaid diagrams
+
+Standalone `.mmd` and `.mermaid` files return the ordinary `code` JSON preview with `language: "mermaid"`. The browser offers **Diagram** and **Source** tabs, with the same keyboard navigation and source-copy action as Markdown. Fenced `mermaid` blocks in Markdown render inline and keep their text in a **Diagram source** disclosure. Invalid syntax leaves the source available and explains that the diagram could not be rendered.
+
+Mermaid runs only in the dedicated, bundled `mermaid-renderer.html` document. Both its response CSP and the embedding iframe set `sandbox allow-scripts`, without `allow-same-origin`: the renderer has an opaque origin and cannot read the parent document, cookies, storage, or authenticated APIs. Its CSP permits the bundled scripts and inline diagram styles, and denies connections, images, fonts, nested frames, objects, forms, and base URLs. It is embeddable only by this application origin. No user file is ever served by this route. Only public `assets/*.js` build artifacts receive wildcard CORS so the opaque renderer can import its bundled modules; APIs and file responses keep their existing policy.
+
+Source arrives as a text-only `postMessage`, checked against the parent window and its origin. The parent accepts status and bounded height messages only from its own frame with an opaque origin and the matching request ID. No generated HTML or SVG is inserted into the application's DOM. Mermaid uses strict sanitization with labels and math rendered inside the isolated frame, and locks security and resource options against per-diagram overrides. The frame prevents clicks and form submission and removes every generated link's HTML and XLink navigation targets. A fresh frame renders one diagram and cannot carry configuration into another diagram. Theme changes reload it with the current light or dark theme. No remote renderer, CDN, icon pack, or font service is used.
+
+Each diagram is limited to 32,000 characters and 250 graph edges, and Markdown renders at most 16 diagrams, loading frames lazily. Oversized or truncated standalone diagrams show source instead. A 15-second asynchronous load/render deadline removes a frame that never responds; it is not a hard CPU deadline for synchronous browser parsing. Larger diagrams scroll within a frame capped at 1,000 pixels in height. These browser bounds supplement the server's existing preview limits.
+
+The locked Mermaid 11 dependency avoids the newer release's EPL/GPL layout dependency. KaTeX is overridden to patched version 0.18.2; Mermaid uses its compatible `renderToString` API, with a browser regression test for math labels. The dependency graph is audited, and [Mermaid dependency notices](../MERMAID_LICENSES.md) accompany every binary archive and image.
+
 ## Large text files
 
 A text-like file (text, code, Markdown, HTML, or SVG source) above `max_preview_size` returns its head instead of `413`, with `truncated: true`, `size` set to the whole file's size, `shownBytes` to the head's length in bytes, and `shownLines` to its line count (a final line without a line feed counts). The head is cut from the 64 KiB header already read and validated, so no more of the file is read or buffered whatever its size, and the request keeps its buffered-read slot. The window is the first 64 KiB, or the first `max_preview_size` bytes when that is smaller, and within it the head ends:
