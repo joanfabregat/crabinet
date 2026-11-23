@@ -49,6 +49,28 @@ describe("MermaidDiagram", () => {
       }),
     );
     await waitFor(() => expect(id).toBeDefined());
+    for (const [origin, requestId] of [
+      ["https://example.com", id],
+      ["null", "stale-request"],
+    ]) {
+      fireEvent(
+        window,
+        new MessageEvent("message", {
+          source: frame.contentWindow,
+          origin,
+          data: {
+            type: "crabinet-mermaid-result",
+            id: requestId,
+            ok: true,
+            height: 500,
+          },
+        }),
+      );
+      expect(container.querySelector(".mermaid-diagram")).toHaveAttribute(
+        "aria-busy",
+        "true",
+      );
+    }
     fireEvent(
       window,
       new MessageEvent("message", {

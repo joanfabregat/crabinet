@@ -103,6 +103,12 @@ Permanent delete removes an entry from Crabinet and skips Trash; it is not secur
 
 Any exception to an invariant or scanner finding must be committed, narrowly scoped, name an owner, explain impact and compensating controls, link to a tracking issue, and include an expiry date. Permanent wildcard suppressions are not accepted.
 
+### Mermaid opaque-target messaging exception
+
+Owner: repository maintainer (`joanfabregat`). Expires: **2027-02-20**. Tracking: [#157](https://github.com/joanfabregat/crabinet/issues/157). Scope: the single `postMessage` call sending source to the dedicated renderer in `web/src/mermaid-diagram.tsx`, and only Semgrep rule `javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration`.
+
+The renderer deliberately has an opaque origin, which cannot be named as a `targetOrigin`; sending to it requires `"*"`. This does not broadcast: the receiver is exactly the iframe's `contentWindow`, its URL is the fixed bundled `/mermaid-renderer.html`, and the parent CSP's `default-src 'self'` forbids navigation to a foreign document. The renderer verifies the parent window and origin; its replies require that exact frame, an opaque origin, and the current request ID. Browser tests exercise opaque-origin isolation, session/API/network denial, strict configuration, and disabled links; unit tests reject forged messages. Generated markup never returns to the application. This reviewed finding is suppressed at that call only, with no scanner-wide or file-wide exemption. Reassess the window/CSP controls or a message-port alternative by the expiry date, as tracked in the issue.
+
 ## Backend verification layers
 
 The pull-request gate runs `cargo test --locked --all-targets --all-features`. It includes table-driven policy tests, property tests for path and authorization grammars, assembled-router tests using real login cookies and CSRF middleware, hostile temporary-filesystem fixtures, conditional download/mutation checks, multipart interruption and cleanup checks, and bounded-concurrency tests. Linux-only descriptor and race tests run in the normal Linux CI job. All fixtures use synthetic data under fresh temporary directories.

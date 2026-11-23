@@ -50,6 +50,10 @@ function DiagramFrame({ source, dark }: { source: string; dark: boolean }) {
   const [height, setHeight] = useState(200);
 
   const send = () =>
+    // Opaque target: only this fixed same-origin frame receives the message;
+    // the parent CSP prevents foreign frame navigation. See issue #157 and
+    // docs/threat-model.md. Owner: repository maintainer; expires 2027-02-20.
+    // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
     frame.current?.contentWindow?.postMessage(
       { type: "crabinet-mermaid-render", id: id.current, source, dark },
       // A sandbox without allow-same-origin has an opaque target origin.
