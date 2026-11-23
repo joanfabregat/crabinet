@@ -1115,6 +1115,154 @@ describe("directory browser", () => {
     );
   });
 
+  it.each([
+    ["projects/2024", "projects", "Move to Trash"],
+    ["projects", "", "Move to Trash"],
+    ["projects/2024", "projects", "Delete permanently"],
+  ])(
+    "deletes the open folder %s and returns to %s using %s",
+    async (path, parent, action) => {
+      const navigation = new MemoryNavigation({ shareId: "work", path });
+      const metadata = vi.fn<ApiClient["metadata"]>(async (shareId, path) => ({
+        shareId,
+        path,
+        name: path.split("/").at(-1)!,
+        kind: "directory",
+        etag: 'W/"folder"',
+      }));
+      const api = fakeApi({ metadata });
+      render(<App api={api} navigation={navigation} />);
+
+      const name = path.split("/").at(-1)!;
+      const button = await screen.findByRole("button", {
+        name: `Delete ${name}`,
+      });
+      expect(button.closest(".directory-heading-actions")).not.toBeNull();
+      fireEvent.click(button);
+      const dialog = await screen.findByRole("dialog", {
+        name: `Delete ${name}?`,
+      });
+      expect(dialog).toHaveTextContent(
+        `${name} and everything in it will move to Trash.`,
+      );
+      expect(api.deleteEntry).not.toHaveBeenCalled();
+      expect(api.deleteEntryPermanently).not.toHaveBeenCalled();
+      fireEvent.click(within(dialog).getByRole("button", { name: action }));
+
+      await waitFor(() =>
+        expect(navigation.current()).toEqual({ shareId: "work", path: parent }),
+      );
+      expect(
+        action === "Move to Trash"
+          ? api.deleteEntry
+          : api.deleteEntryPermanently,
+      ).toHaveBeenCalledWith("work", path, 'W/"folder"', "csrf-in-memory");
+      expect(navigation.visits.at(-1)?.replace).toBe(true);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      if (action === "Move to Trash") {
+        fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+        await waitFor(() =>
+          expect(api.restoreTrash).toHaveBeenCalledWith(
+            "work",
+            "trash-1",
+            undefined,
+            "csrf-in-memory",
+          ),
+        );
+      }
+    },
+  );
+
+  it.each([
+    ["work", ""],
+    ["read-only", "projects"],
+  ])("does not offer folder deletion for %s at %s", async (shareId, path) => {
+    render(
+      <App
+        api={fakeApi()}
+        navigation={new MemoryNavigation({ shareId, path })}
+      />,
+    );
+    await screen.findByRole("link", { name: /Download .+ as ZIP/ });
+    const actions = document.querySelector(
+      ".directory-heading-actions",
+    )! as HTMLElement;
+    expect(
+      within(actions).queryByRole("button", { name: /^Delete / }),
+    ).toBeNull();
+  });
+
+  it("stays in the open folder when deletion fails", async () => {
+    const navigation = new MemoryNavigation({
+      shareId: "work",
+      path: "projects",
+    });
+    const api = fakeApi({
+      deleteEntry: vi.fn().mockRejectedValue(new ApiError("server", "Failed")),
+      metadata: vi.fn<ApiClient["metadata"]>(async () => ({
+        shareId: "work",
+        path: "projects",
+        name: "projects",
+        kind: "directory",
+        etag: 'W/"folder"',
+      })),
+    });
+    render(<App api={api} navigation={navigation} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete projects" }),
+    );
+    await confirmMoveToTrash();
+    expect(
+      await screen.findByText("Could not move this item to Trash. Try again."),
+    ).toBeVisible();
+    expect(navigation.current()).toEqual({ shareId: "work", path: "projects" });
+  });
+
+  it("keeps the new location when an open-folder deletion finishes after navigating away", async () => {
+    let finish!: (
+      result: Awaited<ReturnType<ApiClient["deleteEntry"]>>,
+    ) => void;
+    const deleteEntry = vi.fn<ApiClient["deleteEntry"]>(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const navigation = new MemoryNavigation({
+      shareId: "work",
+      path: "projects",
+    });
+    render(
+      <App
+        api={fakeApi({
+          deleteEntry,
+          metadata: vi.fn<ApiClient["metadata"]>(async () => ({
+            shareId: "work",
+            path: "projects",
+            name: "projects",
+            kind: "directory",
+            etag: 'W/"folder"',
+          })),
+        })}
+        navigation={navigation}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete projects" }),
+    );
+    await confirmMoveToTrash();
+    await waitFor(() => expect(deleteEntry).toHaveBeenCalledOnce());
+    navigation.go({ shareId: "work", path: "other" });
+    finish({
+      shareId: "work",
+      path: "projects",
+      outcome: "success",
+      trashId: "trash-1",
+    });
+    expect(await screen.findByText("Moved projects to Trash.")).toBeVisible();
+    expect(navigation.current()).toEqual({ shareId: "work", path: "other" });
+  });
+
   it("shows a refused folder archive as a toast and stays on the page", async () => {
     const click = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
