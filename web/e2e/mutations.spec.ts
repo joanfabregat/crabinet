@@ -611,7 +611,7 @@ test.describe("writable share operations", () => {
     expect(readOnlyLeak.status()).toBe(404);
   });
 
-  test("keeps minimized uploads at their original destination and exposes file links", async ({
+  test("keeps minimized uploads at their original destination and exposes file actions", async ({
     page,
   }) => {
     await openSignedIn(page, "/writable", "writer");
@@ -695,21 +695,21 @@ test.describe("writable share operations", () => {
         configurable: true,
         value: {
           writeText: async (value: string) => {
-            (window as unknown as { copiedLink: string }).copiedLink = value;
+            (window as unknown as { copiedPath: string }).copiedPath = value;
           },
         },
       }),
     );
     await uploads
-      .getByRole("button", { name: "Copy link for queue-0.txt" })
+      .getByRole("button", { name: "Copy full path for queue-0.txt" })
       .click();
     await expect
       .poll(() =>
         page.evaluate(
-          () => (window as unknown as { copiedLink: string }).copiedLink,
+          () => (window as unknown as { copiedPath: string }).copiedPath,
         ),
       )
-      .toBe(new URL("/writable/queue-0.txt", page.url()).href);
+      .toBe("writable/queue-0.txt");
     const audit = await new AxeBuilder({ page }).analyze();
     expect(
       audit.violations.filter(
@@ -734,7 +734,7 @@ test.describe("writable share operations", () => {
     expect(wrongFolder.status()).toBe(404);
   });
 
-  test("wraps long uploaded filenames inside copy-link tooltips", async ({
+  test("wraps long uploaded filenames inside copy-path tooltips", async ({
     page,
   }) => {
     await openSignedIn(page, "/writable", "writer");
@@ -743,7 +743,9 @@ test.describe("writable share operations", () => {
       { name, mimeType: "application/json", contents: "{}" },
     ]);
     const uploads = page.getByRole("dialog", { name: "Uploads", exact: true });
-    const copy = uploads.getByRole("button", { name: `Copy link for ${name}` });
+    const copy = uploads.getByRole("button", {
+      name: `Copy full path for ${name}`,
+    });
     await expect(copy).toBeVisible();
 
     for (const width of [1440, 390, 320]) {
@@ -754,7 +756,7 @@ test.describe("writable share operations", () => {
         else await copy.focus();
         const tooltip = page.getByRole("tooltip");
         await expect(tooltip).toBeVisible();
-        await expect(tooltip).toHaveText(`Copy link for ${name}`);
+        await expect(tooltip).toHaveText(`Copy full path for ${name}`);
         const bounds = await tooltip.evaluate((element) => {
           const box = element.getBoundingClientRect();
           const range = document.createRange();

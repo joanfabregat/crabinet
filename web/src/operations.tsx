@@ -2011,13 +2011,10 @@ export function UploadQueue({
                       <span>Open</span>
                     </a>
                     <CopyPathButton
-                      value={new URL(url, window.location.origin).href}
+                      value={`${job.shareId}/${joinPath(job.directory, job.file.name)}`}
                       className="upload-action upload-copy"
                       size={14}
-                      label={`Copy link for ${job.file.name}`}
-                      copiedMessage={`Link copied for ${job.file.name}.`}
-                      fallbackTitle="Copy file link"
-                      fallbackLabel="Select and copy this file link"
+                      label={`Copy full path for ${job.file.name}`}
                     />
                   </>
                 )}
