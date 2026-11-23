@@ -2291,6 +2291,7 @@ pub(crate) fn classify(path: &VirtualPath) -> (PreviewKind, Option<&'static str>
         Some("md" | "markdown" | "mdown" | "mkdn") => {
             (PreviewKind::MarkdownSource, Some("markdown"))
         }
+        Some("mmd" | "mermaid") => (PreviewKind::Code, Some("mermaid")),
         Some(extension) => match code_language(extension) {
             Some(language) => (PreviewKind::Code, Some(language)),
             None => (PreviewKind::Text, None),
@@ -3176,6 +3177,12 @@ mod tests {
         let unknown = VirtualPath::parse("payload.evil-language").unwrap();
         assert_eq!(classify(&rust), (PreviewKind::Code, Some("rust")));
         assert_eq!(classify(&unknown), (PreviewKind::Text, None));
+        for name in ["diagram.mmd", "diagram.mermaid", "diagram.MMD"] {
+            assert_eq!(
+                classify(&VirtualPath::parse(name).unwrap()),
+                (PreviewKind::Code, Some("mermaid"))
+            );
+        }
     }
 
     #[test]

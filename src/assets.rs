@@ -27,6 +27,8 @@ mod embedded {
 }
 
 const INDEX: &str = "index.html";
+const MERMAID_RENDERER: &str = "mermaid-renderer.html";
+const MERMAID_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
 
 pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
     if uri.path().starts_with("/api/") || uri.path().starts_with("/health/") {
@@ -54,12 +56,25 @@ pub async fn serve(OriginalUri(uri): OriginalUri) -> Response {
     let mime = mime_guess::from_path(asset_path).first_or_octet_stream();
     let cache = cache_control(asset_path);
 
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime.as_ref())
         .header(header::CACHE_CONTROL, cache)
-        .header(header::CONTENT_SECURITY_POLICY, content_security_policy())
-        .header("x-content-type-options", "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            if asset_path == MERMAID_RENDERER {
+                HeaderValue::from_static(MERMAID_CSP)
+            } else {
+                content_security_policy()
+            },
+        )
+        .header("x-content-type-options", "nosniff");
+    // Only public build artifacts get CORS. The opaque Mermaid frame needs
+    // these headers for module imports; user files and APIs never get them.
+    if asset_path.starts_with("assets/") && asset_path.ends_with(".js") {
+        builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    }
+    builder
         .body(Body::from(file.data.into_owned()))
         .unwrap_or_else(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal service error").into_response()
@@ -102,6 +117,41 @@ pub fn content_security_policy() -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mermaid_renderer_is_opaque_and_network_dark() {
+        let response = serve(OriginalUri("/mermaid-renderer.html".parse().unwrap())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_SECURITY_POLICY],
+            MERMAID_CSP
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        assert!(!MERMAID_CSP.contains("allow-same-origin"));
+        assert!(include_str!("../web/src/mermaid-policy.ts").contains(MERMAID_CSP));
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+
+        let script = WebAssets::iter()
+            .find(|path| path.starts_with("assets/") && path.ends_with(".js"))
+            .expect("built frontend scripts");
+        let response = serve(OriginalUri(format!("/{script}").parse().unwrap())).await;
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let response = serve(OriginalUri("/api/v1/session".parse().unwrap())).await;
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+        let response = serve(OriginalUri("/".parse().unwrap())).await;
+        assert_eq!(
+            response.headers()[header::CONTENT_SECURITY_POLICY],
+            content_security_policy()
+        );
+    }
 
     #[test]
     fn csp_disables_objects_and_embedding() {

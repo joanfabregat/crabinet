@@ -262,6 +262,30 @@ describe("secure file previews", () => {
     expect(navigation.current()).toEqual({ shareId: "docs", path: "" });
   });
 
+  it("offers diagram and source tabs for standalone Mermaid previews", async () => {
+    const source = "flowchart LR\nA --> B";
+    render(
+      <App
+        api={fakeApi({
+          preview: vi.fn(async () =>
+            previewDocument(source, { kind: "code", language: "mermaid" }),
+          ),
+        })}
+        navigation={new MemoryNavigation()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("link", { name: "code.rs" }));
+    expect(
+      await screen.findByRole("tab", { name: "Diagram", exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelector('iframe[title="Mermaid diagram"]'),
+    ).toHaveAttribute("sandbox", "allow-scripts");
+    fireEvent.click(screen.getByRole("tab", { name: "Source", exact: true }));
+    expect(screen.getByLabelText("Mermaid source").textContent).toBe(source);
+    expect(document.querySelector("iframe")).toBeNull();
+  });
+
   it("renders hostile code as text, supports wrapping, and never writes storage", async () => {
     const source =
       '<img src=x onerror="alert(1)"><script>localStorage.pwned=1</script>';

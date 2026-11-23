@@ -220,7 +220,7 @@ jobs:
           package="release/crabinet-linux-${ARCH}"
           mkdir -p "${package}"
           install -m 0555 "${binary}" "${package}/crabinet"
-          install -m 0444 README.md SECURITY.md CONTRIBUTING.md LICENSE THIRD_PARTY_LICENSES.md config.example.toml "${package}/"
+          install -m 0444 README.md SECURITY.md CONTRIBUTING.md LICENSE THIRD_PARTY_LICENSES.md MERMAID_LICENSES.md config.example.toml "${package}/"
           # README and the docs link each other, the files above, and their
           # images by relative paths, so every page reads offline.
           mkdir -p "${package}/docs/images"
@@ -326,7 +326,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p "image-context/release/crabinet-linux-${ARCH}" image-output
-          cp Containerfile LICENSE THIRD_PARTY_LICENSES.md image-context/
+          cp Containerfile LICENSE THIRD_PARTY_LICENSES.md MERMAID_LICENSES.md image-context/
           cp "release/crabinet-linux-${ARCH}/crabinet" "image-context/release/crabinet-linux-${ARCH}/crabinet"
       - name: Build exact OCI archive
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

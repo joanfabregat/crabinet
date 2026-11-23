@@ -606,6 +606,22 @@ describe("API client", () => {
     );
   });
 
+  it("accepts a standalone Mermaid source preview", async () => {
+    const source = "flowchart LR\nA --> B";
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      Response.json({
+        kind: "code",
+        source,
+        language: "mermaid",
+        size: source.length,
+        truncated: false,
+      }),
+    );
+    await expect(
+      createApiClient({ fetch }).preview("docs", "diagram.mmd"),
+    ).resolves.toMatchObject({ kind: "code", source, language: "mermaid" });
+  });
+
   it("accepts the head of a large text file with its shown size and lines", async () => {
     const source = "line\r\n".repeat(1000);
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(

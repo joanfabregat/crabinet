@@ -1127,6 +1127,7 @@ const previewLanguages = new Set([
   "kotlin",
   "lua",
   "markdown",
+  "mermaid",
   "php",
   "python",
   "ruby",

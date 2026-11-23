@@ -27,6 +27,10 @@ Writable share grants include changing ordinary Unix permission bits on entries 
 
 Configuration and mounted share roots are operator-trusted at startup. The OIDC provider is trusted to assert verified email addresses and subjects for the configured client; Crabinet authenticates it by HTTPS against the public web PKI roots plus, only if the operator sets `auth.oidc.ca_file`, the CA certificates in that file. Reverse proxies listed in `server.trusted_proxies` are trusted only to report the connecting client's address, and only for login rate limiting; forwarding headers from any other peer are ignored. Filenames, paths below a share, file contents, HTTP input, cookies, multipart metadata, and authenticated non-administrator users are untrusted.
 
+### Mermaid rendering boundary
+
+Mermaid source is untrusted program input to the bundled diagram renderer, which runs only in `mermaid-renderer.html` with a response CSP sandbox and iframe sandbox permitting scripts but denying same-origin privileges. This is a dedicated exception for trusted rendering code, not an extension of the uploaded HTML preview permissions. The opaque frame cannot access sessions or its parent and cannot make network requests except importing public application JavaScript assets. Strict Mermaid settings, disabled links and strict label sanitization, per-frame configuration, input/edge/count bounds, lazy loading, and an asynchronous failure deadline reduce exposure to parser and layout bugs. Synchronous browser work is bounded by input limits rather than a preemptive CPU timeout. Only status and capped height values return to the parent, with source-window, opaque-origin, and request-ID checks; generated markup never enters the application DOM. See [preview security](previews.md#mermaid-diagrams) for the exact policy. Uploaded HTML, Markdown HTML, and SVG retain their existing permissions.
+
 ## Attacker classes
 
 - An unauthenticated remote attacker attempting credential attacks, resource exhaustion, CSRF, or parser abuse.

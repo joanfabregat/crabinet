@@ -432,7 +432,7 @@ jobs:
             exit 1
           fi
           mkdir -p "image-context/release/crabinet-linux-${ARCH}" image-output
-          cp Containerfile LICENSE THIRD_PARTY_LICENSES.md image-context/
+          cp Containerfile LICENSE THIRD_PARTY_LICENSES.md MERMAID_LICENSES.md image-context/
           install -m 0555 "${binary}" "image-context/release/crabinet-linux-${ARCH}/crabinet"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

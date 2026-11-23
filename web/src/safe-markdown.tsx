@@ -10,6 +10,8 @@ import { type ComponentChildren, type JSX, h } from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { HighlightedCode, highlightLanguage } from "./highlighted-code";
 import type { AlertKind } from "./markdown-parser";
+import { MermaidDiagram } from "./mermaid-diagram";
+import { MAX_MERMAID_DIAGRAMS } from "./mermaid-policy";
 
 /**
  * GitHub Flavored Markdown preview.
@@ -220,13 +222,24 @@ const ALIGNABLE = new Set([
 const ALIGNMENTS = new Set(["left", "right", "center", "justify"]);
 const LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
-function toElements(parent: Node, depth: number): ComponentChildren[] {
+type RenderBudget = { diagrams: number };
+
+function toElements(
+  parent: Node,
+  depth: number,
+  budget: RenderBudget = { diagrams: 0 },
+): ComponentChildren[] {
   return Array.from(parent.childNodes, (node, index) =>
-    toElement(node, depth, index),
+    toElement(node, depth, index, budget),
   );
 }
 
-function toElement(node: Node, depth: number, key: number): ComponentChildren {
+function toElement(
+  node: Node,
+  depth: number,
+  key: number,
+  budget: RenderBudget,
+): ComponentChildren {
   if (node.nodeType === Node.TEXT_NODE) return (node as Text).data;
   if (node.nodeType !== Node.ELEMENT_NODE) return null;
   const element = node as Element;
@@ -235,12 +248,12 @@ function toElement(node: Node, depth: number, key: number): ComponentChildren {
   if (DROPPED.has(tag)) return null;
   // Beyond this depth, raw HTML nesting is flattened to its text.
   if (depth >= MAX_DEPTH) return element.textContent;
-  const children = () => toElements(element, depth + 1);
+  const children = () => toElements(element, depth + 1, budget);
 
   if (tag === "a") return link(element, children(), key);
   if (tag === "img") return imagePlaceholder(element, key);
   if (tag === "input") return checkbox(element, key);
-  if (tag === "pre") return codeBlock(element, children(), key);
+  if (tag === "pre") return codeBlock(element, children(), key, budget);
   if (tag === "blockquote") {
     const alert = element.getAttribute("data-alert");
     if (isAlertKind(alert)) return alertBlock(alert, children(), key);
@@ -367,7 +380,12 @@ function checkbox(element: Element, key: number) {
   );
 }
 
-function codeBlock(element: Element, children: ComponentChildren, key: number) {
+function codeBlock(
+  element: Element,
+  children: ComponentChildren,
+  key: number,
+  budget: RenderBudget,
+) {
   const code =
     element.children.length === 1 &&
     element.firstElementChild?.localName === "code"
@@ -382,6 +400,26 @@ function codeBlock(element: Element, children: ComponentChildren, key: number) {
   }
   const source = (code.textContent ?? "").replace(/\n$/, "");
   const info = /(?:^|\s)language-(\S+)/.exec(code.getAttribute("class") ?? "");
+  if (info?.[1]?.toLowerCase() === "mermaid") {
+    const allowed = budget.diagrams++ < MAX_MERMAID_DIAGRAMS;
+    return (
+      <div key={key} class="markdown-mermaid">
+        {allowed ? (
+          <MermaidDiagram source={source} />
+        ) : (
+          <p role="status">
+            Only the first {MAX_MERMAID_DIAGRAMS} diagrams are rendered.
+          </p>
+        )}
+        <details>
+          <summary>Diagram source</summary>
+          <pre class="markdown-code" tabIndex={0} aria-label="Mermaid source">
+            <code>{source}</code>
+          </pre>
+        </details>
+      </div>
+    );
+  }
   const language = info ? highlightLanguage(info[1]!) : undefined;
   if (language) {
     return (

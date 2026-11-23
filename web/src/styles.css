@@ -3982,3 +3982,23 @@ html.preview-fullscreen-open body {
     transition: none;
   }
 }
+.mermaid-diagram {
+  min-width: 0;
+  margin: 1rem 0;
+}
+
+.mermaid-diagram iframe {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.markdown-mermaid details {
+  margin: 0.5rem 0 1rem;
+}
+
+.markdown-mermaid summary {
+  cursor: pointer;
+}
