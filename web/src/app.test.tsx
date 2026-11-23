@@ -3278,16 +3278,18 @@ describe("writable file operations", () => {
     expect(open).toHaveAttribute("target", "_blank");
     expect(open).toHaveAttribute("rel", "noopener noreferrer");
     fireEvent.click(
-      screen.getByRole("button", { name: "Copy link for Café # notes.txt" }),
+      screen.getByRole("button", {
+        name: "Copy full path for Café # notes.txt",
+      }),
     );
-    const copy = await screen.findByRole("dialog", { name: "Copy file link" });
+    const copy = await screen.findByRole("dialog", { name: "Copy full path" });
     expect(within(copy).getByRole("textbox")).toHaveValue(
-      `${window.location.origin}/work/projects/Caf%C3%A9%20%23%20notes.txt`,
+      "work/projects/Café # notes.txt",
     );
     fireEvent.keyDown(within(copy).getByRole("textbox"), { key: "Escape" });
     await waitFor(() =>
       expect(
-        screen.queryByRole("dialog", { name: "Copy file link" }),
+        screen.queryByRole("dialog", { name: "Copy full path" }),
       ).not.toBeInTheDocument(),
     );
     expect(screen.getByRole("dialog", { name: "Uploads" })).toBeVisible();
