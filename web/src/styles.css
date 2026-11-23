@@ -2067,16 +2067,19 @@ html.preview-fullscreen-open body {
 }
 
 /* Set when the labelled buttons would not fit on one line. Icons alone sit
-   closer, so a writer's five fit one row of a 300px-wide phone. */
+   closer, so all six folder actions fit a 300px-wide phone. */
 .directory-heading-actions.is-compact {
-  gap: 0.4rem;
+  gap: 0.25rem;
+}
+
+.directory-heading-actions.is-compact > * {
+  min-width: 2.25rem;
+  width: 2.25rem;
 }
 
 .directory-heading-actions.is-compact .toolbar-button {
   min-height: 2.35rem;
-  min-width: 2.35rem;
   padding: 0;
-  width: 2.35rem;
 }
 
 /* Still the accessible name, only not drawn. */
@@ -2090,12 +2093,10 @@ html.preview-fullscreen-open body {
   width: 1px;
 }
 
-/* Matches the copy button's touch size. */
+/* Keep a 44px-tall touch target without widening the six-action row. */
 @media (pointer: coarse) {
   .directory-heading-actions.is-compact .toolbar-button {
     min-height: 2.75rem;
-    min-width: 2.75rem;
-    width: 2.75rem;
   }
 }
 
