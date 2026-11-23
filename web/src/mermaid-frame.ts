@@ -32,6 +32,11 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
   )
     return;
   started = true;
+  document.body.style.margin = "0";
+  document.body.style.padding = "8px";
+  document.body.style.boxSizing = "border-box";
+  document.documentElement.style.colorScheme =
+    data.dark === true ? "dark" : "light";
   const reply = (ok: boolean, height = 200) =>
     window.parent.postMessage(
       { type: "crabinet-mermaid-result", id: data.id, ok, height },
@@ -75,13 +80,41 @@ window.addEventListener("message", async (event: MessageEvent<unknown>) => {
       link.removeAttribute("target");
       link.setAttribute("aria-disabled", "true");
     }
-    reply(
-      true,
-      Math.min(
-        MAX_MERMAID_HEIGHT,
-        Math.max(120, Math.ceil(container.getBoundingClientRect().height) + 24),
-      ),
-    );
+    const svg = container.querySelector("svg");
+    if (!svg) throw new Error("missing diagram");
+    // Mermaid can emit percentage heights, which size against the frame's
+    // old viewport instead of the diagram's aspect ratio. Use its intrinsic
+    // viewBox and available width, with no viewport-height dependency.
+    svg.removeAttribute("height");
+    svg.style.display = "block";
+    svg.style.width = "100%";
+    svg.style.height = "auto";
+    const naturalWidth = svg.viewBox.baseVal.width;
+    if (Number.isFinite(naturalWidth) && naturalWidth > 0)
+      svg.style.maxWidth = `${naturalWidth}px`;
+
+    let previousHeight = 0;
+    const reportSize = () => {
+      const height = Math.max(
+        120,
+        Math.ceil(document.body.getBoundingClientRect().height),
+      );
+      if (!Number.isFinite(height) || height > MAX_MERMAID_HEIGHT) {
+        reply(false);
+        observer.disconnect();
+        return;
+      }
+      if (height !== previousHeight) {
+        previousHeight = height;
+        reply(true, height);
+      }
+    };
+    const observer = new ResizeObserver(reportSize);
+    observer.observe(container);
+    reportSize();
+    // Font/layout completion and preview/window width changes can all change
+    // the rendered height after the first result has reached the parent.
+    void document.fonts.ready.then(reportSize);
   } catch {
     container.replaceChildren();
     reply(false);

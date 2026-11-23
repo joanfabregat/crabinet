@@ -2,6 +2,60 @@ import { expect, test } from "@playwright/test";
 
 import { openSignedIn } from "./helpers";
 
+test("sizes tall diagrams to their content when expanding and resizing the preview", async ({
+  page,
+}) => {
+  const graph =
+    "flowchart TB\n" +
+    Array.from(
+      { length: 30 },
+      (_, index) =>
+        `N${index}[Stage ${index}: validate the example document and prepare the next pipeline step]${index ? `\nN${index - 1} --> N${index}` : ""}`,
+    ).join("\n");
+  const source = `# Example pipeline\n\n\`\`\`mermaid\n${graph}\n\`\`\`\n\nEnd of document.`;
+  await page.route("**/preview?path=diagrams.md", (route) =>
+    route.fulfill({
+      json: {
+        kind: "markdown_source",
+        language: "markdown",
+        source,
+        size: source.length,
+        truncated: false,
+      },
+    }),
+  );
+  await openSignedIn(page, "/read-only/diagrams.md");
+  const element = page.locator('iframe[title="Mermaid diagram"]');
+  const frame = element.contentFrame();
+  await expect(frame.locator("svg")).toBeVisible();
+  const fits = async () =>
+    frame.locator("svg").evaluate((svg) => {
+      const rect = svg.getBoundingClientRect();
+      const viewBox = (svg as SVGSVGElement).viewBox.baseVal;
+      return (
+        Math.abs(rect.height - (rect.width * viewBox.height) / viewBox.width) <
+          2 &&
+        document.documentElement.scrollHeight <= window.innerHeight + 1 &&
+        rect.bottom <= window.innerHeight + 1
+      );
+    });
+  await expect.poll(fits).toBe(true);
+  await page.getByRole("button", { name: "Expand preview" }).click();
+  await expect.poll(fits).toBe(true);
+  await expect
+    .poll(async () => (await element.boundingBox())!.height)
+    .toBeGreaterThan(1000);
+  for (const width of [800, 390, 1440]) {
+    await page.setViewportSize({ width, height: 960 });
+    await expect.poll(fits).toBe(true);
+  }
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = "dark";
+  });
+  await expect(frame.locator("html")).toHaveCSS("color-scheme", "dark");
+  await expect.poll(fits).toBe(true);
+});
+
 for (const [name, text] of [
   ["diagram.mmd", "Copy path"],
   ["sequence.mermaid", "File contents"],
