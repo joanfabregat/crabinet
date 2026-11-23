@@ -6,4 +6,6 @@ export const MERMAID_FRAME_CSP =
 
 export const MAX_MERMAID_CHARACTERS = 32_000;
 export const MAX_MERMAID_DIAGRAMS = 16;
-export const MAX_MERMAID_HEIGHT = 1000;
+// Bound layout allocation, rather than cropping ordinary diagrams into an
+// inner scroll area. A diagram exceeding this bound falls back to source.
+export const MAX_MERMAID_HEIGHT = 100_000;

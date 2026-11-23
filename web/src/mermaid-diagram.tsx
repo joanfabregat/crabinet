@@ -78,9 +78,11 @@ function DiagramFrame({ source, dark }: { source: string; dark: boolean }) {
       if (
         data.ok === true &&
         typeof data.height === "number" &&
-        Number.isFinite(data.height)
+        Number.isFinite(data.height) &&
+        data.height > 0 &&
+        data.height <= MAX_MERMAID_HEIGHT
       ) {
-        setHeight(Math.min(MAX_MERMAID_HEIGHT, Math.max(120, data.height)));
+        setHeight(Math.max(120, Math.ceil(data.height)));
         setStatus("ready");
       } else setStatus("failed");
     };
