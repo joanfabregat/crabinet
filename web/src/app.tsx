@@ -1840,6 +1840,16 @@ function DirectoryBrowser({
       });
     } else if (
       completedOperation.kind === "delete" &&
+      navigation.current().shareId === share.id &&
+      navigation.current().path === completedOperation.path
+    ) {
+      navigation.go(
+        { shareId: share.id, path: parentPath(completedOperation.path) },
+        { replace: true },
+      );
+      requestAnimationFrame(() => headingRef.current?.focus());
+    } else if (
+      completedOperation.kind === "delete" &&
       activePreview.current === completedOperation.path
     ) {
       navigation.go({ shareId: share.id, path: route.path }, { replace: true });
@@ -2221,6 +2231,23 @@ function DirectoryBrowser({
                       value={`${share.id}${route.path ? `/${route.path}` : ""}`}
                       label={`Copy full path for ${crumbs.at(-1)?.name ?? share.name}`}
                     />
+                    {writable && route.path !== "" && (
+                      <TooltipButton
+                        className="icon-button-danger"
+                        label={`Delete ${crumbs.at(-1)!.name}`}
+                        onClick={() =>
+                          setPendingDelete({
+                            entry: {
+                              name: crumbs.at(-1)!.name,
+                              kind: "directory",
+                            },
+                            path: route.path,
+                          })
+                        }
+                      >
+                        <Trash2 size={19} aria-hidden="true" />
+                      </TooltipButton>
+                    )}
                   </div>
                 </div>
 
