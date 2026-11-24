@@ -321,6 +321,7 @@ export function SelectionBar({
   onToggleAll,
   onDownload,
   onCompress,
+  canCompress = true,
   onDelete,
   onClear,
 }: {
@@ -331,6 +332,7 @@ export function SelectionBar({
   onToggleAll: () => void;
   onDownload: () => void;
   onCompress?: () => void;
+  canCompress?: boolean;
   onDelete: () => void;
   onClear: () => void;
 }) {
@@ -358,7 +360,7 @@ export function SelectionBar({
         <FolderDown size={18} aria-hidden="true" />
         <span class="toolbar-label">Download as ZIP</span>
       </button>
-      {writable && (
+      {writable && canCompress && (
         <button
           class="button button-secondary toolbar-button"
           type="button"

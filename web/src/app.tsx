@@ -12,6 +12,8 @@ import {
   startAuthentication,
 } from "@simplewebauthn/browser";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   ChevronDown,
   Download,
@@ -65,6 +67,8 @@ import {
   type UserPreferences,
 } from "./api";
 import {
+  archiveFormat,
+  canCompressEntry,
   EntryActionButtons,
   Modal,
   OperationDialog,
@@ -1874,7 +1878,7 @@ function DirectoryBrowser({
     setRefreshKey((value) => value + 1);
   };
 
-  const operateOnPreview = (kind: "edit" | "rename" | "move" | "delete") => {
+  const operateOnPreview = (kind: PreviewOperation) => {
     const previewPath = route.previewPath;
     if (!previewPath) return;
     previewOperationController.current?.abort();
@@ -2296,6 +2300,10 @@ function DirectoryBrowser({
                     writable={writable}
                     busy={archive.checking || bulkProgress !== undefined}
                     onToggleAll={toggleAllSelected}
+                    canCompress={
+                      selectedEntries.length !== 1 ||
+                      canCompressEntry(selectedEntries[0]!)
+                    }
                     onCompress={() => {
                       const first = selectedEntries[0];
                       if (!first) return;
@@ -2633,6 +2641,9 @@ function EntryList({
   );
 }
 
+type PreviewOperation =
+  "edit" | "rename" | "move" | "delete" | "compress" | "extract";
+
 interface PreviewPanelProps {
   api: ApiClient;
   path: string;
@@ -2646,7 +2657,7 @@ interface PreviewPanelProps {
     mode: string,
     signal: AbortSignal,
   ) => Promise<void>;
-  onOperation: (kind: "edit" | "rename" | "move" | "delete") => void;
+  onOperation: (kind: PreviewOperation) => void;
   operationError?: string;
   onClose: () => void;
   /** The file is gone: the panel has nothing left to show or act on. */
@@ -2893,6 +2904,25 @@ function PreviewPanel({
           />
           {writable && (
             <>
+              {canCompressEntry({
+                name: filename,
+                kind: metadata?.kind ?? "file",
+              }) && (
+                <TooltipButton
+                  onClick={() => onOperation("compress")}
+                  label={`Compress ${filename}`}
+                >
+                  <Archive size={19} aria-hidden="true" />
+                </TooltipButton>
+              )}
+              {metadata?.kind === "file" && archiveFormat(filename) && (
+                <TooltipButton
+                  onClick={() => onOperation("extract")}
+                  label={`Extract ${filename}`}
+                >
+                  <ArchiveRestore size={19} aria-hidden="true" />
+                </TooltipButton>
+              )}
               <TooltipButton
                 onClick={() => onOperation("rename")}
                 label={`Rename ${filename}`}

@@ -151,6 +151,14 @@ function downloadLabel(entry: DirectoryEntry): string {
     : `Download ${entry.name}`;
 }
 
+export function canCompressEntry(
+  entry: Pick<DirectoryEntry, "kind" | "name">,
+): boolean {
+  return (
+    entry.kind === "directory" || !entry.name.toLowerCase().endsWith(".zip")
+  );
+}
+
 export function EntryActionButtons({
   entry,
   path,
@@ -193,15 +201,17 @@ export function EntryActionButtons({
         />
         {writable && (
           <>
-            <button
-              class="entry-action entry-action-secondary tooltip-action"
-              type="button"
-              aria-label={`Compress ${entry.name}`}
-              data-tooltip="Compress…"
-              onClick={() => onOperation({ kind: "compress", entry, path })}
-            >
-              <Archive size={18} aria-hidden="true" />
-            </button>
+            {canCompressEntry(entry) && (
+              <button
+                class="entry-action entry-action-secondary tooltip-action"
+                type="button"
+                aria-label={`Compress ${entry.name}`}
+                data-tooltip="Compress…"
+                onClick={() => onOperation({ kind: "compress", entry, path })}
+              >
+                <Archive size={18} aria-hidden="true" />
+              </button>
+            )}
             {entry.kind === "file" && archiveFormat(entry.name) && (
               <button
                 class="entry-action entry-action-secondary tooltip-action"
@@ -354,7 +364,9 @@ function EntryActionMenu({
           const count =
             2 +
             (writable
-              ? 4 + (entry.kind === "file" && archiveFormat(entry.name) ? 1 : 0)
+              ? 3 +
+                Number(canCompressEntry(entry)) +
+                (entry.kind === "file" && archiveFormat(entry.name) ? 1 : 0)
               : 0);
           const rem =
             Number.parseFloat(
@@ -403,14 +415,16 @@ function EntryActionMenu({
           />
           {writable && (
             <>
-              <button
-                class="entry-menu-item"
-                type="button"
-                role="menuitem"
-                onClick={() => choose({ kind: "compress", entry, path })}
-              >
-                <Archive size={17} aria-hidden="true" /> Compress…
-              </button>
+              {canCompressEntry(entry) && (
+                <button
+                  class="entry-menu-item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => choose({ kind: "compress", entry, path })}
+                >
+                  <Archive size={17} aria-hidden="true" /> Compress…
+                </button>
+              )}
               {entry.kind === "file" && archiveFormat(entry.name) && (
                 <button
                   class="entry-menu-item"

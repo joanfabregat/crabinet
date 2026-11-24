@@ -267,6 +267,61 @@ describe("OperationDialog", () => {
 describe("row action menu", () => {
   const entry = { name: "notes.txt", kind: "file" as const, size: 5 };
 
+  it.each(["backup.zip", "BACKUP.ZIP"])(
+    "offers extraction without compression for %s",
+    (name) => {
+      const onOperation = vi.fn();
+      render(
+        <EntryActionButtons
+          entry={{ ...entry, name }}
+          path={name}
+          copyPath={`work/${name}`}
+          download={{ href: "/download" }}
+          writable
+          onOperation={onOperation}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: `Compress ${name}` }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("button", { name: `Extract ${name}` }),
+      ).toBeVisible();
+      fireEvent.click(
+        screen.getByRole("button", { name: `More actions for ${name}` }),
+      );
+      const menu = screen.getByRole("menu");
+      expect(
+        within(menu).queryByRole("menuitem", { name: "Compress…" }),
+      ).toBeNull();
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Extract…" }));
+      expect(onOperation).toHaveBeenCalledWith({
+        kind: "extract",
+        entry: { ...entry, name },
+        path: name,
+      });
+    },
+  );
+
+  it("allows compressing a directory whose name ends in .zip", () => {
+    render(
+      <EntryActionButtons
+        entry={{ name: "folder.zip", kind: "directory" }}
+        path="folder.zip"
+        copyPath="work/folder.zip"
+        download={{ href: "/download" }}
+        writable
+        onOperation={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Compress folder.zip" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Extract folder.zip" }),
+    ).toBeNull();
+  });
+
   it("lists the row's actions and closes with Escape back on its button", async () => {
     const onOperation = vi.fn();
     render(
