@@ -1810,6 +1810,89 @@ describe("writable file operations", () => {
     ).toBeVisible();
   });
 
+  it.each([
+    ["notes.txt", "compress", "Compress"],
+    ["BACKUP.ZIP", "extract", "Extract archive"],
+    ["backup.tar.gz", "extract", "Extract archive"],
+  ] as const)(
+    "opens %s archive actions from a deep-linked preview",
+    async (name, action, title) => {
+      const navigation = new MemoryNavigation({
+        shareId: "work",
+        path: "projects",
+        previewPath: `projects/${name}`,
+      });
+      const localArchive = vi.fn<ApiClient["localArchive"]>(async () => ({
+        shareId: "work",
+        path: "projects/result",
+        outcome: "success",
+      }));
+      const api = fakeApi({
+        directory: vi.fn(async () => ({ ...writablePage, entries: [] })),
+        localArchive,
+      });
+      render(<App api={api} navigation={navigation} />);
+      const preview = await screen.findByRole("complementary", { name });
+      if (name.endsWith(".ZIP"))
+        expect(
+          within(preview).queryByRole("button", { name: `Compress ${name}` }),
+        ).toBeNull();
+      fireEvent.click(
+        await within(preview).findByRole("button", {
+          name: `${action === "compress" ? "Compress" : "Extract"} ${name}`,
+        }),
+      );
+      const dialog = await screen.findByRole("dialog", {
+        name: title,
+        exact: true,
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: action === "compress" ? "Compress" : "Extract",
+          exact: true,
+        }),
+      );
+      await waitFor(() =>
+        expect(localArchive).toHaveBeenCalledWith(
+          "work",
+          action,
+          [`projects/${name}`],
+          action === "compress"
+            ? `projects/${name}.zip`
+            : `projects/${name.replace(/\.(zip|tar\.gz)$/i, "")}`,
+          action === "compress"
+            ? "zip"
+            : name.endsWith(".ZIP")
+              ? "zip"
+              : "tar-gz",
+          "csrf-in-memory",
+          expect.any(AbortSignal),
+        ),
+      );
+    },
+  );
+
+  it("hides archive mutations in a read-only preview", async () => {
+    render(
+      <App
+        api={fakeApi()}
+        navigation={
+          new MemoryNavigation({
+            shareId: "read-only",
+            path: "",
+            previewPath: "backup.zip",
+          })
+        }
+      />,
+    );
+    const preview = await screen.findByRole("complementary", {
+      name: "backup.zip",
+    });
+    expect(
+      within(preview).queryByRole("button", { name: /^(Compress|Extract) / }),
+    ).toBeNull();
+  });
+
   it("renames only after fetching a fresh validator", async () => {
     const navigation = writableNavigation();
     navigation.restore({
@@ -4154,6 +4237,29 @@ describe("selecting entries", () => {
     expect(
       screen.queryByRole("toolbar", { name: "Selection actions" }),
     ).toBeNull();
+  });
+
+  it("hides compression for a single selected ZIP and restores it for a group", async () => {
+    renderSelection({
+      directory: vi.fn(async () => ({
+        ...listing,
+        entries: [
+          { name: "backup.ZIP", kind: "file" as const, size: 5 },
+          ...listing.entries,
+        ],
+      })),
+    });
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "Select backup.ZIP" }),
+    );
+    const bar = screen.getByRole("toolbar", { name: "Selection actions" });
+    expect(
+      within(bar).queryByRole("button", { name: "Compress selected items" }),
+    ).toBeNull();
+    fireEvent.click(checkbox("a.txt"));
+    expect(
+      within(bar).getByRole("button", { name: "Compress selected items" }),
+    ).toBeVisible();
   });
 
   it("downloads the selection as one ZIP of its paths", async () => {

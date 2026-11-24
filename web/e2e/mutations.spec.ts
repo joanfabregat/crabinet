@@ -1061,6 +1061,27 @@ test("compresses a folder to ZIP and extracts it on the server", async ({
     "mutation coverage runs once per engine",
   );
   await openSignedIn(page, "/writable", "writer");
+  await directoryListing(page)
+    .getByRole("link", { name: "README.md", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Expand preview" }).click();
+  const expanded = page.getByRole("dialog", { name: "README.md", exact: true });
+  const compress = expanded.getByRole("button", { name: "Compress README.md" });
+  await compress.click();
+  const fileDialog = page.getByRole("dialog", {
+    name: "Compress",
+    exact: true,
+  });
+  await expect(fileDialog.getByLabel("Archive name")).toHaveValue(
+    "README.md.zip",
+  );
+  await page.keyboard.press("Escape");
+  await expect(fileDialog).toHaveCount(0);
+  await expect(compress).toBeFocused();
+  await page.getByRole("button", { name: "Exit expanded preview" }).click();
+  await page
+    .getByRole("button", { name: "Close preview of README.md" })
+    .click();
   await entryAction(page, "Projects", "Compress").click();
   const dialog = page.getByRole("dialog", { name: "Compress", exact: true });
   await expect(dialog.getByRole("combobox")).toHaveCount(0);
@@ -1068,7 +1089,18 @@ test("compresses a folder to ZIP and extracts it on the server", async ({
   await dialog.getByLabel("Archive name").fill(name);
   await dialog.getByRole("button", { name: "Compress", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  await entryAction(page, name, "Extract").click();
+  await expect(
+    directoryListing(page).getByRole("button", {
+      name: `Compress ${name}`,
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await directoryListing(page).getByRole("link", { name, exact: true }).click();
+  const preview = page.getByRole("complementary", { name, exact: true });
+  await expect(
+    preview.getByRole("button", { name: `Compress ${name}` }),
+  ).toHaveCount(0);
+  await preview.getByRole("button", { name: `Extract ${name}` }).click();
   const extracting = page.getByRole("dialog", { name: "Extract archive" });
   await expect(extracting.getByLabel("Folder name")).toHaveValue(
     "e2e-local-zip",
@@ -1079,6 +1111,7 @@ test("compresses a folder to ZIP and extracts it on the server", async ({
     .getByRole("button", { name: "Extract", exact: true })
     .click();
   await expect(extracting).toHaveCount(0);
+  await page.getByRole("button", { name: `Close preview of ${name}` }).click();
   expect(
     await readText(page, "writable", `${destination}/Projects/example.toml`),
   ).toBe(await readText(page, "writable", "Projects/example.toml"));
